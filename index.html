@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+    <meta name="theme-color" content="#1a1a1e" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="description" content="Vault — a markdown notebook backed entirely by your Google Drive. No local note storage." />
+    <link rel="icon" type="image/png" href="%BASE_URL%icon-192.png" />
+    <link rel="apple-touch-icon" href="%BASE_URL%icon-192.png" />
+    <title>Vault</title>
+    <!-- Google Identity Services: OAuth 2.0 token client -->
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <!-- Google API client: used to load the Picker (folder/file selection under drive.file scope) -->
+    <script src="https://apis.google.com/js/api.js" async defer></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
