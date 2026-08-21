@@ -185,6 +185,17 @@ input {
   overflow-y: auto;
 }
 
+.sidebar-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.sidebar-toolbar .search-input {
+  flex: 1;
+  min-width: 0;
+}
+
 .search-input {
   background: var(--bg-2);
   border: 1px solid var(--border);
@@ -196,29 +207,94 @@ input {
 
 .search-input:focus { border-color: var(--accent); }
 
-.file-list {
+.file-tree {
   display: flex;
   flex-direction: column;
   gap: 1px;
 }
 
-.file-item {
+.tree-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.tree-item {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   text-align: left;
-  padding: 6px 8px;
+  padding: 5px 6px;
   border-radius: 6px;
   font-size: 13.5px;
   color: var(--text-1);
+}
+
+.tree-item:hover { background: var(--bg-2); color: var(--text-0); }
+
+.tree-item.active {
+  background: var(--accent-dim);
+  color: var(--accent-soft);
+}
+
+.tree-icon { flex-shrink: 0; font-size: 12px; opacity: 0.85; }
+.tree-caret { flex-shrink: 0; width: 10px; font-size: 10px; color: var(--text-2); }
+
+.tree-label {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.file-item:hover { background: var(--bg-2); color: var(--text-0); }
+.tree-menu-wrap { position: relative; flex-shrink: 0; }
 
-.file-item.active {
-  background: var(--accent-dim);
-  color: var(--accent-soft);
+.tree-menu-btn {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  color: var(--text-2);
+  font-size: 13px;
+  opacity: 0;
 }
+
+.tree-row:hover .tree-menu-btn,
+.tree-menu-wrap:hover .tree-menu-btn,
+.tree-menu-btn:focus { opacity: 1; }
+
+.tree-menu-btn:hover { background: var(--bg-3); color: var(--text-0); }
+
+.tree-menu {
+  position: absolute;
+  top: 24px;
+  right: 4px;
+  z-index: 30;
+  min-width: 132px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.tree-menu button {
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 5px;
+  font-size: 12.5px;
+  color: var(--text-0);
+}
+
+.tree-menu button:hover { background: var(--bg-2); }
+
+.tree-menu button.danger { color: var(--danger); }
+.tree-menu button.danger:hover { background: rgba(226, 85, 90, 0.12); }
 
 .backlinks-panel {
   margin-top: auto;
