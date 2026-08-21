@@ -10,6 +10,11 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
  *   cache for: (a) file metadata/modifiedTime, and (b) the derived wikilink
  *   graph — never for raw note bodies. Clearing IndexedDB never loses data,
  *   because Drive remains the single source of truth.
+ *
+ *   Images follow the same rule: only their metadata (id/name/modifiedTime)
+ *   is cached in IndexedDB. Image bytes are fetched on demand (when actually
+ *   viewed or embedded) and kept only as in-memory blob URLs for the current
+ *   session — never persisted.
  * ==========================================================================*/
 
 // ---------------------------------------------------------------------------
@@ -36,13 +41,88 @@ const DRIVE_UPLOAD_URL = 'https://www.googleapis.com/upload/drive/v3/files';
 
 const DB_NAME = 'vault-cache-db';
 const DB_VERSION = 2;
-const STORE_FILES = 'files'; // { id, name, modifiedTime, parents }  -- metadata only
+const STORE_FILES = 'files'; // { id, name, modifiedTime, parents, mimeType, kind }  -- metadata only
 const STORE_FOLDERS = 'folders'; // { id, name, parents } -- structure only, no content
 const STORE_LINKS = 'links'; // { fileId, links: [{target, alias}], cachedAt } -- graph only
 const STORE_META = 'meta'; // { key, value } -- app settings (vault folder id, etc.)
 
+// How many Drive content requests run in parallel during a sync. Large
+// vaults previously fetched every file's body one request at a time (a full
+// network round-trip per file, strictly serialized) — that was the single
+// biggest cause of "loading a big vault takes forever". Running several
+// requests concurrently cuts wall-clock sync time roughly by this factor,
+// while staying comfortably under Drive's per-user rate limits.
+const FETCH_CONCURRENCY = 8;
+
+// Image files participate in the vault (sidebar, viewing, [[links]]) the
+// same way notes do, but their bytes are only ever fetched on demand
+// (viewing or embedding) — never during a sync — so a vault full of
+// screenshots never adds to sync time.
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp']);
+const IMAGE_MIME_TYPES = [
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+  'image/svg+xml',
+  'image/bmp'
+];
+
+function fileExtension(name) {
+  const m = /\.([a-z0-9]+)$/i.exec(name || '');
+  return m ? m[1].toLowerCase() : '';
+}
+
+function isImageName(name) {
+  return IMAGE_EXTENSIONS.has(fileExtension(name));
+}
+
 // ---------------------------------------------------------------------------
-// IndexedDB — transient cache only. No note bodies ever touch these stores.
+// Concurrency helpers
+// ---------------------------------------------------------------------------
+// Runs `worker` over `items` with at most `limit` in flight at once,
+// preserving each result's original position. A single slow/failing item
+// only occupies one of the `limit` lanes — the rest keep moving. Returns
+// { ok, value } or { ok: false, error } per item (never throws itself).
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function lane() {
+    while (next < items.length) {
+      const i = next++;
+      try {
+        results[i] = { ok: true, value: await worker(items[i], i) };
+      } catch (err) {
+        results[i] = { ok: false, error: err };
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
+  return results;
+}
+
+// Small retry wrapper for transient Drive errors (429 rate limit, 5xx).
+// Running requests concurrently makes hitting these more likely than the
+// old one-at-a-time loop did, so it matters more now than it used to.
+async function withRetry(fn, retries = 2, baseDelayMs = 400) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const status = err?.status;
+      const retriable = status === 429 || (status >= 500 && status < 600);
+      if (!retriable || attempt === retries) throw err;
+      await new Promise((r) => setTimeout(r, baseDelayMs * 2 ** attempt));
+    }
+  }
+  throw lastErr;
+}
+
+// ---------------------------------------------------------------------------
+// IndexedDB — transient cache only. No note or image bodies ever touch
+// these stores.
 // ---------------------------------------------------------------------------
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -106,15 +186,13 @@ async function idbDeleteMany(store, keys) {
 }
 
 // ---------------------------------------------------------------------------
-// RegExp wikilink parsing + backlink graph
+// RegExp wikilink parsing
 // ---------------------------------------------------------------------------
-function normalizeNoteName(name) {
-  return String(name || '').replace(/\.md$/i, '').trim().toLowerCase();
-}
-
-// Matches [[Target]], [[Target#heading]], [[Target|Alias]]
+// Matches [[Target]], [[Target#heading]], [[Target|Alias]], and their
+// embed form ![[Target]] (the leading "!" is accepted but not required —
+// see the smart-linking section below for why image links don't need it).
 function parseWikilinks(content) {
-  const re = /\[\[([^\[\]|#]+)(?:#[^\[\]|]*)?(?:\|([^\[\]]+))?\]\]/g;
+  const re = /!?\[\[([^[\]|#]+)(?:#[^[\]|]*)?(?:\|([^[\]]+))?\]\]/g;
   const links = [];
   let m;
   while ((m = re.exec(content)) !== null) {
@@ -123,20 +201,105 @@ function parseWikilinks(content) {
   return links;
 }
 
-// Builds fileId -> Set(fileId) map of inbound links, resolved by note name.
-function buildBacklinkIndex(fileRecords, linksByFileId) {
-  const nameToId = new Map();
-  fileRecords.forEach((f) => nameToId.set(normalizeNoteName(f.name), f.id));
+// ---------------------------------------------------------------------------
+// Smart link resolution — mirrors how Obsidian resolves [[wikilinks]]:
+//   - A link that's just a name ("Notes") matches by filename anywhere in
+//     the vault, *as long as that name is unique*.
+//   - If two or more files share that name, a bare name is ambiguous —
+//     disambiguation requires the full path from the vault root
+//     ("Projects/Notes").
+//   - Note links omit the .md extension, same as before. Image links always
+//     keep their extension (e.g. [[diagram.png]]) since that's the only way
+//     to tell "diagram.png" and "diagram.svg" apart, and since an image
+//     can't be created/renamed from inside a broken link the way a note can.
+// ---------------------------------------------------------------------------
+function buildLinkIndex(files, folders, rootId) {
+  const folderById = new Map(folders.map((f) => [f.id, f]));
+  const pathCache = new Map();
 
+  function folderPath(folderId) {
+    if (!folderId || folderId === rootId) return '';
+    if (pathCache.has(folderId)) return pathCache.get(folderId);
+    const f = folderById.get(folderId);
+    if (!f) return '';
+    const parentId = (f.parents && f.parents[0]) || rootId;
+    const parentPath = folderPath(parentId);
+    const full = parentPath ? `${parentPath}/${f.name}` : f.name;
+    pathCache.set(folderId, full);
+    return full;
+  }
+
+  const records = files.map((f) => {
+    const parentId = (f.parents && f.parents[0]) || rootId;
+    const dir = folderPath(parentId);
+    const isImage = f.kind === 'image' || isImageName(f.name);
+    const baseName = isImage ? f.name : f.name.replace(/\.md$/i, '');
+    const relativePath = dir ? `${dir}/${baseName}` : baseName;
+    return { ...f, isImage, baseName, relativePath };
+  });
+
+  const byBasenameKey = new Map();
+  const byRelativePath = new Map();
+  records.forEach((r) => {
+    const key = `${r.isImage ? 'img' : 'note'}:${r.baseName.toLowerCase()}`;
+    if (!byBasenameKey.has(key)) byBasenameKey.set(key, []);
+    byBasenameKey.get(key).push(r);
+    byRelativePath.set(r.relativePath.toLowerCase(), r);
+  });
+
+  return { records, byBasenameKey, byRelativePath };
+}
+
+// Resolves the text inside a [[...]] (already stripped of any |alias or
+// #heading) against the current vault. One of:
+//   { status: 'resolved', file }
+//   { status: 'missing', isImage }                  -- no such file (yet)
+//   { status: 'ambiguous', isImage, candidates }      -- name matches 2+ files
+function resolveLinkTarget(rawTarget, linkIndex) {
+  const target = String(rawTarget || '').trim();
+  const isImage = isImageName(target);
+  const cleaned = isImage ? target : target.replace(/\.md$/i, '');
+
+  if (cleaned.includes('/')) {
+    const hit = linkIndex.byRelativePath.get(cleaned.toLowerCase());
+    return hit ? { status: 'resolved', file: hit } : { status: 'missing', isImage };
+  }
+
+  const key = `${isImage ? 'img' : 'note'}:${cleaned.toLowerCase()}`;
+  const matches = linkIndex.byBasenameKey.get(key) || [];
+  if (matches.length === 1) return { status: 'resolved', file: matches[0] };
+  if (matches.length === 0) return { status: 'missing', isImage };
+  return {
+    status: 'ambiguous',
+    isImage,
+    candidates: matches.slice().sort((a, b) => a.relativePath.localeCompare(b.relativePath))
+  };
+}
+
+// The link text to insert when autocomplete (or a "resolve this" action)
+// picks `file` — the bare name if that's unambiguous vault-wide, otherwise
+// the full path from the vault root. This is the other half of the smart
+// linking behavior: it's what keeps typed links short by default.
+function bestLinkTextFor(file, linkIndex) {
+  const key = `${file.isImage ? 'img' : 'note'}:${file.baseName.toLowerCase()}`;
+  const matches = linkIndex.byBasenameKey.get(key) || [];
+  return matches.length <= 1 ? file.baseName : file.relativePath;
+}
+
+// Builds fileId -> Set(fileId) map of inbound links, resolved through the
+// same smart resolver used for click-through and rendering (so backlinks
+// stay consistent with what a link actually resolves to, ambiguous and
+// missing links included/excluded the same way).
+function buildBacklinkIndex(fileRecords, linksByFileId, linkIndex) {
   const backlinks = new Map();
   fileRecords.forEach((f) => backlinks.set(f.id, new Set()));
 
   for (const [sourceId, links] of linksByFileId.entries()) {
     for (const link of links) {
-      const targetId = nameToId.get(normalizeNoteName(link.target));
-      if (targetId && targetId !== sourceId) {
-        if (!backlinks.has(targetId)) backlinks.set(targetId, new Set());
-        backlinks.get(targetId).add(sourceId);
+      const res = resolveLinkTarget(link.target, linkIndex);
+      if (res.status === 'resolved' && res.file.id !== sourceId) {
+        if (!backlinks.has(res.file.id)) backlinks.set(res.file.id, new Set());
+        backlinks.get(res.file.id).add(sourceId);
       }
     }
   }
@@ -161,72 +324,100 @@ function chunkArray(arr, size) {
   return out;
 }
 
+function driveError(res, label) {
+  const err = new Error(`${label} (${res.status})`);
+  err.status = res.status;
+  return err;
+}
+
 // Real vaults are almost always nested (subfolders for daily notes,
 // attachments, etc). Drive's API has no recursive "in ancestors" query, so
-// we BFS the folder tree ourselves, one level at a time, batching parent
-// clauses to keep query strings short. Returns full {id,name,parents}
-// records (not just ids) for the vault's SUBfolders — the root itself is
-// not included, since it's represented separately as the vault folder.
+// we BFS the folder tree ourselves, one level at a time. Different chunks
+// *within* a level are independent queries, so they run concurrently —
+// only the pagination within a single chunk has to stay sequential.
+// Returns full {id,name,parents} records (not just ids) for the vault's
+// SUBfolders — the root itself is not included, since it's represented
+// separately as the vault folder.
 async function driveListFolderTree(token, rootFolderId) {
   const allFolders = [];
   let frontier = [rootFolderId];
   while (frontier.length) {
+    const chunks = chunkArray(frontier, 10);
+    const chunkResults = await Promise.all(
+      chunks.map(async (chunk) => {
+        const parentClauses = chunk.map((id) => `'${id}' in parents`).join(' or ');
+        const q = encodeURIComponent(`(${parentClauses}) and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
+        const fields = encodeURIComponent('files(id,name,parents),nextPageToken');
+        let pageToken = '';
+        const found = [];
+        do {
+          const url = `${DRIVE_FILES_URL}?q=${q}&fields=${fields}&pageSize=1000&${DRIVE_ALL_DRIVES}${
+            pageToken ? `&pageToken=${pageToken}` : ''
+          }`;
+          const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+          if (!res.ok) throw driveError(res, 'Drive folder list failed');
+          const data = await res.json();
+          found.push(...(data.files || []));
+          pageToken = data.nextPageToken || '';
+        } while (pageToken);
+        return found;
+      })
+    );
     const nextFrontier = [];
-    for (const chunk of chunkArray(frontier, 10)) {
-      const parentClauses = chunk.map((id) => `'${id}' in parents`).join(' or ');
-      const q = encodeURIComponent(`(${parentClauses}) and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
-      const fields = encodeURIComponent('files(id,name,parents),nextPageToken');
-      let pageToken = '';
-      do {
-        const url = `${DRIVE_FILES_URL}?q=${q}&fields=${fields}&pageSize=1000&${DRIVE_ALL_DRIVES}${
-          pageToken ? `&pageToken=${pageToken}` : ''
-        }`;
-        const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-        if (!res.ok) throw new Error(`Drive folder list failed (${res.status})`);
-        const data = await res.json();
-        (data.files || []).forEach((f) => {
-          allFolders.push(f);
-          nextFrontier.push(f.id);
-        });
-        pageToken = data.nextPageToken || '';
-      } while (pageToken);
-    }
+    chunkResults.flat().forEach((f) => {
+      allFolders.push(f);
+      nextFrontier.push(f.id);
+    });
     frontier = nextFrontier;
   }
   return allFolders;
 }
 
-// Lists .md files across every folder ID given (batched — Drive queries have
-// a practical length limit, so we chunk the OR'd parent clauses).
-async function driveListMarkdownFilesInFolders(token, folderIds) {
-  let files = [];
-  for (const chunk of chunkArray(folderIds, 10)) {
-    const parentClauses = chunk.map((id) => `'${id}' in parents`).join(' or ');
-    const q = encodeURIComponent(
-      `(${parentClauses}) and trashed = false and (mimeType = 'text/markdown' or mimeType = 'text/plain' or fileExtension = 'md')`
-    );
-    const fields = encodeURIComponent('files(id,name,modifiedTime,parents),nextPageToken');
-    let pageToken = '';
-    do {
-      const url = `${DRIVE_FILES_URL}?q=${q}&fields=${fields}&pageSize=1000&orderBy=name&${DRIVE_ALL_DRIVES}${
-        pageToken ? `&pageToken=${pageToken}` : ''
-      }`;
-      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-      if (!res.ok) throw new Error(`Drive list failed (${res.status})`);
-      const data = await res.json();
-      files = files.concat(data.files || []);
-      pageToken = data.nextPageToken || '';
-    } while (pageToken);
-  }
-  return files;
+// Lists every note (.md) AND image file across the given folder ids in one
+// pass — a single Drive query covers both kinds (rather than two separate
+// listing round-trips), and chunks of folder ids are queried concurrently.
+async function driveListVaultContentInFolders(token, folderIds) {
+  const mimeClauses = [
+    "mimeType = 'text/markdown'",
+    "mimeType = 'text/plain'",
+    "fileExtension = 'md'",
+    ...IMAGE_MIME_TYPES.map((m) => `mimeType = '${m}'`)
+  ].join(' or ');
+
+  const chunks = chunkArray(folderIds, 10);
+  const chunkResults = await Promise.all(
+    chunks.map(async (chunk) => {
+      const parentClauses = chunk.map((id) => `'${id}' in parents`).join(' or ');
+      const q = encodeURIComponent(`(${parentClauses}) and trashed = false and (${mimeClauses})`);
+      const fields = encodeURIComponent('files(id,name,modifiedTime,parents,mimeType,size),nextPageToken');
+      let pageToken = '';
+      const found = [];
+      do {
+        const url = `${DRIVE_FILES_URL}?q=${q}&fields=${fields}&pageSize=1000&orderBy=name&${DRIVE_ALL_DRIVES}${
+          pageToken ? `&pageToken=${pageToken}` : ''
+        }`;
+        const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok) throw driveError(res, 'Drive list failed');
+        const data = await res.json();
+        found.push(...(data.files || []));
+        pageToken = data.nextPageToken || '';
+      } while (pageToken);
+      return found;
+    })
+  );
+
+  return chunkResults.flat().map((f) => ({
+    ...f,
+    kind: isImageName(f.name) || IMAGE_MIME_TYPES.includes(f.mimeType) ? 'image' : 'note'
+  }));
 }
 
-// Returns the full vault contents: every subfolder record, and every .md
-// file across the root + all subfolders.
+// Returns the full vault contents: every subfolder record, and every
+// note/image file across the root + all subfolders.
 async function driveListVaultFiles(token, rootFolderId) {
   const folders = await driveListFolderTree(token, rootFolderId);
   const folderIds = [rootFolderId, ...folders.map((f) => f.id)];
-  const files = await driveListMarkdownFilesInFolders(token, folderIds);
+  const files = await driveListVaultContentInFolders(token, folderIds);
   return { folders, files };
 }
 
@@ -234,8 +425,18 @@ async function driveGetFileContent(token, fileId) {
   const res = await fetch(`${DRIVE_FILES_URL}/${fileId}?alt=media&${DRIVE_ALL_DRIVES}`, {
     headers: { Authorization: `Bearer ${token}` }
   });
-  if (!res.ok) throw new Error(`Drive fetch failed (${res.status})`);
+  if (!res.ok) throw driveError(res, 'Drive fetch failed');
   return res.text();
+}
+
+// Same request as above, but returns a Blob — used for images, which are
+// fetched on demand only (see the constant comment on FETCH_CONCURRENCY).
+async function driveGetFileBlob(token, fileId) {
+  const res = await fetch(`${DRIVE_FILES_URL}/${fileId}?alt=media&${DRIVE_ALL_DRIVES}`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!res.ok) throw driveError(res, 'Drive fetch failed');
+  return res.blob();
 }
 
 async function driveUpdateFileContent(token, fileId, content) {
@@ -244,7 +445,7 @@ async function driveUpdateFileContent(token, fileId, content) {
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'text/markdown' },
     body: content
   });
-  if (!res.ok) throw new Error(`Drive save failed (${res.status})`);
+  if (!res.ok) throw driveError(res, 'Drive save failed');
   return res.json();
 }
 
@@ -265,7 +466,7 @@ async function driveCreateFile(token, folderId, rawName, content = '') {
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` },
     body
   });
-  if (!res.ok) throw new Error(`Drive create failed (${res.status})`);
+  if (!res.ok) throw driveError(res, 'Drive create failed');
   return res.json();
 }
 
@@ -275,7 +476,7 @@ async function driveCreateFolder(token, parentId, name) {
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, parents: [parentId], mimeType: 'application/vnd.google-apps.folder' })
   });
-  if (!res.ok) throw new Error(`Drive folder create failed (${res.status})`);
+  if (!res.ok) throw driveError(res, 'Drive folder create failed');
   return res.json();
 }
 
@@ -286,7 +487,7 @@ async function driveRenameItem(token, id, newName) {
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: newName })
   });
-  if (!res.ok) throw new Error(`Drive rename failed (${res.status})`);
+  if (!res.ok) throw driveError(res, 'Drive rename failed');
   return res.json();
 }
 
@@ -300,7 +501,7 @@ async function driveTrashItem(token, id) {
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ trashed: true })
   });
-  if (!res.ok) throw new Error(`Drive delete failed (${res.status})`);
+  if (!res.ok) throw driveError(res, 'Drive delete failed');
   return res.json();
 }
 
@@ -392,6 +593,7 @@ function useGoogleAuth() {
       window.google.accounts.oauth2.revoke(token, () => {});
     }
     sessionStorage.removeItem('vault_access_token');
+    releaseImageUrlCache();
     setToken('');
   }, [token]);
 
@@ -400,47 +602,103 @@ function useGoogleAuth() {
 
 // ---------------------------------------------------------------------------
 // Vault sync engine — diffs Drive against the IndexedDB cache, fetches only
-// new/modified files, and maintains the in-memory backlink graph.
+// new/modified note bodies (concurrently), and maintains the in-memory
+// backlink graph. Also seeds state instantly from whatever's cached locally
+// so reopening a previously-loaded vault doesn't reshow a blank sidebar
+// while a fresh listing comes back.
 // ---------------------------------------------------------------------------
 function useVaultSync(token, folder) {
-  const [filesMeta, setFilesMeta] = useState([]);
+  const [filesMeta, setFilesMeta] = useState([]); // notes AND images
   const [foldersMeta, setFoldersMeta] = useState([]);
   const [linksByFileId, setLinksByFileId] = useState(new Map());
   const [backlinkIndex, setBacklinkIndex] = useState(new Map());
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState('');
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
+  // Drives the loading screen / progress bars. `phase` picks the message;
+  // `loaded`/`total` drive the bar once they're known (folder discovery
+  // can't know a total up front, so the UI shows an indeterminate bar then).
+  const [syncProgress, setSyncProgress] = useState({ phase: 'idle', loaded: 0, total: 0 });
+  // True once we've at least tried seeding state from the local cache for
+  // the current folder — used to tell "nothing cached yet, please wait"
+  // apart from "genuinely empty vault".
+  const [cacheLoaded, setCacheLoaded] = useState(false);
 
-  const recomputeBacklinks = useCallback((records, linksMap) => {
-    setBacklinkIndex(buildBacklinkIndex(records, linksMap));
+  const linkIndex = useMemo(() => buildLinkIndex(filesMeta, foldersMeta, folder?.id), [filesMeta, foldersMeta, folder?.id]);
+
+  const recomputeBacklinks = useCallback((records, linksMap, index) => {
+    setBacklinkIndex(buildBacklinkIndex(records, linksMap, index));
   }, []);
+
+  // Seed instantly from the local cache the moment a folder is selected,
+  // before syncNow()'s network round-trip even starts.
+  useEffect(() => {
+    if (!folder?.id) {
+      setCacheLoaded(false);
+      return;
+    }
+    let cancelled = false;
+    setCacheLoaded(false);
+    (async () => {
+      const [cachedFiles, cachedFolders, cachedLinks] = await Promise.all([
+        idbGetAll(STORE_FILES),
+        idbGetAll(STORE_FOLDERS),
+        idbGetAll(STORE_LINKS)
+      ]);
+      if (cancelled) return;
+      const linksMap = new Map(cachedLinks.map((l) => [l.fileId, l.links]));
+      const index = buildLinkIndex(cachedFiles, cachedFolders, folder.id);
+      setFilesMeta(cachedFiles);
+      setFoldersMeta(cachedFolders);
+      setLinksByFileId(linksMap);
+      recomputeBacklinks(cachedFiles, linksMap, index);
+      setCacheLoaded(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [folder?.id, recomputeBacklinks]);
 
   const syncNow = useCallback(async () => {
     if (!token || !folder?.id) return;
     setSyncing(true);
     setSyncError('');
     try {
-      // Source of truth: live Drive listing (id + modifiedTime), walking
-      // the full subfolder tree under the vault root.
-      const { folders: remoteFolders, files: remoteFiles } = await driveListVaultFiles(token, folder.id);
+      setSyncProgress({ phase: 'listing-folders', loaded: 0, total: 0 });
+      const remoteFolders = await driveListFolderTree(token, folder.id);
+      const folderIds = [folder.id, ...remoteFolders.map((f) => f.id)];
+
+      setSyncProgress({ phase: 'listing-files', loaded: 0, total: 0 });
+      const remoteFiles = await driveListVaultContentInFolders(token, folderIds);
 
       // Transient cache: previously seen metadata + derived link graph.
       const [cachedFiles, cachedLinks] = await Promise.all([idbGetAll(STORE_FILES), idbGetAll(STORE_LINKS)]);
       const cachedMetaById = new Map(cachedFiles.map((f) => [f.id, f]));
       const cachedLinksById = new Map(cachedLinks.map((l) => [l.fileId, l.links]));
 
-      // Diff: only fetch content for files that are new or whose
-      // modifiedTime moved on — this is the "only new/modified" contract.
+      // Only notes ever need their body fetched (to parse wikilinks) — and
+      // only the new/modified ones. Images are cached as metadata only.
       const toFetch = remoteFiles.filter((f) => {
+        if (f.kind !== 'note') return false;
         const cached = cachedMetaById.get(f.id);
         return !cached || cached.modifiedTime !== f.modifiedTime;
       });
 
+      let loaded = 0;
+      setSyncProgress({ phase: 'fetching-content', loaded: 0, total: toFetch.length });
+      const fetchResults = await mapWithConcurrency(toFetch, FETCH_CONCURRENCY, async (file) => {
+        const content = await withRetry(() => driveGetFileContent(token, file.id));
+        loaded += 1;
+        setSyncProgress({ phase: 'fetching-content', loaded, total: toFetch.length });
+        return { fileId: file.id, links: parseWikilinks(content), cachedAt: Date.now() };
+      });
+
       const freshLinkRecords = [];
-      for (const file of toFetch) {
-        const content = await driveGetFileContent(token, file.id);
-        freshLinkRecords.push({ fileId: file.id, links: parseWikilinks(content), cachedAt: Date.now() });
-      }
+      const failedFiles = [];
+      fetchResults.forEach((r, i) => {
+        if (r.ok) freshLinkRecords.push(r.value);
+        else failedFiles.push(toFetch[i]);
+      });
 
       // Merge fresh links over cached graph; drop entries for deleted files.
       const remoteIds = new Set(remoteFiles.map((f) => f.id));
@@ -466,15 +724,24 @@ function useVaultSync(token, folder) {
         idbDeleteMany(STORE_LINKS, staleFileIds)
       ]);
 
+      const nextIndex = buildLinkIndex(remoteFiles, remoteFolders, folder.id);
       setFilesMeta(remoteFiles);
       setFoldersMeta(remoteFolders);
       setLinksByFileId(mergedLinks);
-      recomputeBacklinks(remoteFiles, mergedLinks);
+      recomputeBacklinks(remoteFiles, mergedLinks, nextIndex);
       setLastSyncedAt(Date.now());
+      setCacheLoaded(true);
+
+      if (failedFiles.length) {
+        setSyncError(
+          `${failedFiles.length} file${failedFiles.length === 1 ? '' : 's'} couldn't be read and will be retried next sync`
+        );
+      }
     } catch (err) {
       setSyncError(err.message || 'Sync failed');
     } finally {
       setSyncing(false);
+      setSyncProgress({ phase: 'idle', loaded: 0, total: 0 });
     }
   }, [token, folder, recomputeBacklinks]);
 
@@ -485,37 +752,40 @@ function useVaultSync(token, folder) {
       const nextFiles = filesMeta.map((f) => (f.id === fileId ? { ...f, modifiedTime } : f));
       const nextLinks = new Map(linksByFileId);
       nextLinks.set(fileId, links);
+      const index = buildLinkIndex(nextFiles, foldersMeta, folder?.id);
 
       setFilesMeta(nextFiles);
       setLinksByFileId(nextLinks);
-      recomputeBacklinks(nextFiles, nextLinks);
+      recomputeBacklinks(nextFiles, nextLinks, index);
 
       idbPut(STORE_LINKS, { fileId, links, cachedAt: Date.now() });
       const rec = nextFiles.find((f) => f.id === fileId);
       if (rec) idbPut(STORE_FILES, rec);
     },
-    [filesMeta, linksByFileId, recomputeBacklinks]
+    [filesMeta, foldersMeta, folder, linksByFileId, recomputeBacklinks]
   );
 
   const registerNewFile = useCallback(
     (file) => {
       const nextFiles = [...filesMeta, file].sort((a, b) => a.name.localeCompare(b.name));
+      const index = buildLinkIndex(nextFiles, foldersMeta, folder?.id);
       setFilesMeta(nextFiles);
       idbPut(STORE_FILES, file);
-      recomputeBacklinks(nextFiles, linksByFileId);
+      recomputeBacklinks(nextFiles, linksByFileId, index);
     },
-    [filesMeta, linksByFileId, recomputeBacklinks]
+    [filesMeta, foldersMeta, folder, linksByFileId, recomputeBacklinks]
   );
 
   const renameFile = useCallback(
     (id, newName) => {
       const nextFiles = filesMeta.map((f) => (f.id === id ? { ...f, name: newName } : f));
+      const index = buildLinkIndex(nextFiles, foldersMeta, folder?.id);
       setFilesMeta(nextFiles);
       const rec = nextFiles.find((f) => f.id === id);
       if (rec) idbPut(STORE_FILES, rec);
-      recomputeBacklinks(nextFiles, linksByFileId); // name changed => link resolution changes
+      recomputeBacklinks(nextFiles, linksByFileId, index); // name changed => link resolution changes
     },
-    [filesMeta, linksByFileId, recomputeBacklinks]
+    [filesMeta, foldersMeta, folder, linksByFileId, recomputeBacklinks]
   );
 
   const removeFile = useCallback(
@@ -523,13 +793,14 @@ function useVaultSync(token, folder) {
       const nextFiles = filesMeta.filter((f) => f.id !== id);
       const nextLinks = new Map(linksByFileId);
       nextLinks.delete(id);
+      const index = buildLinkIndex(nextFiles, foldersMeta, folder?.id);
       setFilesMeta(nextFiles);
       setLinksByFileId(nextLinks);
-      recomputeBacklinks(nextFiles, nextLinks);
+      recomputeBacklinks(nextFiles, nextLinks, index);
       idbDeleteMany(STORE_FILES, [id]);
       idbDeleteMany(STORE_LINKS, [id]);
     },
-    [filesMeta, linksByFileId, recomputeBacklinks]
+    [filesMeta, foldersMeta, folder, linksByFileId, recomputeBacklinks]
   );
 
   const registerNewFolder = useCallback(
@@ -572,18 +843,19 @@ function useVaultSync(token, folder) {
       const nextFiles = filesMeta.filter((f) => !removedFileIds.includes(f.id));
       const nextLinks = new Map(linksByFileId);
       removedFileIds.forEach((fid) => nextLinks.delete(fid));
+      const index = buildLinkIndex(nextFiles, nextFolders, folder?.id);
 
       setFoldersMeta(nextFolders);
       setFilesMeta(nextFiles);
       setLinksByFileId(nextLinks);
-      recomputeBacklinks(nextFiles, nextLinks);
+      recomputeBacklinks(nextFiles, nextLinks, index);
 
       idbDeleteMany(STORE_FOLDERS, Array.from(toRemove));
       idbDeleteMany(STORE_FILES, removedFileIds);
       idbDeleteMany(STORE_LINKS, removedFileIds);
       return removedFileIds;
     },
-    [foldersMeta, filesMeta, linksByFileId, recomputeBacklinks]
+    [foldersMeta, filesMeta, folder, linksByFileId, recomputeBacklinks]
   );
 
   // Called when switching to a different vault folder — clears in-memory
@@ -597,6 +869,7 @@ function useVaultSync(token, folder) {
     setLinksByFileId(new Map());
     setBacklinkIndex(new Map());
     setSyncError('');
+    setCacheLoaded(false);
   }, []);
 
   return {
@@ -604,8 +877,11 @@ function useVaultSync(token, folder) {
     foldersMeta,
     linksByFileId,
     backlinkIndex,
+    linkIndex,
     syncing,
     syncError,
+    syncProgress,
+    cacheLoaded,
     lastSyncedAt,
     syncNow,
     applyLocalEdit,
@@ -620,9 +896,9 @@ function useVaultSync(token, folder) {
 }
 
 // ---------------------------------------------------------------------------
-// Builds a nested { type, id, name, children? } tree from the flat folder +
-// file metadata lists, rooted at the vault folder. Folders sort before
-// files at each level; both alphabetically.
+// Builds a nested { type, id, name, kind?, children? } tree from the flat
+// folder + file metadata lists, rooted at the vault folder. Folders sort
+// before files at each level; both alphabetically.
 // ---------------------------------------------------------------------------
 function buildVaultTree(rootId, folders, files) {
   if (!rootId) return [];
@@ -633,7 +909,13 @@ function buildVaultTree(rootId, folders, files) {
   };
   folders.forEach((f) => addChild((f.parents && f.parents[0]) || rootId, { type: 'folder', id: f.id, name: f.name }));
   files.forEach((f) =>
-    addChild((f.parents && f.parents[0]) || rootId, { type: 'file', id: f.id, name: f.name, modifiedTime: f.modifiedTime })
+    addChild((f.parents && f.parents[0]) || rootId, {
+      type: 'file',
+      kind: f.kind === 'image' ? 'image' : 'note',
+      id: f.id,
+      name: f.name,
+      modifiedTime: f.modifiedTime
+    })
   );
 
   const build = (parentId) => {
@@ -657,11 +939,201 @@ function flattenFiles(files, query) {
 }
 
 // ---------------------------------------------------------------------------
+// Drive image blob cache — module-level so the same image is never fetched
+// twice in a session, no matter how many places embed/view it. Object URLs
+// are revoked on sign-out / vault switch (see releaseImageUrlCache below).
+// This lives only in memory: it is never written to IndexedDB.
+// ---------------------------------------------------------------------------
+const imageUrlCache = new Map(); // fileId -> objectURL
+const imageUrlPromises = new Map(); // fileId -> in-flight Promise<objectURL>
+
+function releaseImageUrlCache() {
+  imageUrlCache.forEach((url) => URL.revokeObjectURL(url));
+  imageUrlCache.clear();
+  imageUrlPromises.clear();
+}
+
+function useDriveImageUrl(token, fileId) {
+  const [url, setUrl] = useState(() => (fileId ? imageUrlCache.get(fileId) || null : null));
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!fileId || !token) return;
+    let cancelled = false;
+    const cached = imageUrlCache.get(fileId);
+    if (cached) {
+      setUrl(cached);
+      return;
+    }
+    setUrl(null);
+    setError('');
+    let promise = imageUrlPromises.get(fileId);
+    if (!promise) {
+      promise = driveGetFileBlob(token, fileId).then((blob) => {
+        const objectUrl = URL.createObjectURL(blob);
+        imageUrlCache.set(fileId, objectUrl);
+        return objectUrl;
+      });
+      imageUrlPromises.set(fileId, promise);
+      promise.finally(() => imageUrlPromises.delete(fileId));
+    }
+    promise
+      .then((objectUrl) => {
+        if (!cancelled) setUrl(objectUrl);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message || 'Failed to load image');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token, fileId]);
+
+  return { url, error };
+}
+
+// ---------------------------------------------------------------------------
+// Caret-position helper for the link-typing autocomplete — a <textarea> has
+// no built-in way to ask "where on screen is character N", so this mirrors
+// the textarea's text into an off-screen div with identical font/box
+// styling and reads back the position of a marker placed at that character.
+// ---------------------------------------------------------------------------
+function getCaretCoordinates(textarea, position) {
+  const div = document.createElement('div');
+  const style = getComputedStyle(textarea);
+  const properties = [
+    'boxSizing',
+    'width',
+    'fontFamily',
+    'fontSize',
+    'fontWeight',
+    'lineHeight',
+    'letterSpacing',
+    'paddingTop',
+    'paddingRight',
+    'paddingBottom',
+    'paddingLeft',
+    'borderTopWidth',
+    'borderRightWidth',
+    'borderBottomWidth',
+    'borderLeftWidth'
+  ];
+  properties.forEach((p) => {
+    div.style[p] = style[p];
+  });
+  div.style.position = 'absolute';
+  div.style.visibility = 'hidden';
+  div.style.whiteSpace = 'pre-wrap';
+  div.style.overflowWrap = 'break-word';
+  div.style.top = '0';
+  div.style.left = '-9999px';
+  div.style.height = 'auto';
+
+  div.textContent = textarea.value.slice(0, position);
+  const marker = document.createElement('span');
+  marker.textContent = '\u200b';
+  div.appendChild(marker);
+  document.body.appendChild(div);
+
+  const lineHeight = parseFloat(style.lineHeight) || 20;
+  const top = marker.offsetTop - textarea.scrollTop + lineHeight;
+  const left = marker.offsetLeft - textarea.scrollLeft;
+
+  document.body.removeChild(div);
+  return { top, left };
+}
+
+// Powers the [[link autocomplete dropdown. Reads/writes the textarea's DOM
+// value directly (rather than through the React `content` prop) so it never
+// races a stale closure against the just-typed keystroke.
+function useLinkAutocomplete(textareaRef, onChange, linkIndex) {
+  const [state, setState] = useState(null); // { start, items, activeIndex, top, left }
+
+  const computeSuggestions = useCallback(
+    (query) => {
+      const q = query.toLowerCase();
+      const scoreOf = (hay) => (q ? hay.indexOf(q) : 0);
+      const byBase = linkIndex.records
+        .map((r) => ({ r, score: scoreOf(r.baseName.toLowerCase()) }))
+        .filter((s) => s.score !== -1);
+      const pool = byBase.length
+        ? byBase
+        : linkIndex.records.map((r) => ({ r, score: scoreOf(r.relativePath.toLowerCase()) })).filter((s) => s.score !== -1);
+      return pool
+        .sort((a, b) => a.score - b.score || a.r.baseName.localeCompare(b.r.baseName))
+        .slice(0, 8)
+        .map((s) => s.r);
+    },
+    [linkIndex]
+  );
+
+  const updateFromCaret = useCallback(() => {
+    const ta = textareaRef.current;
+    if (!ta) {
+      setState(null);
+      return;
+    }
+    const value = ta.value;
+    const pos = ta.selectionStart;
+    const windowStart = Math.max(0, pos - 200);
+    const before = value.slice(windowStart, pos);
+    const openIdx = before.lastIndexOf('[[');
+    if (openIdx === -1) {
+      setState(null);
+      return;
+    }
+    const between = before.slice(openIdx + 2);
+    // Don't trigger across a line break, once an alias "|" has been typed,
+    // or once the link's already been closed.
+    if (between.includes(']]') || between.includes('|') || between.includes('\n')) {
+      setState(null);
+      return;
+    }
+
+    const items = computeSuggestions(between);
+    if (!items.length) {
+      setState(null);
+      return;
+    }
+
+    const coords = getCaretCoordinates(ta, pos);
+    setState({ start: windowStart + openIdx, items, activeIndex: 0, top: coords.top, left: coords.left });
+  }, [computeSuggestions, textareaRef]);
+
+  const accept = useCallback(
+    (file) => {
+      const ta = textareaRef.current;
+      if (!ta || !state) return;
+      const pos = ta.selectionStart;
+      const value = ta.value;
+      const insertText = bestLinkTextFor(file, linkIndex);
+      const alreadyClosed = value.slice(pos, pos + 2) === ']]';
+      const next = value.slice(0, state.start) + '[[' + insertText + ']]' + value.slice(pos + (alreadyClosed ? 2 : 0));
+      const caretPos = state.start + 2 + insertText.length + 2;
+      setState(null);
+      onChange(next);
+      requestAnimationFrame(() => {
+        ta.focus();
+        ta.setSelectionRange(caretPos, caretPos);
+      });
+    },
+    [state, onChange, linkIndex, textareaRef]
+  );
+
+  const dismiss = useCallback(() => setState(null), []);
+  const move = useCallback((delta) => {
+    setState((s) => (s ? { ...s, activeIndex: (s.activeIndex + delta + s.items.length) % s.items.length } : s));
+  }, []);
+
+  return { suggestion: state, updateFromCaret, accept, dismiss, move };
+}
+
+// ---------------------------------------------------------------------------
 // Minimal markdown + wikilink renderer (no external markdown dependency)
 // ---------------------------------------------------------------------------
-function renderInline(text, keyPrefix, onOpenLink, knownNames) {
+function renderInline(text, keyPrefix, handlers, linkIndex) {
   const nodes = [];
-  const re = /(\[\[[^\[\]]+\]\])|(\*\*[^*]+\*\*)|(`[^`]+`)|(\[[^\[\]]+\]\([^()\s]+\))|(\*[^*]+\*)/g;
+  const re = /(!?\[\[[^[\]]+\]\])|(\*\*[^*]+\*\*)|(`[^`]+`)|(\[[^[\]]+\]\([^()\s]+\))|(\*[^*]+\*)/g;
   let lastIndex = 0;
   let match;
   let i = 0;
@@ -669,28 +1141,69 @@ function renderInline(text, keyPrefix, onOpenLink, knownNames) {
     if (match.index > lastIndex) nodes.push(text.slice(lastIndex, match.index));
     const token = match[0];
     const key = `${keyPrefix}-${i++}`;
-    if (token.startsWith('[[')) {
-      const inner = token.slice(2, -2);
-      const [rawTarget, rawAlias] = inner.split('|');
-      const target = rawTarget.replace(/#.*$/, '').trim();
-      const label = (rawAlias || rawTarget).trim();
-      const exists = knownNames.has(normalizeNoteName(target));
-      nodes.push(
-        <span
-          key={key}
-          className={exists ? 'wikilink' : 'wikilink wikilink-new'}
-          onClick={() => onOpenLink(target)}
-          title={exists ? `Open ${target}` : `Create "${target}"`}
-        >
-          {label}
-        </span>
-      );
+    if (token.startsWith('[[') || token.startsWith('![[')) {
+      const core = token.startsWith('!') ? token.slice(1) : token;
+      const inner = core.slice(2, -2);
+      const [rawTargetAndHeading, rawAlias] = inner.split('|');
+      const rawTarget = rawTargetAndHeading.replace(/#.*$/, '').trim();
+      const label = (rawAlias || rawTargetAndHeading).trim();
+      const resolution = resolveLinkTarget(rawTarget, linkIndex);
+
+      if (resolution.status === 'resolved' && resolution.file.isImage) {
+        nodes.push(
+          <ImageEmbed
+            key={key}
+            token={handlers.token}
+            fileId={resolution.file.id}
+            name={resolution.file.name}
+            caption={rawAlias ? label : null}
+            onOpen={() => handlers.onOpenImage(resolution.file)}
+          />
+        );
+      } else if (resolution.status === 'resolved') {
+        nodes.push(
+          <span
+            key={key}
+            className="wikilink"
+            onClick={() => handlers.onOpenById(resolution.file.id)}
+            title={`Open ${resolution.file.baseName}`}
+          >
+            {label}
+          </span>
+        );
+      } else if (resolution.status === 'ambiguous') {
+        nodes.push(
+          <AmbiguousLink
+            key={key}
+            label={label}
+            candidates={resolution.candidates}
+            onPick={(file) => (file.isImage ? handlers.onOpenImage(file) : handlers.onOpenById(file.id))}
+          />
+        );
+      } else if (resolution.isImage) {
+        nodes.push(
+          <span key={key} className="wikilink wikilink-missing-image" title={`Image not found: ${rawTarget}`}>
+            🖼 {rawTarget}
+          </span>
+        );
+      } else {
+        nodes.push(
+          <span
+            key={key}
+            className="wikilink wikilink-new"
+            onClick={() => handlers.onCreateOrOpenByName(rawTarget)}
+            title={`Create "${rawTarget}"`}
+          >
+            {label}
+          </span>
+        );
+      }
     } else if (token.startsWith('**')) {
       nodes.push(<strong key={key}>{token.slice(2, -2)}</strong>);
     } else if (token.startsWith('`')) {
       nodes.push(<code key={key}>{token.slice(1, -1)}</code>);
     } else if (token.startsWith('[')) {
-      const m = token.match(/^\[([^\[\]]+)\]\(([^()\s]+)\)$/);
+      const m = token.match(/^\[([^[\]]+)\]\(([^()\s]+)\)$/);
       nodes.push(
         <a key={key} href={m[2]} target="_blank" rel="noreferrer">
           {m[1]}
@@ -705,7 +1218,7 @@ function renderInline(text, keyPrefix, onOpenLink, knownNames) {
   return nodes;
 }
 
-function renderPreview(content, onOpenLink, knownNames) {
+function renderPreview(content, handlers, linkIndex) {
   const lines = content.split('\n');
   const blocks = [];
   let listBuffer = [];
@@ -717,7 +1230,7 @@ function renderPreview(content, onOpenLink, knownNames) {
     blocks.push(
       <Tag key={`list-${blocks.length}`}>
         {listBuffer.map((item, idx) => (
-          <li key={idx}>{renderInline(item, `li-${blocks.length}-${idx}`, onOpenLink, knownNames)}</li>
+          <li key={idx}>{renderInline(item, `li-${blocks.length}-${idx}`, handlers, linkIndex)}</li>
         ))}
       </Tag>
     );
@@ -735,13 +1248,13 @@ function renderPreview(content, onOpenLink, knownNames) {
     if (heading) {
       flushList();
       const level = Math.min(heading[1].length, 6);
-      blocks.push(React.createElement(`h${level}`, { key: idx }, renderInline(heading[2], `h-${idx}`, onOpenLink, knownNames)));
+      blocks.push(React.createElement(`h${level}`, { key: idx }, renderInline(heading[2], `h-${idx}`, handlers, linkIndex)));
     } else if (hr) {
       flushList();
       blocks.push(<hr key={idx} />);
     } else if (quote) {
       flushList();
-      blocks.push(<blockquote key={idx}>{renderInline(quote[1], `q-${idx}`, onOpenLink, knownNames)}</blockquote>);
+      blocks.push(<blockquote key={idx}>{renderInline(quote[1], `q-${idx}`, handlers, linkIndex)}</blockquote>);
     } else if (ul) {
       listType = 'ul';
       listBuffer.push(ul[1]);
@@ -752,7 +1265,7 @@ function renderPreview(content, onOpenLink, knownNames) {
       flushList();
     } else {
       flushList();
-      blocks.push(<p key={idx}>{renderInline(line, `p-${idx}`, onOpenLink, knownNames)}</p>);
+      blocks.push(<p key={idx}>{renderInline(line, `p-${idx}`, handlers, linkIndex)}</p>);
     }
   });
   flushList();
@@ -780,10 +1293,45 @@ function FolderPrompt({ onPick }) {
     <div className="center-screen">
       <div className="brand-mark" aria-hidden="true" />
       <h1>Choose your vault</h1>
-      <p className="muted">Pick the Google Drive folder that holds (or will hold) your .md notes.</p>
+      <p className="muted">Pick the Google Drive folder that holds (or will hold) your notes.</p>
       <button className="btn btn-primary" onClick={onPick}>
         Select Drive folder
       </button>
+    </div>
+  );
+}
+
+// Full-screen, blocking loader shown only when there's nothing cached yet
+// to show — i.e. the very first time a vault is opened on this device (or
+// a genuinely empty vault). Repeat visits skip straight past this because
+// useVaultSync seeds state from IndexedDB before this would ever render.
+function VaultLoadingScreen({ progress }) {
+  const { phase, loaded, total } = progress;
+  const pct = total > 0 ? Math.round((loaded / total) * 100) : null;
+  const label =
+    phase === 'opening'
+      ? 'Opening your vault…'
+      : phase === 'listing-folders'
+      ? 'Scanning folders…'
+      : phase === 'listing-files'
+      ? 'Listing notes and images…'
+      : phase === 'fetching-content'
+      ? total > 0
+        ? `Loading ${loaded} of ${total} notes…`
+        : 'Loading notes…'
+      : 'Loading your vault…';
+  return (
+    <div className="center-screen">
+      <div className="brand-mark" aria-hidden="true" />
+      <h1>Vault</h1>
+      <p className="muted">{label}</p>
+      <div className="progress-bar">
+        <div
+          className={`progress-bar-fill ${pct === null ? 'indeterminate' : ''}`}
+          style={pct !== null ? { width: `${pct}%` } : undefined}
+        />
+      </div>
+      {pct !== null && <p className="muted small">{pct}%</p>}
     </div>
   );
 }
@@ -799,13 +1347,23 @@ function TopBar({ folderName, syncing, syncError, onSync, onNewNote, onChangeFol
         <span className="save-state">{saving ? 'Saving…' : dirty ? 'Unsaved changes' : 'Saved'}</span>
       </div>
       <div className="topbar-actions">
-        {syncError && <span className="sync-error" title={syncError}>Sync error</span>}
-        <button className="icon-btn" onClick={onNewNote} title="New note">＋</button>
-        <button className="icon-btn" onClick={onChangeFolder} title="Change vault folder">📁</button>
+        {syncError && (
+          <span className="sync-error" title={syncError}>
+            Sync error
+          </span>
+        )}
+        <button className="icon-btn" onClick={onNewNote} title="New note">
+          ＋
+        </button>
+        <button className="icon-btn" onClick={onChangeFolder} title="Change vault folder">
+          📁
+        </button>
         <button className="icon-btn" onClick={onSync} title="Sync now" disabled={syncing}>
           {syncing ? '…' : '⟳'}
         </button>
-        <button className="icon-btn" onClick={onSignOut} title="Sign out">⏻</button>
+        <button className="icon-btn" onClick={onSignOut} title="Sign out">
+          ⏻
+        </button>
       </div>
     </header>
   );
@@ -876,19 +1434,32 @@ function TreeMenu({ isFolder, onNewNote, onNewFolder, onRename, onDelete }) {
   );
 }
 
-function TreeNode({ node, depth, currentId, expanded, onToggleExpand, onOpenFile, onCreateNote, onCreateFolder, onRename, onDelete }) {
+function TreeNode({
+  node,
+  depth,
+  currentId,
+  expanded,
+  onToggleExpand,
+  onOpenFile,
+  onOpenImage,
+  onCreateNote,
+  onCreateFolder,
+  onRename,
+  onDelete
+}) {
   const indent = { paddingLeft: 10 + depth * 14 };
 
   if (node.type === 'file') {
+    const isImage = node.kind === 'image';
     return (
       <div className="tree-row">
         <button
           className={`tree-item tree-file ${node.id === currentId ? 'active' : ''}`}
           style={indent}
-          onClick={() => onOpenFile(node.id)}
+          onClick={() => (isImage ? onOpenImage(node) : onOpenFile(node.id))}
         >
-          <span className="tree-icon">📄</span>
-          <span className="tree-label">{node.name.replace(/\.md$/i, '')}</span>
+          <span className="tree-icon">{isImage ? '🖼️' : '📄'}</span>
+          <span className="tree-label">{isImage ? node.name : node.name.replace(/\.md$/i, '')}</span>
         </button>
         <TreeMenu isFolder={false} onRename={() => onRename(node)} onDelete={() => onDelete(node)} />
       </div>
@@ -922,6 +1493,7 @@ function TreeNode({ node, depth, currentId, expanded, onToggleExpand, onOpenFile
             expanded={expanded}
             onToggleExpand={onToggleExpand}
             onOpenFile={onOpenFile}
+            onOpenImage={onOpenImage}
             onCreateNote={onCreateNote}
             onCreateFolder={onCreateFolder}
             onRename={onRename}
@@ -938,6 +1510,7 @@ function Sidebar({
   vaultRootId,
   currentId,
   onOpenFile,
+  onOpenImage,
   search,
   setSearch,
   backlinks,
@@ -962,7 +1535,7 @@ function Sidebar({
       <div className="sidebar-toolbar">
         <input
           className="search-input"
-          placeholder="Search notes…"
+          placeholder="Search notes and images…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
@@ -973,19 +1546,22 @@ function Sidebar({
       <nav className="file-tree">
         {searching ? (
           <>
-            {flatMatches.map((f) => (
-              <div className="tree-row" key={f.id}>
-                <button
-                  className={`tree-item tree-file ${f.id === currentId ? 'active' : ''}`}
-                  style={{ paddingLeft: 10 }}
-                  onClick={() => onOpenFile(f.id)}
-                >
-                  <span className="tree-icon">📄</span>
-                  <span className="tree-label">{f.name.replace(/\.md$/i, '')}</span>
-                </button>
-              </div>
-            ))}
-            {flatMatches.length === 0 && <p className="muted small">No notes match.</p>}
+            {flatMatches.map((f) => {
+              const isImage = f.kind === 'image';
+              return (
+                <div className="tree-row" key={f.id}>
+                  <button
+                    className={`tree-item tree-file ${f.id === currentId ? 'active' : ''}`}
+                    style={{ paddingLeft: 10 }}
+                    onClick={() => (isImage ? onOpenImage(f) : onOpenFile(f.id))}
+                  >
+                    <span className="tree-icon">{isImage ? '🖼️' : '📄'}</span>
+                    <span className="tree-label">{isImage ? f.name : f.name.replace(/\.md$/i, '')}</span>
+                  </button>
+                </div>
+              );
+            })}
+            {flatMatches.length === 0 && <p className="muted small">No notes or images match.</p>}
           </>
         ) : (
           <>
@@ -998,6 +1574,7 @@ function Sidebar({
                 expanded={expanded}
                 onToggleExpand={toggleExpand}
                 onOpenFile={onOpenFile}
+                onOpenImage={onOpenImage}
                 onCreateNote={onCreateNote}
                 onCreateFolder={onCreateFolder}
                 onRename={onRename}
@@ -1022,7 +1599,112 @@ function Sidebar({
   );
 }
 
-function Editor({ file, content, onChange, onOpenLink, knownNames, mode, setMode }) {
+// Inline popover for an ambiguous [[link]] — shown when a bare name matches
+// more than one file, so the reader can pick which one was actually meant.
+function AmbiguousLink({ label, candidates, onPick }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span className="wikilink-ambiguous-wrap">
+      <span
+        className="wikilink wikilink-ambiguous"
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((v) => !v);
+        }}
+        title="Multiple files match this name — pick one"
+      >
+        {label}
+      </span>
+      {open && (
+        <span className="ambiguous-menu" onMouseLeave={() => setOpen(false)}>
+          {candidates.map((c) => (
+            <button
+              key={c.id}
+              onClick={(e) => {
+                e.stopPropagation();
+                setOpen(false);
+                onPick(c);
+              }}
+            >
+              {c.isImage ? '🖼️' : '📄'} {c.relativePath}
+            </button>
+          ))}
+        </span>
+      )}
+    </span>
+  );
+}
+
+// Inline embedded image inside a note's preview — [[image.png]] (with or
+// without the Obsidian-style leading "!") renders the picture itself,
+// clickable to open the full viewer.
+function ImageEmbed({ token, fileId, name, caption, onOpen }) {
+  const { url, error } = useDriveImageUrl(token, fileId);
+  if (error) {
+    return (
+      <span className="wikilink wikilink-missing-image" title={error}>
+        🖼 {name}
+      </span>
+    );
+  }
+  return (
+    <span className="image-embed-wrap">
+      <span className="image-embed" onClick={onOpen} title={`Open ${name}`}>
+        {url ? <img src={url} alt={caption || name} loading="lazy" /> : <span className="image-embed-loading">Loading image…</span>}
+      </span>
+      {caption && <span className="image-embed-caption">{caption}</span>}
+    </span>
+  );
+}
+
+// Full-size image viewer modal — opened from the sidebar, search results,
+// or clicking an embedded/linked image inside a note. Shows which notes
+// link to this image, reusing the same backlink graph notes get.
+function ImageViewer({ token, file, backlinks, onOpenNote, onClose }) {
+  const { url, error } = useDriveImageUrl(token, file?.id);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  if (!file) return null;
+  return (
+    <div className="image-viewer-scrim" onClick={onClose}>
+      <div className="image-viewer" onClick={(e) => e.stopPropagation()}>
+        <div className="image-viewer-header">
+          <span className="image-viewer-name">{file.name}</span>
+          <button className="icon-btn" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="image-viewer-body">
+          {error && <p className="muted small">{error}</p>}
+          {!error && !url && <p className="muted small">Loading…</p>}
+          {url && <img src={url} alt={file.name} />}
+        </div>
+        {backlinks.length > 0 && (
+          <div className="image-viewer-backlinks">
+            <h3>Linked from</h3>
+            {backlinks.map((f) => (
+              <button key={f.id} className="backlink-item" onClick={() => onOpenNote(f.id)}>
+                {f.name.replace(/\.md$/i, '')}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Editor({ file, content, onChange, linkIndex, handlers, mode, setMode, loadingNote }) {
+  const textareaRef = useRef(null);
+  const autocomplete = useLinkAutocomplete(textareaRef, onChange, linkIndex);
+
   if (!file) {
     return (
       <main className="editor-empty">
@@ -1030,26 +1712,76 @@ function Editor({ file, content, onChange, onOpenLink, knownNames, mode, setMode
       </main>
     );
   }
+
   return (
     <main className={`editor-shell mode-${mode}`}>
       <div className="editor-tabs">
-        <button className={mode === 'split' ? 'active' : ''} onClick={() => setMode('split')}>Split</button>
-        <button className={mode === 'edit' ? 'active' : ''} onClick={() => setMode('edit')}>Edit</button>
-        <button className={mode === 'preview' ? 'active' : ''} onClick={() => setMode('preview')}>Preview</button>
+        <button className={mode === 'split' ? 'active' : ''} onClick={() => setMode('split')}>
+          Split
+        </button>
+        <button className={mode === 'edit' ? 'active' : ''} onClick={() => setMode('edit')}>
+          Edit
+        </button>
+        <button className={mode === 'preview' ? 'active' : ''} onClick={() => setMode('preview')}>
+          Preview
+        </button>
       </div>
+      {loadingNote && <div className="note-loading-bar" aria-hidden="true" />}
       <div className="editor-panes">
         {mode !== 'preview' && (
-          <textarea
-            className="editor-textarea"
-            value={content}
-            onChange={(e) => onChange(e.target.value)}
-            spellCheck={false}
-            placeholder="Start writing… use [[Note Name]] to link."
-          />
+          <div className="editor-textarea-wrap">
+            <textarea
+              ref={textareaRef}
+              className="editor-textarea"
+              value={content}
+              onChange={(e) => {
+                onChange(e.target.value);
+                autocomplete.updateFromCaret();
+              }}
+              onKeyUp={(e) => {
+                if (!['ArrowUp', 'ArrowDown', 'Enter', 'Tab', 'Escape'].includes(e.key)) autocomplete.updateFromCaret();
+              }}
+              onKeyDown={(e) => {
+                if (!autocomplete.suggestion) return;
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  autocomplete.move(1);
+                } else if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  autocomplete.move(-1);
+                } else if (e.key === 'Enter' || e.key === 'Tab') {
+                  e.preventDefault();
+                  autocomplete.accept(autocomplete.suggestion.items[autocomplete.suggestion.activeIndex]);
+                } else if (e.key === 'Escape') {
+                  autocomplete.dismiss();
+                }
+              }}
+              onClick={autocomplete.updateFromCaret}
+              onBlur={() => setTimeout(autocomplete.dismiss, 120)}
+              spellCheck={false}
+              placeholder="Start writing… use [[Note Name]] to link, or [[image.png]] for images."
+            />
+            {autocomplete.suggestion && (
+              <ul className="autocomplete-menu" style={{ top: autocomplete.suggestion.top, left: autocomplete.suggestion.left }}>
+                {autocomplete.suggestion.items.map((item, idx) => (
+                  <li
+                    key={item.id}
+                    className={idx === autocomplete.suggestion.activeIndex ? 'active' : ''}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      autocomplete.accept(item);
+                    }}
+                  >
+                    <span className="autocomplete-icon">{item.isImage ? '🖼️' : '📄'}</span>
+                    <span className="autocomplete-label">{item.baseName}</span>
+                    {item.relativePath !== item.baseName && <span className="autocomplete-path">{item.relativePath}</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         )}
-        {mode !== 'edit' && (
-          <div className="editor-preview">{renderPreview(content, onOpenLink, knownNames)}</div>
-        )}
+        {mode !== 'edit' && <div className="editor-preview">{renderPreview(content, handlers, linkIndex)}</div>}
       </div>
     </main>
   );
@@ -1061,12 +1793,15 @@ function Editor({ file, content, onChange, onOpenLink, knownNames, mode, setMode
 export default function App() {
   const { token, gisReady, signIn, signOut } = useGoogleAuth();
   const [folder, setFolder] = useState(null);
+  const [folderRestoring, setFolderRestoring] = useState(true);
   const sync = useVaultSync(token, folder);
 
   const [currentFile, setCurrentFile] = useState(null);
   const [content, setContent] = useState('');
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [loadingNote, setLoadingNote] = useState(false);
+  const [viewingImage, setViewingImage] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [search, setSearch] = useState('');
   const [mode, setMode] = useState(window.innerWidth < 768 ? 'edit' : 'split');
@@ -1077,6 +1812,7 @@ export default function App() {
   useEffect(() => {
     idbGet(STORE_META, 'vaultFolder').then((rec) => {
       if (rec) setFolder(rec.value);
+      setFolderRestoring(false);
     });
   }, []);
 
@@ -1094,6 +1830,7 @@ export default function App() {
     const picked = await openFolderPicker(token);
     if (picked) {
       sync.resetVault();
+      releaseImageUrlCache();
       setFolder(picked);
       idbPut(STORE_META, { key: 'vaultFolder', value: picked });
       setCurrentFile(null);
@@ -1101,6 +1838,7 @@ export default function App() {
       setDirty(false);
       setSearch('');
       setSidebarOpen(false);
+      setViewingImage(null);
     }
   }, [token, sync]);
 
@@ -1124,21 +1862,27 @@ export default function App() {
   const openNoteById = useCallback(
     async (id) => {
       const meta = sync.filesMeta.find((f) => f.id === id);
-      if (!meta || !token) return;
-      const text = await driveGetFileContent(token, id);
-      setCurrentFile(meta);
-      setContent(text);
-      setDirty(false);
-      setSidebarOpen(false);
+      if (!meta || !token || meta.kind === 'image') return;
+      setLoadingNote(true);
+      try {
+        const text = await driveGetFileContent(token, id);
+        setCurrentFile(meta);
+        setContent(text);
+        setDirty(false);
+        setSidebarOpen(false);
+      } finally {
+        setLoadingNote(false);
+      }
     },
     [token, sync.filesMeta]
   );
 
   const openNoteByName = useCallback(
     async (name) => {
-      const normalized = normalizeNoteName(name);
-      const existing = sync.filesMeta.find((f) => normalizeNoteName(f.name) === normalized);
-      if (existing) return openNoteById(existing.id);
+      const resolution = resolveLinkTarget(name, sync.linkIndex);
+      if (resolution.status === 'resolved' && !resolution.file.isImage) {
+        return openNoteById(resolution.file.id);
+      }
       if (!folder || !token) return;
       const skeleton = `# ${name}\n\n`;
       const created = await driveCreateFile(token, folder.id, name, skeleton);
@@ -1146,7 +1890,8 @@ export default function App() {
         id: created.id,
         name: created.name,
         modifiedTime: created.modifiedTime || new Date().toISOString(),
-        parents: [folder.id]
+        parents: [folder.id],
+        kind: 'note'
       };
       sync.registerNewFile(fileRecord);
       setCurrentFile(fileRecord);
@@ -1207,7 +1952,8 @@ export default function App() {
             id: created.id,
             name: created.name,
             modifiedTime: created.modifiedTime || new Date().toISOString(),
-            parents: [parentId]
+            parents: [parentId],
+            kind: 'note'
           };
           sync.registerNewFile(fileRecord);
           setCurrentFile(fileRecord);
@@ -1238,15 +1984,24 @@ export default function App() {
 
   const handleRenameNode = useCallback(
     async (node) => {
-      const currentDisplayName = node.type === 'file' ? node.name.replace(/\.md$/i, '') : node.name;
+      const isImage = node.type === 'file' && node.kind === 'image';
+      const currentDisplayName = node.type === 'file' && !isImage ? node.name.replace(/\.md$/i, '') : node.name;
       const input = window.prompt('Rename to:', currentDisplayName);
       if (!input || !input.trim() || input.trim() === currentDisplayName) return;
-      const newName =
-        node.type === 'file'
-          ? input.trim().toLowerCase().endsWith('.md')
-            ? input.trim()
-            : `${input.trim()}.md`
-          : input.trim();
+
+      let newName;
+      if (node.type !== 'file') {
+        newName = input.trim();
+      } else if (isImage) {
+        // Images keep whatever extension is typed; if the user dropped it,
+        // fall back to the original extension instead of silently turning
+        // the file into a ".md" note.
+        const typed = input.trim();
+        newName = fileExtension(typed) ? typed : `${typed}.${fileExtension(node.name) || 'png'}`;
+      } else {
+        newName = input.trim().toLowerCase().endsWith('.md') ? input.trim() : `${input.trim()}.md`;
+      }
+
       try {
         await driveRenameItem(token, node.id, newName);
         if (node.type === 'file') {
@@ -1264,11 +2019,12 @@ export default function App() {
 
   const handleDeleteNode = useCallback(
     async (node) => {
-      const label = node.type === 'file' ? node.name.replace(/\.md$/i, '') : node.name;
+      const isImage = node.type === 'file' && node.kind === 'image';
+      const label = node.type === 'file' && !isImage ? node.name.replace(/\.md$/i, '') : node.name;
       const warning =
         node.type === 'folder'
           ? `Delete folder "${label}" and everything inside it? This moves it to Drive's trash.`
-          : `Delete note "${label}"? This moves it to Drive's trash.`;
+          : `Delete "${label}"? This moves it to Drive's trash.`;
       if (!window.confirm(warning)) return;
       try {
         await driveTrashItem(token, node.id);
@@ -1279,6 +2035,7 @@ export default function App() {
             setContent('');
             setDirty(false);
           }
+          if (viewingImage?.id === node.id) setViewingImage(null);
         } else {
           const removedFileIds = sync.removeFolder(node.id);
           if (currentFile && removedFileIds.includes(currentFile.id)) {
@@ -1286,12 +2043,13 @@ export default function App() {
             setContent('');
             setDirty(false);
           }
+          if (viewingImage && removedFileIds.includes(viewingImage.id)) setViewingImage(null);
         }
       } catch (err) {
         window.alert(`Couldn't delete: ${err.message}`);
       }
     },
-    [token, sync, currentFile]
+    [token, sync, currentFile, viewingImage]
   );
 
   const tree = useMemo(
@@ -1299,19 +2057,46 @@ export default function App() {
     [folder?.id, sync.foldersMeta, sync.filesMeta]
   );
 
-  const knownNames = new Set(sync.filesMeta.map((f) => normalizeNoteName(f.name)));
   const backlinksForCurrent = currentFile
     ? Array.from(sync.backlinkIndex.get(currentFile.id) || [])
         .map((id) => sync.filesMeta.find((f) => f.id === id))
         .filter(Boolean)
     : [];
 
+  const imageBacklinks = viewingImage
+    ? Array.from(sync.backlinkIndex.get(viewingImage.id) || [])
+        .map((id) => sync.filesMeta.find((f) => f.id === id))
+        .filter(Boolean)
+    : [];
+
+  const linkHandlers = useMemo(
+    () => ({
+      token,
+      onOpenById: (id) => navigateTo(() => openNoteById(id)),
+      onCreateOrOpenByName: (name) => navigateTo(() => openNoteByName(name)),
+      onOpenImage: (file) => setViewingImage(file)
+    }),
+    [token, navigateTo, openNoteById, openNoteByName]
+  );
+
   if (!token) {
     return <LoginScreen onSignIn={signIn} ready={gisReady} />;
+  }
+  if (folderRestoring) {
+    return <VaultLoadingScreen progress={{ phase: 'opening', loaded: 0, total: 0 }} />;
   }
   if (!folder) {
     return <FolderPrompt onPick={handlePickFolder} />;
   }
+  if (!sync.cacheLoaded) {
+    return <VaultLoadingScreen progress={{ phase: 'opening', loaded: 0, total: 0 }} />;
+  }
+  if (sync.filesMeta.length === 0 && sync.syncing) {
+    return <VaultLoadingScreen progress={sync.syncProgress} />;
+  }
+
+  const syncPct =
+    sync.syncProgress.total > 0 ? Math.round((sync.syncProgress.loaded / sync.syncProgress.total) * 100) : null;
 
   return (
     <div className="app-shell">
@@ -1327,6 +2112,11 @@ export default function App() {
         dirty={dirty}
         saving={saving}
       />
+      {sync.syncing && syncPct !== null && (
+        <div className="topbar-progress">
+          <div className="topbar-progress-fill" style={{ width: `${syncPct}%` }} />
+        </div>
+      )}
       <div className={`workspace ${sidebarOpen ? 'sidebar-open' : ''}`}>
         <Sidebar
           tree={tree}
@@ -1334,6 +2124,10 @@ export default function App() {
           vaultRootId={folder.id}
           currentId={currentFile?.id}
           onOpenFile={(id) => navigateTo(() => openNoteById(id))}
+          onOpenImage={(file) => {
+            setViewingImage(file);
+            setSidebarOpen(false);
+          }}
           search={search}
           setSearch={setSearch}
           backlinks={backlinksForCurrent}
@@ -1347,12 +2141,25 @@ export default function App() {
           file={currentFile}
           content={content}
           onChange={handleContentChange}
-          onOpenLink={(name) => navigateTo(() => openNoteByName(name))}
-          knownNames={knownNames}
+          linkIndex={sync.linkIndex}
+          handlers={linkHandlers}
           mode={mode}
           setMode={setMode}
+          loadingNote={loadingNote}
         />
       </div>
+      {viewingImage && (
+        <ImageViewer
+          token={token}
+          file={viewingImage}
+          backlinks={imageBacklinks}
+          onOpenNote={(id) => {
+            setViewingImage(null);
+            navigateTo(() => openNoteById(id));
+          }}
+          onClose={() => setViewingImage(null)}
+        />
+      )}
     </div>
   );
 }
