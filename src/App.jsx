@@ -1443,7 +1443,7 @@ function FolderPrompt({ onPick }) {
 // replaces it for that mode only, browsing folders via the Apps Script
 // proxy's "browse" action instead.
 function ProxyFolderPicker({ token, onPick, onCancel }) {
-  const [stack, setStack] = useState([{ id: 'root', name: 'My Drive' }]);
+  const [stack, setStack] = useState([{ id: 'root', name: 'Drives' }]);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const current = stack[stack.length - 1];
@@ -1484,7 +1484,7 @@ function ProxyFolderPicker({ token, onPick, onCancel }) {
             {items.map((f) => (
               <li key={f.id}>
                 <button className="link-btn" onClick={() => setStack([...stack, f])}>
-                  📁 {f.name}
+                  {f.isDrive ? '🗄️' : '📁'} {f.name}
                 </button>
               </li>
             ))}
