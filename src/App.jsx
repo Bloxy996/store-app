@@ -318,6 +318,44 @@ function buildBacklinkIndex(fileRecords, linksByFileId, linkIndex) {
 // ---------------------------------------------------------------------------
 const DRIVE_ALL_DRIVES = 'supportsAllDrives=true&includeItemsFromAllDrives=true';
 
+// --- Apps Script proxy support -------------------------------------------
+// token is either a bearer-token string (direct Google OAuth, existing
+// behavior) or an { proxy: true, url, secret } object (Apps Script proxy).
+// Each drive*() function below branches on this.
+function isProxy(token) {
+  return !!(token && typeof token === 'object' && token.proxy);
+}
+
+async function proxyGet(token, params) {
+  const url = new URL(token.url);
+  Object.entries({ ...params, secret: token.secret }).forEach(([k, v]) => url.searchParams.set(k, v));
+  const res = await fetch(url.toString());
+  if (!res.ok) throw new Error(`Proxy request failed (${res.status})`);
+  return res;
+}
+
+// Content-Type text/plain (not application/json) deliberately — it's a
+// CORS-safelisted type, so the browser sends this as a "simple request"
+// with no OPTIONS preflight. Apps Script doesn't answer preflights, so
+// application/json here would silently fail cross-origin.
+async function proxyPost(token, body) {
+  const res = await fetch(token.url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ ...body, secret: token.secret })
+  });
+  if (!res.ok) throw new Error(`Proxy request failed (${res.status})`);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  return data;
+}
+
+async function driveBrowseFolders(token, parentId) {
+  const res = await proxyGet(token, { action: 'browse', parent: parentId || 'root' });
+  const data = await res.json();
+  return data.folders || [];
+}
+
 function chunkArray(arr, size) {
   const out = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
@@ -339,6 +377,10 @@ function driveError(res, label) {
 // SUBfolders — the root itself is not included, since it's represented
 // separately as the vault folder.
 async function driveListFolderTree(token, rootFolderId) {
+  if (isProxy(token)) {
+    const res = await proxyGet(token, { action: 'listFolderTree', root: rootFolderId });
+    return (await res.json()).folders || [];
+  }
   const allFolders = [];
   let frontier = [rootFolderId];
   while (frontier.length) {
@@ -377,6 +419,10 @@ async function driveListFolderTree(token, rootFolderId) {
 // pass — a single Drive query covers both kinds (rather than two separate
 // listing round-trips), and chunks of folder ids are queried concurrently.
 async function driveListVaultContentInFolders(token, folderIds) {
+  if (isProxy(token)) {
+    const res = await proxyGet(token, { action: 'listVaultFiles', folders: folderIds.join(',') });
+    return (await res.json()).files || [];
+  }
   const mimeClauses = [
     "mimeType = 'text/markdown'",
     "mimeType = 'text/plain'",
@@ -422,6 +468,10 @@ async function driveListVaultFiles(token, rootFolderId) {
 }
 
 async function driveGetFileContent(token, fileId) {
+  if (isProxy(token)) {
+    const res = await proxyGet(token, { action: 'getContent', id: fileId });
+    return res.text();
+  }
   const res = await fetch(`${DRIVE_FILES_URL}/${fileId}?alt=media&${DRIVE_ALL_DRIVES}`, {
     headers: { Authorization: `Bearer ${token}` }
   });
@@ -432,6 +482,14 @@ async function driveGetFileContent(token, fileId) {
 // Same request as above, but returns a Blob — used for images, which are
 // fetched on demand only (see the constant comment on FETCH_CONCURRENCY).
 async function driveGetFileBlob(token, fileId) {
+  if (isProxy(token)) {
+    const res = await proxyGet(token, { action: 'getBlob', id: fileId });
+    const data = await res.json();
+    const binary = atob(data.base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type: data.mimeType });
+  }
   const res = await fetch(`${DRIVE_FILES_URL}/${fileId}?alt=media&${DRIVE_ALL_DRIVES}`, {
     headers: { Authorization: `Bearer ${token}` }
   });
@@ -440,6 +498,9 @@ async function driveGetFileBlob(token, fileId) {
 }
 
 async function driveUpdateFileContent(token, fileId, content) {
+  if (isProxy(token)) {
+    return proxyPost(token, { action: 'updateContent', id: fileId, content });
+  }
   const res = await fetch(`${DRIVE_UPLOAD_URL}/${fileId}?uploadType=media&${DRIVE_ALL_DRIVES}`, {
     method: 'PATCH',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'text/markdown' },
@@ -450,6 +511,9 @@ async function driveUpdateFileContent(token, fileId, content) {
 }
 
 async function driveCreateFile(token, folderId, rawName, content = '') {
+  if (isProxy(token)) {
+    return proxyPost(token, { action: 'createFile', folderId, name: rawName, content });
+  }
   const name = rawName.toLowerCase().endsWith('.md') ? rawName : `${rawName}.md`;
   const metadata = { name, parents: [folderId], mimeType: 'text/markdown' };
   const boundary = `vault-${Date.now()}`;
@@ -471,6 +535,9 @@ async function driveCreateFile(token, folderId, rawName, content = '') {
 }
 
 async function driveCreateFolder(token, parentId, name) {
+  if (isProxy(token)) {
+    return proxyPost(token, { action: 'createFolder', parentId, name });
+  }
   const res = await fetch(`${DRIVE_FILES_URL}?fields=id,name,parents&${DRIVE_ALL_DRIVES}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -482,6 +549,9 @@ async function driveCreateFolder(token, parentId, name) {
 
 // Renames a file or folder (metadata-only PATCH — content untouched).
 async function driveRenameItem(token, id, newName) {
+  if (isProxy(token)) {
+    return proxyPost(token, { action: 'rename', id, newName });
+  }
   const res = await fetch(`${DRIVE_FILES_URL}/${id}?fields=id,name&${DRIVE_ALL_DRIVES}`, {
     method: 'PATCH',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -496,6 +566,9 @@ async function driveRenameItem(token, id, newName) {
 // Trashing a folder hides its contents from listings too; the app treats
 // them as gone on the next sync without needing to trash each child.
 async function driveTrashItem(token, id) {
+  if (isProxy(token)) {
+    return proxyPost(token, { action: 'trash', id });
+  }
   const res = await fetch(`${DRIVE_FILES_URL}/${id}?${DRIVE_ALL_DRIVES}`, {
     method: 'PATCH',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -598,6 +671,34 @@ function useGoogleAuth() {
   }, [token]);
 
   return { token, gisReady, signIn, signOut };
+}
+
+// ---------------------------------------------------------------------------
+// Auth hook — Apps Script proxy (URL + shared secret, no Google OAuth)
+// ---------------------------------------------------------------------------
+function useProxyAuth() {
+  const [proxyToken, setProxyToken] = useState(() => {
+    try {
+      const raw = localStorage.getItem('vault_proxy_config');
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const signInProxy = useCallback((url, secret) => {
+    const cfg = { proxy: true, url: url.trim().replace(/\/$/, ''), secret: secret.trim() };
+    localStorage.setItem('vault_proxy_config', JSON.stringify(cfg));
+    setProxyToken(cfg);
+  }, []);
+
+  const signOutProxy = useCallback(() => {
+    localStorage.removeItem('vault_proxy_config');
+    releaseImageUrlCache();
+    setProxyToken(null);
+  }, []);
+
+  return { proxyToken, signInProxy, signOutProxy };
 }
 
 // ---------------------------------------------------------------------------
@@ -1275,7 +1376,18 @@ function renderPreview(content, handlers, linkIndex) {
 // ---------------------------------------------------------------------------
 // UI: presentational components
 // ---------------------------------------------------------------------------
-function LoginScreen({ onSignIn, ready }) {
+function LoginScreen({ onSignIn, ready, onSignInProxy }) {
+  const [showProxyForm, setShowProxyForm] = useState(false);
+  const [proxyUrl, setProxyUrl] = useState(() => localStorage.getItem('vault_proxy_url_draft') || '');
+  const [proxySecret, setProxySecret] = useState('');
+
+  const submitProxy = (e) => {
+    e.preventDefault();
+    if (!proxyUrl.trim() || !proxySecret.trim()) return;
+    localStorage.setItem('vault_proxy_url_draft', proxyUrl.trim());
+    onSignInProxy(proxyUrl.trim(), proxySecret.trim());
+  };
+
   return (
     <div className="center-screen">
       <div className="brand-mark" aria-hidden="true" />
@@ -1284,6 +1396,32 @@ function LoginScreen({ onSignIn, ready }) {
       <button className="btn btn-primary" disabled={!ready} onClick={onSignIn}>
         {ready ? 'Sign in with Google' : 'Loading…'}
       </button>
+
+      {!showProxyForm ? (
+        <button className="btn btn-secondary" onClick={() => setShowProxyForm(true)}>
+          Use Apps Script proxy instead
+        </button>
+      ) : (
+        <form className="proxy-form" onSubmit={submitProxy}>
+          <input
+            type="url"
+            placeholder="Apps Script Web App URL"
+            value={proxyUrl}
+            onChange={(e) => setProxyUrl(e.target.value)}
+            required
+          />
+          <input
+            type="password"
+            placeholder="Shared secret"
+            value={proxySecret}
+            onChange={(e) => setProxySecret(e.target.value)}
+            required
+          />
+          <button type="submit" className="btn btn-primary">
+            Connect
+          </button>
+        </form>
+      )}
     </div>
   );
 }
@@ -1297,6 +1435,70 @@ function FolderPrompt({ onPick }) {
       <button className="btn btn-primary" onClick={onPick}>
         Select Drive folder
       </button>
+    </div>
+  );
+}
+
+// Picker needs an OAuth token, which proxy mode doesn't have — this
+// replaces it for that mode only, browsing folders via the Apps Script
+// proxy's "browse" action instead.
+function ProxyFolderPicker({ token, onPick, onCancel }) {
+  const [stack, setStack] = useState([{ id: 'root', name: 'My Drive' }]);
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const current = stack[stack.length - 1];
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    driveBrowseFolders(token, current.id).then((folders) => {
+      if (!cancelled) {
+        setItems(folders);
+        setLoading(false);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [token, current.id]);
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal">
+        <h3>Select vault folder</h3>
+        <div className="breadcrumb">
+          {stack.map((s, i) => (
+            <span key={s.id}>
+              <button className="link-btn" onClick={() => setStack(stack.slice(0, i + 1))}>
+                {s.name}
+              </button>
+              {i < stack.length - 1 ? ' / ' : ''}
+            </span>
+          ))}
+        </div>
+        {loading ? (
+          <p className="muted">Loading…</p>
+        ) : (
+          <ul className="folder-list">
+            {items.length === 0 && <li className="muted">No subfolders here</li>}
+            {items.map((f) => (
+              <li key={f.id}>
+                <button className="link-btn" onClick={() => setStack([...stack, f])}>
+                  📁 {f.name}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="modal-actions">
+          <button className="btn" onClick={onCancel}>
+            Cancel
+          </button>
+          <button className="btn btn-primary" onClick={() => onPick(current)}>
+            Use "{current.name}"
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1791,7 +1993,14 @@ function Editor({ file, content, onChange, linkIndex, handlers, mode, setMode, l
 // App — top-level composition and view-transition wiring
 // ---------------------------------------------------------------------------
 export default function App() {
-  const { token, gisReady, signIn, signOut } = useGoogleAuth();
+  const { token: googleToken, gisReady, signIn, signOut: signOutGoogle } = useGoogleAuth();
+  const { proxyToken, signInProxy, signOutProxy } = useProxyAuth();
+  const token = googleToken || proxyToken;
+  const signOut = () => {
+    signOutGoogle();
+    signOutProxy();
+  };
+  const [showProxyFolderPicker, setShowProxyFolderPicker] = useState(false);
   const [folder, setFolder] = useState(null);
   const [folderRestoring, setFolderRestoring] = useState(true);
   const sync = useVaultSync(token, folder);
@@ -1825,10 +2034,8 @@ export default function App() {
   // Used both for the first-time folder prompt and for switching vaults
   // later from the top bar. Resets editor + sync state so nothing from the
   // previous vault lingers on screen.
-  const handlePickFolder = useCallback(async () => {
-    if (!token) return;
-    const picked = await openFolderPicker(token);
-    if (picked) {
+  const applyPickedFolder = useCallback(
+    (picked) => {
       sync.resetVault();
       releaseImageUrlCache();
       setFolder(picked);
@@ -1839,8 +2046,27 @@ export default function App() {
       setSearch('');
       setSidebarOpen(false);
       setViewingImage(null);
+    },
+    [sync]
+  );
+
+  const handlePickFolder = useCallback(async () => {
+    if (!token) return;
+    if (isProxy(token)) {
+      setShowProxyFolderPicker(true);
+      return;
     }
-  }, [token, sync]);
+    const picked = await openFolderPicker(token);
+    if (picked) applyPickedFolder(picked);
+  }, [token, applyPickedFolder]);
+
+  const handleProxyFolderPicked = useCallback(
+    (picked) => {
+      setShowProxyFolderPicker(false);
+      applyPickedFolder(picked);
+    },
+    [applyPickedFolder]
+  );
 
   const saveNow = useCallback(
     async (value) => {
@@ -2080,13 +2306,24 @@ export default function App() {
   );
 
   if (!token) {
-    return <LoginScreen onSignIn={signIn} ready={gisReady} />;
+    return <LoginScreen onSignIn={signIn} ready={gisReady} onSignInProxy={signInProxy} />;
   }
   if (folderRestoring) {
     return <VaultLoadingScreen progress={{ phase: 'opening', loaded: 0, total: 0 }} />;
   }
   if (!folder) {
-    return <FolderPrompt onPick={handlePickFolder} />;
+    return (
+      <>
+        <FolderPrompt onPick={handlePickFolder} />
+        {showProxyFolderPicker && (
+          <ProxyFolderPicker
+            token={token}
+            onPick={handleProxyFolderPicked}
+            onCancel={() => setShowProxyFolderPicker(false)}
+          />
+        )}
+      </>
+    );
   }
   if (!sync.cacheLoaded) {
     return <VaultLoadingScreen progress={{ phase: 'opening', loaded: 0, total: 0 }} />;
@@ -2158,6 +2395,13 @@ export default function App() {
             navigateTo(() => openNoteById(id));
           }}
           onClose={() => setViewingImage(null)}
+        />
+      )}
+      {showProxyFolderPicker && (
+        <ProxyFolderPicker
+          token={token}
+          onPick={handleProxyFolderPicked}
+          onCancel={() => setShowProxyFolderPicker(false)}
         />
       )}
     </div>

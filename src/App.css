@@ -745,3 +745,89 @@ input {
 
   .image-viewer { width: 94vw; }
 }
+
+/* --- Apps Script proxy sign-in + folder browser -------------------------- */
+
+.btn-secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-0);
+}
+
+.proxy-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  width: 100%;
+  max-width: 320px;
+}
+
+.proxy-form input {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-0);
+  padding: 8px 10px;
+  font-family: var(--font-ui);
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.modal {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  width: 90%;
+  max-width: 360px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.breadcrumb {
+  font-size: 13px;
+  color: var(--text-1);
+  margin-bottom: 8px;
+}
+
+.folder-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.folder-list li {
+  padding: 4px 0;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--text-0);
+  cursor: pointer;
+  padding: 4px 0;
+  text-align: left;
+}
+
+.link-btn:hover {
+  color: var(--accent-soft);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
