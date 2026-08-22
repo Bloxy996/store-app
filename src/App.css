@@ -831,3 +831,37 @@ input {
   gap: 8px;
   margin-top: 12px;
 }
+
+.manual-folder-entry {
+  border-top: 1px solid var(--border);
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
+.manual-folder-entry .small {
+  font-size: 12px;
+  margin: 0 0 6px;
+}
+
+.manual-folder-row {
+  display: flex;
+  gap: 6px;
+}
+
+.manual-folder-row input {
+  flex: 1;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-0);
+  padding: 6px 8px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  min-width: 0;
+}
+
+.error-text {
+  color: #e5484d;
+  font-size: 12px;
+  margin: 6px 0 0;
+}

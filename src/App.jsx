@@ -356,6 +356,27 @@ async function driveBrowseFolders(token, parentId) {
   return data.folders || [];
 }
 
+// For folders the browse action can never reach (chiefly anything under
+// "Computers" — Drive's desktop-backup section has no browsing API at
+// all). The user pastes a Drive folder URL or bare ID instead of
+// navigating to it.
+async function driveResolveFolder(token, idOrUrl) {
+  const id = extractDriveFolderId(idOrUrl);
+  const res = await proxyGet(token, { action: 'resolveFolder', id });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  return data; // { id, name }
+}
+
+function extractDriveFolderId(input) {
+  const trimmed = input.trim();
+  const fromPath = trimmed.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+  if (fromPath) return fromPath[1];
+  const fromQuery = trimmed.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (fromQuery) return fromQuery[1];
+  return trimmed; // assume it's already a bare folder ID
+}
+
 function chunkArray(arr, size) {
   const out = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
@@ -1446,6 +1467,9 @@ function ProxyFolderPicker({ token, onPick, onCancel }) {
   const [stack, setStack] = useState([{ id: 'root', name: 'Drives' }]);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [manualInput, setManualInput] = useState('');
+  const [resolving, setResolving] = useState(false);
+  const [resolveError, setResolveError] = useState('');
   const current = stack[stack.length - 1];
 
   useEffect(() => {
@@ -1461,6 +1485,20 @@ function ProxyFolderPicker({ token, onPick, onCancel }) {
       cancelled = true;
     };
   }, [token, current.id]);
+
+  const handleUseManualId = async () => {
+    if (!manualInput.trim()) return;
+    setResolving(true);
+    setResolveError('');
+    try {
+      const meta = await driveResolveFolder(token, manualInput);
+      onPick(meta);
+    } catch (err) {
+      setResolveError(err.message || 'Could not access that folder');
+    } finally {
+      setResolving(false);
+    }
+  };
 
   return (
     <div className="modal-overlay">
@@ -1490,6 +1528,23 @@ function ProxyFolderPicker({ token, onPick, onCancel }) {
             ))}
           </ul>
         )}
+        <div className="manual-folder-entry">
+          <p className="muted small">
+            Folder not showing up (e.g. under "Computers")? Paste its link or ID instead:
+          </p>
+          <div className="manual-folder-row">
+            <input
+              type="text"
+              placeholder="Drive folder link or ID"
+              value={manualInput}
+              onChange={(e) => setManualInput(e.target.value)}
+            />
+            <button className="btn" disabled={!manualInput.trim() || resolving} onClick={handleUseManualId}>
+              {resolving ? 'Checking…' : 'Use'}
+            </button>
+          </div>
+          {resolveError && <p className="error-text">{resolveError}</p>}
+        </div>
         <div className="modal-actions">
           <button className="btn" onClick={onCancel}>
             Cancel
