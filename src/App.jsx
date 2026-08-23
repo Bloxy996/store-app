@@ -5,16 +5,22 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
  * from Google Drive. Architectural rule enforced throughout this file:
  *
  *   Note CONTENT is NEVER written to disk on this device. It lives only in
- *   React state (RAM) for as long as a note is open, and is streamed to/from
- *   Drive over the REST API. IndexedDB is used exclusively as a *transient*
- *   cache for: (a) file metadata/modifiedTime, and (b) the derived wikilink
- *   graph — never for raw note bodies. Clearing IndexedDB never loses data,
- *   because Drive remains the single source of truth.
+ *   React state / in-memory caches for as long as the browser tab is open,
+ *   and is streamed to/from Drive over the REST API. IndexedDB is used
+ *   exclusively as a *transient* cache for: (a) file metadata/modifiedTime,
+ *   and (b) the derived wikilink graph — never for raw note bodies.
+ *   Clearing IndexedDB never loses data, because Drive remains the single
+ *   source of truth.
  *
  *   Images follow the same rule: only their metadata (id/name/modifiedTime)
  *   is cached in IndexedDB. Image bytes are fetched on demand (when actually
  *   viewed or embedded) and kept only as in-memory blob URLs for the current
  *   session — never persisted.
+ *
+ *   The in-memory full-text search / tag index (see useVaultIndex) is the
+ *   same idea taken one step further: note bodies are held in a RAM-only
+ *   Map (module scope, never IndexedDB) so full-text search works without
+ *   ever touching disk. It's rebuilt from Drive every time the page loads.
  * ==========================================================================*/
 
 // ---------------------------------------------------------------------------
@@ -44,7 +50,7 @@ const DB_VERSION = 2;
 const STORE_FILES = 'files'; // { id, name, modifiedTime, parents, mimeType, kind }  -- metadata only
 const STORE_FOLDERS = 'folders'; // { id, name, parents } -- structure only, no content
 const STORE_LINKS = 'links'; // { fileId, links: [{target, alias}], cachedAt } -- graph only
-const STORE_META = 'meta'; // { key, value } -- app settings (vault folder id, etc.)
+const STORE_META = 'meta'; // { key, value } -- app settings (vault folder id, bookmarks, etc.)
 
 // How many Drive content requests run in parallel during a sync. Large
 // vaults previously fetched every file's body one request at a time (a full
@@ -202,6 +208,79 @@ function parseWikilinks(content) {
 }
 
 // ---------------------------------------------------------------------------
+// Frontmatter / Properties — a leading "---\n...\n---" YAML-ish block.
+// Parsed loosely (key: value per line, values may be inline lists like
+// "[a, b]" or comma-separated) — enough to power the Properties panel and
+// the tag index without pulling in a real YAML parser.
+// ---------------------------------------------------------------------------
+function parseFrontmatter(content) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*\r?\n?/.exec(content || '');
+  if (!m) return { properties: [], body: content || '', raw: '' };
+  const raw = m[1];
+  const body = content.slice(m[0].length);
+  const properties = [];
+  const lines = raw.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const kv = /^([^:#\s][^:]*):\s*(.*)$/.exec(line);
+    if (!kv) continue;
+    let key = kv[1].trim();
+    let value = kv[2].trim();
+    // Gather an indented "- item" list that follows a bare "key:" line.
+    if (!value) {
+      const items = [];
+      let j = i + 1;
+      while (j < lines.length && /^\s*-\s+/.test(lines[j])) {
+        items.push(lines[j].replace(/^\s*-\s+/, '').trim());
+        j++;
+      }
+      if (items.length) {
+        value = items.join(', ');
+        i = j - 1;
+      }
+    }
+    properties.push({ key, value });
+  }
+  return { properties, body, raw };
+}
+
+function splitListValue(value) {
+  const trimmed = value.trim().replace(/^\[/, '').replace(/\]$/, '');
+  return trimmed
+    .split(',')
+    .map((s) => s.trim().replace(/^["']|["']$/g, ''))
+    .filter(Boolean);
+}
+
+// Tags come from two places, both real Obsidian conventions: a `tags:` (or
+// `tag:`) frontmatter property, and inline `#hashtag` tokens anywhere in the
+// body. Nested tags ("#parent/child") are kept as their full path. Inline
+// tags inside fenced/inline code are skipped so code samples don't pollute
+// the tag index.
+function extractTags(content) {
+  if (!content) return [];
+  const { properties, body } = parseFrontmatter(content);
+  const tags = new Set();
+
+  properties.forEach((p) => {
+    if (/^tags?$/i.test(p.key)) {
+      splitListValue(p.value).forEach((t) => {
+        const clean = t.replace(/^#/, '').trim();
+        if (clean) tags.add(clean);
+      });
+    }
+  });
+
+  const withoutCode = body.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`]*`/g, ' ');
+  const re = /(^|[\s(])#([A-Za-z][A-Za-z0-9_\-/]*)/g;
+  let m;
+  while ((m = re.exec(withoutCode)) !== null) {
+    tags.add(m[2]);
+  }
+  return Array.from(tags);
+}
+
+// ---------------------------------------------------------------------------
 // Smart link resolution — mirrors how Obsidian resolves [[wikilinks]]:
 //   - A link that's just a name ("Notes") matches by filename anywhere in
 //     the vault, *as long as that name is unique*.
@@ -235,7 +314,7 @@ function buildLinkIndex(files, folders, rootId) {
     const isImage = f.kind === 'image' || isImageName(f.name);
     const baseName = isImage ? f.name : f.name.replace(/\.md$/i, '');
     const relativePath = dir ? `${dir}/${baseName}` : baseName;
-    return { ...f, isImage, baseName, relativePath };
+    return { ...f, isImage, baseName, relativePath, dir };
   });
 
   const byBasenameKey = new Map();
@@ -247,7 +326,7 @@ function buildLinkIndex(files, folders, rootId) {
     byRelativePath.set(r.relativePath.toLowerCase(), r);
   });
 
-  return { records, byBasenameKey, byRelativePath };
+  return { records, byBasenameKey, byRelativePath, folderPath };
 }
 
 // Resolves the text inside a [[...]] (already stripped of any |alias or
@@ -306,6 +385,30 @@ function buildBacklinkIndex(fileRecords, linksByFileId, linkIndex) {
   return backlinks;
 }
 
+// Fuzzy subsequence matcher used by the quick switcher and command palette.
+// Returns null on no match, otherwise a score where lower is better (so
+// results sort ascending). Contiguous runs and early matches score better,
+// same general idea as Obsidian's / VS Code's fuzzy finders.
+function fuzzyScore(query, text) {
+  if (!query) return 0;
+  const q = query.toLowerCase();
+  const t = text.toLowerCase();
+  let qi = 0;
+  let score = 0;
+  let lastMatch = -1;
+  for (let ti = 0; ti < t.length && qi < q.length; ti++) {
+    if (t[ti] === q[qi]) {
+      score += ti - lastMatch - 1; // gap penalty
+      if (lastMatch !== -1 && ti === lastMatch + 1) score -= 1; // contiguity bonus
+      lastMatch = ti;
+      qi++;
+    }
+  }
+  if (qi < q.length) return null;
+  score += lastMatch; // prefer earlier overall matches
+  return score;
+}
+
 // ---------------------------------------------------------------------------
 // Google Drive REST wrapper (full `drive` scope — see DRIVE_SCOPE note above)
 //
@@ -321,7 +424,11 @@ const DRIVE_ALL_DRIVES = 'supportsAllDrives=true&includeItemsFromAllDrives=true'
 // --- Apps Script proxy support -------------------------------------------
 // token is either a bearer-token string (direct Google OAuth, existing
 // behavior) or an { proxy: true, url, secret } object (Apps Script proxy).
-// Each drive*() function below branches on this.
+// Each drive*() function below branches on this. Proxy mode is read/write
+// for text notes, folders, and metadata, but does not support binary
+// uploads or moving items between folders — the deployed Apps Script only
+// exposes create/rename/trash actions, so those two features degrade
+// gracefully with a clear message instead of silently failing.
 function isProxy(token) {
   return !!(token && typeof token === 'object' && token.proxy);
 }
@@ -393,10 +500,8 @@ function driveError(res, label) {
 // attachments, etc). Drive's API has no recursive "in ancestors" query, so
 // we BFS the folder tree ourselves, one level at a time. Different chunks
 // *within* a level are independent queries, so they run concurrently —
-// only the pagination within a single chunk has to stay sequential.
-// Returns full {id,name,parents} records (not just ids) for the vault's
-// SUBfolders — the root itself is not included, since it's represented
-// separately as the vault folder.
+// only levels themselves are sequential (a child folder can't be queried
+// until its parent's id is known).
 async function driveListFolderTree(token, rootFolderId) {
   if (isProxy(token)) {
     const res = await proxyGet(token, { action: 'listFolderTree', root: rootFolderId });
@@ -555,6 +660,34 @@ async function driveCreateFile(token, folderId, rawName, content = '') {
   return res.json();
 }
 
+// Uploads an arbitrary local File/Blob (used by the sidebar's "Upload
+// files" action) preserving its real MIME type and bytes exactly — unlike
+// driveCreateFile above, which always writes UTF-8 markdown text. Direct
+// OAuth only: the Apps Script proxy's createFile action always writes
+// text/markdown, so binary uploads aren't safe to route through it.
+async function driveUploadBinary(token, folderId, file) {
+  if (isProxy(token)) {
+    const err = new Error('Uploading files requires direct Google sign-in (not supported via the Apps Script proxy).');
+    err.code = 'proxy-unsupported';
+    throw err;
+  }
+  const bytes = await file.arrayBuffer();
+  const metadata = { name: file.name, parents: [folderId], mimeType: file.type || 'application/octet-stream' };
+  const boundary = `vault-${Date.now()}`;
+  const head = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: ${
+    metadata.mimeType
+  }\r\n\r\n`;
+  const tail = `\r\n--${boundary}--`;
+  const body = new Blob([head, bytes, tail]);
+  const res = await fetch(`${DRIVE_UPLOAD_URL}?uploadType=multipart&fields=id,name,modifiedTime,parents,mimeType&${DRIVE_ALL_DRIVES}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body
+  });
+  if (!res.ok) throw driveError(res, 'Drive upload failed');
+  return res.json();
+}
+
 async function driveCreateFolder(token, parentId, name) {
   if (isProxy(token)) {
     return proxyPost(token, { action: 'createFolder', parentId, name });
@@ -579,6 +712,23 @@ async function driveRenameItem(token, id, newName) {
     body: JSON.stringify({ name: newName })
   });
   if (!res.ok) throw driveError(res, 'Drive rename failed');
+  return res.json();
+}
+
+// Moves a file or folder to a new parent folder — powers drag-and-drop
+// reorganization in the sidebar. Direct OAuth only (see isProxy note
+// above); the Apps Script proxy has no "move" action.
+async function driveMoveItem(token, id, newParentId, oldParentId) {
+  if (isProxy(token)) {
+    const err = new Error('Moving items requires direct Google sign-in (not supported via the Apps Script proxy).');
+    err.code = 'proxy-unsupported';
+    throw err;
+  }
+  const res = await fetch(
+    `${DRIVE_FILES_URL}/${id}?addParents=${newParentId}&removeParents=${oldParentId}&fields=id,parents&${DRIVE_ALL_DRIVES}`,
+    { method: 'PATCH', headers: { Authorization: `Bearer ${token}` } }
+  );
+  if (!res.ok) throw driveError(res, 'Drive move failed');
   return res.json();
 }
 
@@ -688,6 +838,7 @@ function useGoogleAuth() {
     }
     sessionStorage.removeItem('vault_access_token');
     releaseImageUrlCache();
+    releaseSearchIndex();
     setToken('');
   }, [token]);
 
@@ -716,6 +867,7 @@ function useProxyAuth() {
   const signOutProxy = useCallback(() => {
     localStorage.removeItem('vault_proxy_config');
     releaseImageUrlCache();
+    releaseSearchIndex();
     setProxyToken(null);
   }, []);
 
@@ -727,7 +879,9 @@ function useProxyAuth() {
 // new/modified note bodies (concurrently), and maintains the in-memory
 // backlink graph. Also seeds state instantly from whatever's cached locally
 // so reopening a previously-loaded vault doesn't reshow a blank sidebar
-// while a fresh listing comes back.
+// while a fresh listing comes back. Every note body it fetches (to parse
+// wikilinks) is also handed to the RAM-only search index for free — see
+// noteBodyCache below.
 // ---------------------------------------------------------------------------
 function useVaultSync(token, folder) {
   const [filesMeta, setFilesMeta] = useState([]); // notes AND images
@@ -810,10 +964,12 @@ function useVaultSync(token, folder) {
       setSyncProgress({ phase: 'fetching-content', loaded: 0, total: toFetch.length });
       const fetchResults = await mapWithConcurrency(toFetch, FETCH_CONCURRENCY, async (file) => {
         const content = await withRetry(() => driveGetFileContent(token, file.id));
+        noteBodyCache.set(file.id, content); // seed the RAM search/tag index for free
         loaded += 1;
         setSyncProgress({ phase: 'fetching-content', loaded, total: toFetch.length });
         return { fileId: file.id, links: parseWikilinks(content), cachedAt: Date.now() };
       });
+      bumpSearchIndexVersion();
 
       const freshLinkRecords = [];
       const failedFiles = [];
@@ -830,6 +986,7 @@ function useVaultSync(token, folder) {
         if (!remoteIds.has(id)) mergedLinks.delete(id);
       }
       const staleFileIds = cachedFiles.map((f) => f.id).filter((id) => !remoteIds.has(id));
+      staleFileIds.forEach((id) => noteBodyCache.delete(id));
 
       // Folders have no content to diff — just cache the structure.
       const cachedFolders = await idbGetAll(STORE_FOLDERS);
@@ -910,6 +1067,26 @@ function useVaultSync(token, folder) {
     [filesMeta, foldersMeta, folder, linksByFileId, recomputeBacklinks]
   );
 
+  const moveFile = useCallback(
+    (id, newParentId) => {
+      const nextFiles = filesMeta.map((f) => (f.id === id ? { ...f, parents: [newParentId] } : f));
+      setFilesMeta(nextFiles);
+      const rec = nextFiles.find((f) => f.id === id);
+      if (rec) idbPut(STORE_FILES, rec);
+    },
+    [filesMeta]
+  );
+
+  const moveFolder = useCallback(
+    (id, newParentId) => {
+      const next = foldersMeta.map((f) => (f.id === id ? { ...f, parents: [newParentId] } : f));
+      setFoldersMeta(next);
+      const rec = next.find((f) => f.id === id);
+      if (rec) idbPut(STORE_FOLDERS, rec);
+    },
+    [foldersMeta]
+  );
+
   const removeFile = useCallback(
     (id) => {
       const nextFiles = filesMeta.filter((f) => f.id !== id);
@@ -921,6 +1098,8 @@ function useVaultSync(token, folder) {
       recomputeBacklinks(nextFiles, nextLinks, index);
       idbDeleteMany(STORE_FILES, [id]);
       idbDeleteMany(STORE_LINKS, [id]);
+      noteBodyCache.delete(id);
+      bumpSearchIndexVersion();
     },
     [filesMeta, foldersMeta, folder, linksByFileId, recomputeBacklinks]
   );
@@ -975,6 +1154,8 @@ function useVaultSync(token, folder) {
       idbDeleteMany(STORE_FOLDERS, Array.from(toRemove));
       idbDeleteMany(STORE_FILES, removedFileIds);
       idbDeleteMany(STORE_LINKS, removedFileIds);
+      removedFileIds.forEach((fid) => noteBodyCache.delete(fid));
+      bumpSearchIndexVersion();
       return removedFileIds;
     },
     [foldersMeta, filesMeta, folder, linksByFileId, recomputeBacklinks]
@@ -992,6 +1173,7 @@ function useVaultSync(token, folder) {
     setBacklinkIndex(new Map());
     setSyncError('');
     setCacheLoaded(false);
+    releaseSearchIndex();
   }, []);
 
   return {
@@ -1009,6 +1191,8 @@ function useVaultSync(token, folder) {
     applyLocalEdit,
     registerNewFile,
     renameFile,
+    moveFile,
+    moveFolder,
     removeFile,
     registerNewFolder,
     renameFolder,
@@ -1050,14 +1234,14 @@ function buildVaultTree(rootId, folders, files) {
   return build(rootId);
 }
 
-// Flat, search-filtered list of files (used instead of the tree while the
-// sidebar search box has text in it).
+// Flat, search-filtered list of files (used by the quick switcher).
 function flattenFiles(files, query) {
-  const q = query.toLowerCase();
+  if (!query.trim()) return files.slice().sort((a, b) => a.name.localeCompare(b.name));
   return files
-    .filter((f) => f.name.toLowerCase().includes(q))
-    .slice()
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .map((f) => ({ f, score: fuzzyScore(query, f.name) }))
+    .filter((s) => s.score !== null)
+    .sort((a, b) => a.score - b.score)
+    .map((s) => s.f);
 }
 
 // ---------------------------------------------------------------------------
@@ -1112,6 +1296,260 @@ function useDriveImageUrl(token, fileId) {
   }, [token, fileId]);
 
   return { url, error };
+}
+
+// ---------------------------------------------------------------------------
+// RAM-only full-text search / tag index. `noteBodyCache` never touches
+// IndexedDB — it exists purely so the current browser tab can search and
+// list tags across the whole vault without re-fetching every note's body
+// on every keystroke. It's rebuilt from Drive each time the page loads
+// (see useVaultSync's sync pass, which seeds it for free) and wiped on
+// sign-out / vault switch by releaseSearchIndex().
+// ---------------------------------------------------------------------------
+const noteBodyCache = new Map(); // fileId -> content string, RAM only
+const searchIndexListeners = new Set();
+
+function bumpSearchIndexVersion() {
+  searchIndexListeners.forEach((fn) => fn());
+}
+
+function releaseSearchIndex() {
+  noteBodyCache.clear();
+  bumpSearchIndexVersion();
+}
+
+// Fetches (and caches) every note body not already in noteBodyCache, with
+// bounded concurrency — the same approach useVaultSync uses for the
+// wikilink pass. Called automatically in the background after the first
+// sync, and again (awaited) the moment the Search or Tags panel opens, so
+// results are never silently incomplete.
+function useVaultIndex(token, filesMeta) {
+  const [version, setVersion] = useState(0);
+  const [building, setBuilding] = useState(false);
+  const [progress, setProgress] = useState({ loaded: 0, total: 0 });
+  const inFlight = useRef(false);
+
+  useEffect(() => {
+    const listener = () => setVersion((v) => v + 1);
+    searchIndexListeners.add(listener);
+    return () => searchIndexListeners.delete(listener);
+  }, []);
+
+  const ensureIndexed = useCallback(async () => {
+    if (!token || inFlight.current) return;
+    const notes = filesMeta.filter((f) => f.kind === 'note');
+    const missing = notes.filter((f) => !noteBodyCache.has(f.id));
+    if (!missing.length) return;
+    inFlight.current = true;
+    setBuilding(true);
+    let loaded = 0;
+    setProgress({ loaded: 0, total: missing.length });
+    await mapWithConcurrency(missing, FETCH_CONCURRENCY, async (file) => {
+      try {
+        const content = await withRetry(() => driveGetFileContent(token, file.id));
+        noteBodyCache.set(file.id, content);
+      } catch {
+        // leave it unindexed; a later sync/search retry can pick it up
+      }
+      loaded += 1;
+      setProgress({ loaded, total: missing.length });
+      if (loaded % 10 === 0) bumpSearchIndexVersion();
+    });
+    bumpSearchIndexVersion();
+    inFlight.current = false;
+    setBuilding(false);
+  }, [token, filesMeta]);
+
+  // Kick off background indexing shortly after the vault's file list first
+  // appears, so Search/Tags are usually ready before the user opens them.
+  useEffect(() => {
+    if (!token || !filesMeta.length) return;
+    const t = setTimeout(() => ensureIndexed(), 400);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, filesMeta.length]);
+
+  const getBody = useCallback((fileId) => noteBodyCache.get(fileId) || '', []);
+  const updateBody = useCallback((fileId, content) => {
+    noteBodyCache.set(fileId, content);
+    bumpSearchIndexVersion();
+  }, []);
+  const indexedCount = filesMeta.filter((f) => f.kind === 'note' && noteBodyCache.has(f.id)).length;
+  const totalNotes = filesMeta.filter((f) => f.kind === 'note').length;
+
+  return {
+    ensureIndexed,
+    building,
+    progress,
+    getBody,
+    updateBody,
+    ready: indexedCount === totalNotes,
+    indexedCount,
+    totalNotes,
+    version
+  };
+}
+
+// Tag index: tag -> [{ file }] built from every indexed note's body.
+function buildTagIndex(filesMeta, getBody) {
+  const byTag = new Map();
+  filesMeta.forEach((f) => {
+    if (f.kind !== 'note') return;
+    const body = getBody(f.id);
+    if (!body) return;
+    extractTags(body).forEach((tag) => {
+      const key = tag.toLowerCase();
+      if (!byTag.has(key)) byTag.set(key, { tag, files: [] });
+      byTag.get(key).files.push(f);
+    });
+  });
+  return Array.from(byTag.values()).sort((a, b) => a.tag.localeCompare(b.tag));
+}
+
+// ---------------------------------------------------------------------------
+// Search query parsing — a subset of Obsidian's search syntax:
+//   path:foo        only files whose path contains "foo"
+//   file:foo        only files whose name contains "foo"
+//   tag:foo / #foo  only files tagged #foo (or a descendant "#foo/bar")
+//   line:(a b)      terms must all appear on the same line
+//   section:(a b)   terms must all appear under the same heading
+//   [key] / [key:value]   frontmatter property match
+//   "exact phrase"  literal phrase match
+//   bare words      plain content terms (AND-ed together)
+// ---------------------------------------------------------------------------
+function parseSearchQuery(raw) {
+  const clauses = { path: [], file: [], tag: [], line: [], section: [], property: [], phrase: [], term: [] };
+  let s = raw;
+
+  s = s.replace(/\[([^:\]]+):([^\]]+)\]/g, (_, k, v) => {
+    clauses.property.push({ key: k.trim().toLowerCase(), value: v.trim().toLowerCase() });
+    return ' ';
+  });
+  s = s.replace(/\[([^\]]+)\]/g, (_, k) => {
+    clauses.property.push({ key: k.trim().toLowerCase(), value: null });
+    return ' ';
+  });
+  s = s.replace(/"([^"]+)"/g, (_, v) => {
+    clauses.phrase.push(v.toLowerCase());
+    return ' ';
+  });
+  s = s.replace(/path:(\([^)]*\)|\S+)/gi, (_, v) => {
+    clauses.path.push(v.replace(/^\(|\)$/g, '').toLowerCase());
+    return ' ';
+  });
+  s = s.replace(/file:(\([^)]*\)|\S+)/gi, (_, v) => {
+    clauses.file.push(v.replace(/^\(|\)$/g, '').toLowerCase());
+    return ' ';
+  });
+  s = s.replace(/tag:(\([^)]*\)|\S+)/gi, (_, v) => {
+    clauses.tag.push(v.replace(/^\(|\)$/g, '').replace(/^#/, '').toLowerCase());
+    return ' ';
+  });
+  s = s.replace(/line:\(([^)]*)\)/gi, (_, v) => {
+    clauses.line.push(v.trim().toLowerCase().split(/\s+/).filter(Boolean));
+    return ' ';
+  });
+  s = s.replace(/section:\(([^)]*)\)/gi, (_, v) => {
+    clauses.section.push(v.trim().toLowerCase().split(/\s+/).filter(Boolean));
+    return ' ';
+  });
+  s = s.replace(/(^|\s)#([A-Za-z][A-Za-z0-9_\-/]*)/g, (_, pre, v) => {
+    clauses.tag.push(v.toLowerCase());
+    return ' ';
+  });
+
+  clauses.term = s.trim().split(/\s+/).filter(Boolean).map((t) => t.toLowerCase());
+  return clauses;
+}
+
+// Runs a parsed query against the in-memory vault index, returning results
+// grouped by file: [{ file, matches: [{ line, lineNumber, ranges }] }],
+// sorted by file name to match the reference search UI.
+function runVaultSearch(query, filesMeta, linkIndex, getBody, tagsByFileId) {
+  const clauses = parseSearchQuery(query);
+  const hasStructural = clauses.path.length || clauses.file.length || clauses.tag.length || clauses.property.length;
+  const hasContent = clauses.term.length || clauses.phrase.length || clauses.line.length || clauses.section.length;
+  if (!hasStructural && !hasContent) return [];
+
+  const results = [];
+  filesMeta.forEach((f) => {
+    if (f.kind !== 'note') return;
+    const rec = linkIndex.records.find((r) => r.id === f.id);
+    const path = (rec ? rec.relativePath : f.name).toLowerCase();
+    const name = f.name.toLowerCase();
+
+    if (clauses.path.some((v) => !path.includes(v))) return;
+    if (clauses.file.some((v) => !name.includes(v))) return;
+
+    const body = getBody(f.id);
+    const { properties, body: bodyNoFrontmatter } = parseFrontmatter(body);
+    const propMap = new Map(properties.map((p) => [p.key.toLowerCase(), p.value.toLowerCase()]));
+    if (
+      clauses.property.some(({ key, value }) => {
+        if (!propMap.has(key)) return true;
+        if (value === null) return false;
+        return !propMap.get(key).includes(value);
+      })
+    )
+      return;
+
+    const fileTags = (tagsByFileId.get(f.id) || []).map((t) => t.toLowerCase());
+    if (
+      clauses.tag.some((v) => !fileTags.some((t) => t === v || t.startsWith(v + '/')))
+    )
+      return;
+
+    if (!hasContent) {
+      results.push({ file: f, path: rec ? rec.relativePath : f.name, matches: [] });
+      return;
+    }
+    if (!body) return; // not indexed yet — will appear once indexing finishes
+
+    const lines = bodyNoFrontmatter.split('\n');
+    const lower = bodyNoFrontmatter.toLowerCase();
+    const allTermsPresent =
+      clauses.term.every((t) => lower.includes(t)) && clauses.phrase.every((p) => lower.includes(p));
+    if (!allTermsPresent) return;
+
+    // Build heading sections for section: matching.
+    let currentHeading = '';
+    const headingByLine = lines.map((l) => {
+      const h = /^#{1,6}\s+(.*)$/.exec(l);
+      if (h) currentHeading = h[1];
+      return currentHeading;
+    });
+
+    const wanted = [...clauses.term, ...clauses.phrase];
+    const matches = [];
+    lines.forEach((line, idx) => {
+      const lowerLine = line.toLowerCase();
+      const lineHasAll = wanted.length ? wanted.every((t) => lowerLine.includes(t)) : false;
+      const lineOk = clauses.line.every((group) => group.every((t) => lowerLine.includes(t)));
+      const sectionOk = clauses.section.every((group) =>
+        group.every((t) => headingByLine[idx].toLowerCase().includes(t) || lowerLine.includes(t))
+      );
+      const contributesLine = wanted.length ? lineHasAll : true;
+      if (contributesLine && lineOk && sectionOk && (wanted.length || clauses.line.length || clauses.section.length)) {
+        matches.push({ line, lineNumber: idx + 1, terms: wanted });
+      }
+    });
+
+    // line:/section: without plain terms still need at least one satisfying
+    // line to count as a file match.
+    if ((clauses.line.length || clauses.section.length) && !matches.length) return;
+
+    if (wanted.length && !matches.length) {
+      // Terms appear in the file (allTermsPresent) but never together on one
+      // line — still a file-level match; show the first line containing any term.
+      const idx = lines.findIndex((l) => wanted.some((t) => l.toLowerCase().includes(t)));
+      if (idx !== -1) matches.push({ line: lines[idx], lineNumber: idx + 1, terms: wanted });
+    }
+
+    results.push({ file: f, path: rec ? rec.relativePath : f.name, matches: matches.slice(0, 6), matchCount: matches.length });
+  });
+
+  results.sort((a, b) => a.path.localeCompare(b.path));
+  return results;
 }
 
 // ---------------------------------------------------------------------------
@@ -1251,17 +1689,285 @@ function useLinkAutocomplete(textareaRef, onChange, linkIndex) {
 }
 
 // ---------------------------------------------------------------------------
-// Minimal markdown + wikilink renderer (no external markdown dependency)
+// Icon library — small hand-drawn line icons in the same monoline style
+// Obsidian itself uses, so nothing in the UI relies on emoji glyphs. Folders
+// are identified purely by their expand/collapse chevron, notes have no
+// icon at all, and images are identified by their visible ".png"/".jpg"
+// extension — exactly per the "no emoji, no redundant icons" brief.
+// ---------------------------------------------------------------------------
+function Svg({ children, size = 16, style, ...rest }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ flexShrink: 0, ...style }}
+      {...rest}
+    >
+      {children}
+    </svg>
+  );
+}
+
+const IconChevronRight = (p) => (
+  <Svg {...p}>
+    <polyline points="9 18 15 12 9 6" />
+  </Svg>
+);
+const IconChevronDown = (p) => (
+  <Svg {...p}>
+    <polyline points="6 9 12 15 18 9" />
+  </Svg>
+);
+const IconMenu = (p) => (
+  <Svg {...p}>
+    <line x1="4" y1="7" x2="20" y2="7" />
+    <line x1="4" y1="12" x2="20" y2="12" />
+    <line x1="4" y1="17" x2="20" y2="17" />
+  </Svg>
+);
+const IconPlus = (p) => (
+  <Svg {...p}>
+    <line x1="12" y1="5" x2="12" y2="19" />
+    <line x1="5" y1="12" x2="19" y2="12" />
+  </Svg>
+);
+const IconFilePlus = (p) => (
+  <Svg {...p}>
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+    <polyline points="14 2 14 8 20 8" />
+    <line x1="12" y1="12" x2="12" y2="18" />
+    <line x1="9" y1="15" x2="15" y2="15" />
+  </Svg>
+);
+const IconFolderPlus = (p) => (
+  <Svg {...p}>
+    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+    <line x1="12" y1="11" x2="12" y2="16" />
+    <line x1="9.5" y1="13.5" x2="14.5" y2="13.5" />
+  </Svg>
+);
+const IconUpload = (p) => (
+  <Svg {...p}>
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+    <polyline points="17 8 12 3 7 8" />
+    <line x1="12" y1="3" x2="12" y2="15" />
+  </Svg>
+);
+const IconMoreVertical = (p) => (
+  <Svg {...p}>
+    <circle cx="12" cy="5" r="1.4" fill="currentColor" stroke="none" />
+    <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
+    <circle cx="12" cy="19" r="1.4" fill="currentColor" stroke="none" />
+  </Svg>
+);
+const IconEdit = (p) => (
+  <Svg {...p}>
+    <path d="M12 20h9" />
+    <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+  </Svg>
+);
+const IconTrash = (p) => (
+  <Svg {...p}>
+    <polyline points="3 6 5 6 21 6" />
+    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+    <path d="M10 11v6" />
+    <path d="M14 11v6" />
+    <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+  </Svg>
+);
+const IconX = (p) => (
+  <Svg {...p}>
+    <line x1="18" y1="6" x2="6" y2="18" />
+    <line x1="6" y1="6" x2="18" y2="18" />
+  </Svg>
+);
+const IconPanelLeft = (p) => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <line x1="9" y1="4" x2="9" y2="20" />
+  </Svg>
+);
+const IconSearch = (p) => (
+  <Svg {...p}>
+    <circle cx="11" cy="11" r="7" />
+    <line x1="21" y1="21" x2="16.2" y2="16.2" />
+  </Svg>
+);
+const IconTag = (p) => (
+  <Svg {...p}>
+    <path d="M20.6 12.6 12.4 20.8a2 2 0 0 1-2.8 0l-7.4-7.4a2 2 0 0 1 0-2.8L10.4 2.4A2 2 0 0 1 11.8 2H18a2 2 0 0 1 2 2v6.2a2 2 0 0 1-.6 1.4Z" />
+    <circle cx="15" cy="8" r="1.4" fill="currentColor" stroke="none" />
+  </Svg>
+);
+const IconStar = (p) => (
+  <Svg {...p}>
+    <polygon points="12 2 15.1 8.6 22 9.6 17 14.6 18.2 21.6 12 18.2 5.8 21.6 7 14.6 2 9.6 8.9 8.6" />
+  </Svg>
+);
+const IconStarFilled = (p) => (
+  <Svg {...p} fill="currentColor">
+    <polygon points="12 2 15.1 8.6 22 9.6 17 14.6 18.2 21.6 12 18.2 5.8 21.6 7 14.6 2 9.6 8.9 8.6" />
+  </Svg>
+);
+const IconRefresh = (p) => (
+  <Svg {...p}>
+    <polyline points="23 4 23 10 17 10" />
+    <polyline points="1 20 1 14 7 14" />
+    <path d="M3.5 9a8.5 8.5 0 0 1 14.3-4.1L23 10" />
+    <path d="M20.5 15a8.5 8.5 0 0 1-14.3 4.1L1 14" />
+  </Svg>
+);
+const IconLogOut = (p) => (
+  <Svg {...p}>
+    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+    <polyline points="16 17 21 12 16 7" />
+    <line x1="21" y1="12" x2="9" y2="12" />
+  </Svg>
+);
+const IconFolder = (p) => (
+  <Svg {...p}>
+    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+  </Svg>
+);
+const IconDrive = (p) => (
+  <Svg {...p}>
+    <rect x="2" y="6" width="20" height="12" rx="2" />
+    <line x1="2" y1="12" x2="22" y2="12" />
+    <line x1="6" y1="15" x2="6.01" y2="15" />
+  </Svg>
+);
+const IconSplitVertical = (p) => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <line x1="12" y1="4" x2="12" y2="20" />
+  </Svg>
+);
+const IconSplitHorizontal = (p) => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <line x1="3" y1="12" x2="21" y2="12" />
+  </Svg>
+);
+const IconEye = (p) => (
+  <Svg {...p}>
+    <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z" />
+    <circle cx="12" cy="12" r="3" />
+  </Svg>
+);
+const IconArrowLeft = (p) => (
+  <Svg {...p}>
+    <line x1="19" y1="12" x2="5" y2="12" />
+    <polyline points="12 19 5 12 12 5" />
+  </Svg>
+);
+const IconArrowRight = (p) => (
+  <Svg {...p}>
+    <line x1="5" y1="12" x2="19" y2="12" />
+    <polyline points="12 5 19 12 12 19" />
+  </Svg>
+);
+const IconSettings = (p) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="3" />
+    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" />
+  </Svg>
+);
+const IconHelp = (p) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="10" />
+    <path d="M9.1 9a3 3 0 0 1 5.82 1c0 2-3 2.5-3 4.5" />
+    <line x1="12" y1="17.5" x2="12" y2="17.51" />
+  </Svg>
+);
+const IconSliders = (p) => (
+  <Svg {...p}>
+    <line x1="4" y1="6" x2="20" y2="6" />
+    <line x1="4" y1="12" x2="20" y2="12" />
+    <line x1="4" y1="18" x2="20" y2="18" />
+    <circle cx="9" cy="6" r="2" fill="var(--bg-1)" />
+    <circle cx="15" cy="12" r="2" fill="var(--bg-1)" />
+    <circle cx="7" cy="18" r="2" fill="var(--bg-1)" />
+  </Svg>
+);
+const IconInfo = (p) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="10" />
+    <line x1="12" y1="16" x2="12" y2="11.5" />
+    <line x1="12" y1="8" x2="12" y2="8.01" />
+  </Svg>
+);
+const IconImageMissing = (p) => (
+  <Svg {...p}>
+    <rect x="3" y="3" width="18" height="18" rx="2" />
+    <circle cx="9" cy="9" r="1.8" />
+    <path d="m21 15-5-5L5 21" />
+    <line x1="3" y1="3" x2="21" y2="21" stroke="var(--danger)" />
+  </Svg>
+);
+const IconCheck = (p) => (
+  <Svg {...p}>
+    <polyline points="20 6 9 17 4 12" />
+  </Svg>
+);
+const IconLoader = (p) => (
+  <Svg {...p} className={`spin ${p.className || ''}`}>
+    <line x1="12" y1="2" x2="12" y2="6" />
+    <line x1="12" y1="18" x2="12" y2="22" />
+    <line x1="4.9" y1="4.9" x2="7.8" y2="7.8" />
+    <line x1="16.2" y1="16.2" x2="19.1" y2="19.1" />
+    <line x1="2" y1="12" x2="6" y2="12" />
+    <line x1="18" y1="12" x2="22" y2="12" />
+    <line x1="4.9" y1="19.1" x2="7.8" y2="16.2" />
+    <line x1="16.2" y1="7.8" x2="19.1" y2="4.9" />
+  </Svg>
+);
+const IconCommand = (p) => (
+  <Svg {...p}>
+    <path d="M6 3a3 3 0 0 1 3 3v12a3 3 0 1 1-3-3h12a3 3 0 1 1-3 3V6a3 3 0 1 1 3-3H6z" />
+  </Svg>
+);
+const IconAlertTriangle = (p) => (
+  <Svg {...p}>
+    <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />
+    <line x1="12" y1="9" x2="12" y2="13" />
+    <line x1="12" y1="17" x2="12" y2="17.01" />
+  </Svg>
+);
+
+// ---------------------------------------------------------------------------
+// Minimal markdown + wikilink + tag renderer (no external markdown dependency)
 // ---------------------------------------------------------------------------
 function renderInline(text, keyPrefix, handlers, linkIndex) {
   const nodes = [];
-  const re = /(!?\[\[[^[\]]+\]\])|(\*\*[^*]+\*\*)|(`[^`]+`)|(\[[^[\]]+\]\([^()\s]+\))|(\*[^*]+\*)/g;
+  const re =
+    /(!?\[\[[^[\]]+\]\])|(\*\*[^*]+\*\*)|(`[^`]+`)|(\[[^[\]]+\]\([^()\s]+\))|(\*[^*]+\*)|((?:^|[\s(])#[A-Za-z][A-Za-z0-9_\-/]*)/g;
   let lastIndex = 0;
   let match;
   let i = 0;
   while ((match = re.exec(text)) !== null) {
-    if (match.index > lastIndex) nodes.push(text.slice(lastIndex, match.index));
-    const token = match[0];
+    let token = match[0];
+    let tokenStart = match.index;
+    // The tag alternative captures an optional leading space/paren so the
+    // word-boundary check works without lookbehind edge cases — push that
+    // leading character back out as plain text before handling the tag.
+    if (match[6]) {
+      const tagToken = match[6];
+      const lead = /^[\s(]/.test(tagToken) ? tagToken[0] : '';
+      if (lead) {
+        if (tokenStart > lastIndex) nodes.push(text.slice(lastIndex, tokenStart));
+        nodes.push(lead);
+        lastIndex = tokenStart + lead.length;
+        tokenStart = lastIndex;
+        token = tagToken.slice(lead.length);
+      }
+    }
+    if (tokenStart > lastIndex) nodes.push(text.slice(lastIndex, tokenStart));
     const key = `${keyPrefix}-${i++}`;
     if (token.startsWith('[[') || token.startsWith('![[')) {
       const core = token.startsWith('!') ? token.slice(1) : token;
@@ -1305,7 +2011,7 @@ function renderInline(text, keyPrefix, handlers, linkIndex) {
       } else if (resolution.isImage) {
         nodes.push(
           <span key={key} className="wikilink wikilink-missing-image" title={`Image not found: ${rawTarget}`}>
-            🖼 {rawTarget}
+            {rawTarget}
           </span>
         );
       } else {
@@ -1331,28 +2037,41 @@ function renderInline(text, keyPrefix, handlers, linkIndex) {
           {m[1]}
         </a>
       );
+    } else if (token.startsWith('#')) {
+      const tagName = token.slice(1);
+      nodes.push(
+        <span
+          key={key}
+          className="tag-chip"
+          onClick={() => handlers.onOpenTag && handlers.onOpenTag(tagName)}
+          title={`Search #${tagName}`}
+        >
+          #{tagName}
+        </span>
+      );
     } else if (token.startsWith('*')) {
       nodes.push(<em key={key}>{token.slice(1, -1)}</em>);
     }
-    lastIndex = re.lastIndex;
+    lastIndex = tokenStart + token.length;
   }
   if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
   return nodes;
 }
 
-function renderPreview(content, handlers, linkIndex) {
+function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '') {
   const lines = content.split('\n');
   const blocks = [];
   let listBuffer = [];
   let listType = null;
+  let codeBuffer = null;
 
   const flushList = () => {
     if (!listBuffer.length) return;
     const Tag = listType === 'ol' ? 'ol' : 'ul';
     blocks.push(
-      <Tag key={`list-${blocks.length}`}>
+      <Tag key={`${keyBase}list-${blocks.length}`}>
         {listBuffer.map((item, idx) => (
-          <li key={idx}>{renderInline(item, `li-${blocks.length}-${idx}`, handlers, linkIndex)}</li>
+          <li key={idx}>{renderInline(item, `${keyBase}li-${blocks.length}-${idx}`, handlers, linkIndex)}</li>
         ))}
       </Tag>
     );
@@ -1361,22 +2080,56 @@ function renderPreview(content, handlers, linkIndex) {
   };
 
   lines.forEach((line, idx) => {
+    if (codeBuffer !== null) {
+      if (/^```/.test(line.trim())) {
+        blocks.push(
+          <pre key={`${keyBase}code-${idx}`}>
+            <code>{codeBuffer.join('\n')}</code>
+          </pre>
+        );
+        codeBuffer = null;
+      } else {
+        codeBuffer.push(line);
+      }
+      return;
+    }
+    const fence = /^```/.test(line.trim());
     const heading = line.match(/^(#{1,6})\s+(.*)$/);
     const quote = line.match(/^>\s?(.*)$/);
-    const ul = line.match(/^[-*]\s+(.*)$/);
-    const ol = line.match(/^\d+\.\s+(.*)$/);
+    const ul = line.match(/^\s*[-*]\s+(.*)$/);
+    const ol = line.match(/^\s*\d+\.\s+(.*)$/);
     const hr = /^(-{3,}|\*{3,})$/.test(line.trim());
+    const taskUl = line.match(/^\s*[-*]\s+\[( |x|X)\]\s+(.*)$/);
 
-    if (heading) {
+    if (fence) {
+      flushList();
+      codeBuffer = [];
+    } else if (taskUl) {
+      flushList();
+      const checked = taskUl[1].toLowerCase() === 'x';
+      blocks.push(
+        <div className="task-line" key={`${keyBase}task-${idx}`}>
+          <input type="checkbox" checked={checked} readOnly />
+          <span className={checked ? 'task-done' : ''}>{renderInline(taskUl[2], `${keyBase}t-${idx}`, handlers, linkIndex)}</span>
+        </div>
+      );
+    } else if (heading) {
       flushList();
       const level = Math.min(heading[1].length, 6);
-      blocks.push(React.createElement(`h${level}`, { key: idx }, renderInline(heading[2], `h-${idx}`, handlers, linkIndex)));
+      const headingId = heading[2].trim().toLowerCase().replace(/[^a-z0-9]+/g, '-');
+      blocks.push(
+        React.createElement(
+          `h${level}`,
+          { key: `${keyBase}h-${idx}`, id: `${keyBase}${headingId}` },
+          renderInline(heading[2], `${keyBase}h-${idx}`, handlers, linkIndex)
+        )
+      );
     } else if (hr) {
       flushList();
-      blocks.push(<hr key={idx} />);
+      blocks.push(<hr key={`${keyBase}hr-${idx}`} />);
     } else if (quote) {
       flushList();
-      blocks.push(<blockquote key={idx}>{renderInline(quote[1], `q-${idx}`, handlers, linkIndex)}</blockquote>);
+      blocks.push(<blockquote key={`${keyBase}q-${idx}`}>{renderInline(quote[1], `${keyBase}q-${idx}`, handlers, linkIndex)}</blockquote>);
     } else if (ul) {
       listType = 'ul';
       listBuffer.push(ul[1]);
@@ -1387,15 +2140,192 @@ function renderPreview(content, handlers, linkIndex) {
       flushList();
     } else {
       flushList();
-      blocks.push(<p key={idx}>{renderInline(line, `p-${idx}`, handlers, linkIndex)}</p>);
+      blocks.push(<p key={`${keyBase}p-${idx}`}>{renderInline(line, `${keyBase}p-${idx}`, handlers, linkIndex)}</p>);
     }
   });
   flushList();
+  if (codeBuffer !== null) {
+    blocks.push(
+      <pre key={`${keyBase}code-end`}>
+        <code>{codeBuffer.join('\n')}</code>
+      </pre>
+    );
+  }
   return blocks;
 }
 
+// The frontmatter block, rendered as a small key/value "Properties" panel —
+// a lighter-weight stand-in for Obsidian's Properties editor UI.
+function PropertiesPanel({ properties, handlers }) {
+  if (!properties.length) return null;
+  return (
+    <div className="properties-panel">
+      {properties.map((p) => {
+        const isTagProp = /^tags?$/i.test(p.key);
+        return (
+          <div className="properties-row" key={p.key}>
+            <span className="properties-key">{p.key}</span>
+            <span className="properties-value">
+              {isTagProp ? (
+                splitListValue(p.value).map((t) => (
+                  <span
+                    key={t}
+                    className="tag-chip"
+                    onClick={() => handlers.onOpenTag && handlers.onOpenTag(t.replace(/^#/, ''))}
+                  >
+                    #{t.replace(/^#/, '')}
+                  </span>
+                ))
+              ) : (
+                <span>{p.value}</span>
+              )}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Extracts a short, highlighted context snippet around the first
+// occurrence of `needle` in `haystack` — used by both the search results
+// panel and the inline "Linked/Unlinked mentions" sections at the bottom
+// of a note, so both features share one look.
+function snippetAround(haystack, needle, radius = 60) {
+  const lower = haystack.toLowerCase();
+  const idx = needle ? lower.indexOf(needle.toLowerCase()) : -1;
+  if (idx === -1) {
+    return { before: haystack.slice(0, radius * 2), match: '', after: '' };
+  }
+  const start = Math.max(0, idx - radius);
+  const end = Math.min(haystack.length, idx + needle.length + radius);
+  return {
+    before: (start > 0 ? '…' : '') + haystack.slice(start, idx),
+    match: haystack.slice(idx, idx + needle.length),
+    after: haystack.slice(idx + needle.length, end) + (end < haystack.length ? '…' : '')
+  };
+}
+
+function HighlightedSnippet({ text, needle }) {
+  const { before, match, after } = snippetAround(text, needle);
+  return (
+    <>
+      {before}
+      {match && <mark>{match}</mark>}
+      {after}
+    </>
+  );
+}
+
+// Inline "Linked mentions" / "Unlinked mentions" — reproduces Obsidian's
+// in-document backlinks pane. Linked mentions are notes that [[link]] here
+// (grouped by source note, each occurrence shown with context and the
+// link text highlighted); unlinked mentions are notes that mention this
+// note's title as plain text without ever linking to it.
+function InlineMentions({ file, linkIndex, getBody, backlinkFileIds, allFiles, onOpenNote }) {
+  const [linkedOpen, setLinkedOpen] = useState(true);
+  const [unlinkedOpen, setUnlinkedOpen] = useState(false);
+
+  const linked = useMemo(() => {
+    return backlinkFileIds
+      .map((id) => allFiles.find((f) => f.id === id))
+      .filter(Boolean)
+      .map((src) => {
+        const body = getBody(src.id);
+        const occurrences = [];
+        const re = /!?\[\[([^[\]|#]+)(?:#[^[\]|]*)?(?:\|[^[\]]+)?\]\]/g;
+        let m;
+        while ((m = re.exec(body)) !== null) {
+          const res = resolveLinkTarget(m[1].trim(), linkIndex);
+          if (res.status === 'resolved' && res.file.id === file.id) {
+            occurrences.push(snippetAround(body, m[0]));
+          }
+        }
+        return { src, occurrences: occurrences.length ? occurrences : [snippetAround(body, '')] };
+      })
+      .sort((a, b) => a.src.name.localeCompare(b.src.name));
+  }, [backlinkFileIds, allFiles, getBody, linkIndex, file.id]);
+
+  const unlinked = useMemo(() => {
+    const title = (file.baseName || file.name || '').trim();
+    if (!title) return [];
+    const titleLower = title.toLowerCase();
+    const linkedIds = new Set(backlinkFileIds);
+    return allFiles
+      .filter((f) => f.kind === 'note' && f.id !== file.id && !linkedIds.has(f.id))
+      .map((f) => {
+        const body = getBody(f.id);
+        if (!body || !body.toLowerCase().includes(titleLower)) return null;
+        // Skip if every occurrence is actually inside a [[...]] (already
+        // counted as linked some other way, or a partial-name collision).
+        return { src: f, occurrences: [snippetAround(body, title)] };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.src.name.localeCompare(b.src.name));
+  }, [allFiles, getBody, file, backlinkFileIds]);
+
+  const linkedCount = linked.reduce((n, g) => n + g.occurrences.length, 0);
+
+  return (
+    <div className="inline-mentions">
+      <div className="mentions-group">
+        <button className="mentions-header" onClick={() => setLinkedOpen((v) => !v)}>
+          {linkedOpen ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
+          <span>Linked mentions</span>
+          <span className="mentions-count">{linkedCount}</span>
+        </button>
+        {linkedOpen && (
+          <div className="mentions-body">
+            {linked.length === 0 && <p className="muted small">No notes link here yet.</p>}
+            {linked.map(({ src, occurrences }) => (
+              <div className="mentions-source" key={src.id}>
+                <button className="mentions-source-name" onClick={() => onOpenNote(src.id)}>
+                  {src.name.replace(/\.md$/i, '')}
+                </button>
+                {occurrences.map((occ, i) => (
+                  <div className="mentions-snippet" key={i} onClick={() => onOpenNote(src.id)}>
+                    {occ.before}
+                    {occ.match && <mark>{occ.match}</mark>}
+                    {occ.after}
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="mentions-group">
+        <button className="mentions-header muted-header" onClick={() => setUnlinkedOpen((v) => !v)}>
+          {unlinkedOpen ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
+          <span>Unlinked mentions</span>
+          <span className="mentions-count">{unlinked.length}</span>
+        </button>
+        {unlinkedOpen && (
+          <div className="mentions-body">
+            {unlinked.length === 0 && <p className="muted small">No unlinked mentions.</p>}
+            {unlinked.map(({ src, occurrences }) => (
+              <div className="mentions-source" key={src.id}>
+                <button className="mentions-source-name" onClick={() => onOpenNote(src.id)}>
+                  {src.name.replace(/\.md$/i, '')}
+                </button>
+                {occurrences.map((occ, i) => (
+                  <div className="mentions-snippet" key={i} onClick={() => onOpenNote(src.id)}>
+                    {occ.before}
+                    {occ.match && <mark>{occ.match}</mark>}
+                    {occ.after}
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
-// UI: presentational components
+// UI: login / folder-select / loading screens
 // ---------------------------------------------------------------------------
 function LoginScreen({ onSignIn, ready, onSignInProxy }) {
   const [showProxyForm, setShowProxyForm] = useState(false);
@@ -1411,7 +2341,9 @@ function LoginScreen({ onSignIn, ready, onSignInProxy }) {
 
   return (
     <div className="center-screen">
-      <div className="brand-mark" aria-hidden="true" />
+      <div className="brand-mark" aria-hidden="true">
+        <IconFolder size={22} />
+      </div>
       <h1>Vault</h1>
       <p className="muted">Your notes, in your Google Drive. Nothing stored on this device.</p>
       <button className="btn btn-primary" disabled={!ready} onClick={onSignIn}>
@@ -1450,7 +2382,9 @@ function LoginScreen({ onSignIn, ready, onSignInProxy }) {
 function FolderPrompt({ onPick }) {
   return (
     <div className="center-screen">
-      <div className="brand-mark" aria-hidden="true" />
+      <div className="brand-mark" aria-hidden="true">
+        <IconFolder size={22} />
+      </div>
       <h1>Choose your vault</h1>
       <p className="muted">Pick the Google Drive folder that holds (or will hold) your notes.</p>
       <button className="btn btn-primary" onClick={onPick}>
@@ -1522,7 +2456,8 @@ function ProxyFolderPicker({ token, onPick, onCancel }) {
             {items.map((f) => (
               <li key={f.id}>
                 <button className="link-btn" onClick={() => setStack([...stack, f])}>
-                  {f.isDrive ? '🗄️' : '📁'} {f.name}
+                  {f.isDrive ? <IconDrive size={14} /> : <IconFolder size={14} />}
+                  {f.name}
                 </button>
               </li>
             ))}
@@ -1579,7 +2514,9 @@ function VaultLoadingScreen({ progress }) {
       : 'Loading your vault…';
   return (
     <div className="center-screen">
-      <div className="brand-mark" aria-hidden="true" />
+      <div className="brand-mark" aria-hidden="true">
+        <IconFolder size={22} />
+      </div>
       <h1>Vault</h1>
       <p className="muted">{label}</p>
       <div className="progress-bar">
@@ -1593,132 +2530,254 @@ function VaultLoadingScreen({ progress }) {
   );
 }
 
-function TopBar({ folderName, syncing, syncError, onSync, onNewNote, onChangeFolder, onSignOut, onToggleSidebar, dirty, saving }) {
-  return (
-    <header className="topbar">
-      <button className="icon-btn sidebar-toggle" onClick={onToggleSidebar} aria-label="Toggle sidebar">
-        ☰
-      </button>
-      <div className="topbar-title">
-        <span className="vault-name">{folderName}</span>
-        <span className="save-state">{saving ? 'Saving…' : dirty ? 'Unsaved changes' : 'Saved'}</span>
-      </div>
-      <div className="topbar-actions">
-        {syncError && (
-          <span className="sync-error" title={syncError}>
-            Sync error
-          </span>
-        )}
-        <button className="icon-btn" onClick={onNewNote} title="New note">
-          ＋
-        </button>
-        <button className="icon-btn" onClick={onChangeFolder} title="Change vault folder">
-          📁
-        </button>
-        <button className="icon-btn" onClick={onSync} title="Sync now" disabled={syncing}>
-          {syncing ? '…' : '⟳'}
-        </button>
-        <button className="icon-btn" onClick={onSignOut} title="Sign out">
-          ⏻
-        </button>
-      </div>
-    </header>
-  );
+// ---------------------------------------------------------------------------
+// Generic dropdown menu — trigger button + floating panel, closes on
+// outside click or Escape. Backs the merged "add item" button, per-row
+// "⋮" menus, and the tab context menu.
+// ---------------------------------------------------------------------------
+function useClickOutside(ref, onOutside) {
+  useEffect(() => {
+    function handler(e) {
+      if (ref.current && !ref.current.contains(e.target)) onOutside();
+    }
+    document.addEventListener('mousedown', handler);
+    document.addEventListener('touchstart', handler);
+    return () => {
+      document.removeEventListener('mousedown', handler);
+      document.removeEventListener('touchstart', handler);
+    };
+  }, [ref, onOutside]);
 }
 
-// Small "⋮" popover menu attached to each tree row — actions differ for
-// folders (can contain new notes/folders) vs files.
-function TreeMenu({ isFolder, onNewNote, onNewFolder, onRename, onDelete }) {
+function DropdownMenu({ trigger, children, align = 'left', className = '' }) {
   const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  useClickOutside(wrapRef, () => setOpen(false));
+
   return (
-    <div className="tree-menu-wrap">
-      <button
-        className="tree-menu-btn"
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen((v) => !v);
-        }}
-        aria-label="More actions"
-      >
-        ⋮
-      </button>
+    <div className={`dropdown-wrap ${className}`} ref={wrapRef}>
+      {trigger(() => setOpen((v) => !v), open)}
       {open && (
-        <div className="tree-menu" onMouseLeave={() => setOpen(false)}>
-          {isFolder && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setOpen(false);
-                onNewNote();
-              }}
-            >
-              New note
-            </button>
-          )}
-          {isFolder && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setOpen(false);
-                onNewFolder();
-              }}
-            >
-              New folder
-            </button>
-          )}
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpen(false);
-              onRename();
-            }}
-          >
-            Rename
-          </button>
-          <button
-            className="danger"
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpen(false);
-              onDelete();
-            }}
-          >
-            Delete
-          </button>
+        <div className={`dropdown-menu align-${align}`} onClick={() => setOpen(false)}>
+          {children}
         </div>
       )}
     </div>
   );
 }
 
+function MenuItem({ icon, children, danger, onClick, disabled }) {
+  return (
+    <button className={`menu-item ${danger ? 'danger' : ''}`} onClick={onClick} disabled={disabled}>
+      {icon}
+      <span>{children}</span>
+    </button>
+  );
+}
+
+function MenuDivider() {
+  return <div className="menu-divider" />;
+}
+
+// ---------------------------------------------------------------------------
+// Activity bar — the thin left-most icon ribbon, mirroring Obsidian's icon
+// strip. Switches which panel the side dock shows.
+// ---------------------------------------------------------------------------
+function ActivityBar({ activeView, onSetView, onOpenCommandPalette, onSync, syncing, onChangeFolder, onSignOut, folderName }) {
+  const item = (view, Icon, label, extra) => (
+    <button
+      className={`activity-btn ${activeView === view ? 'active' : ''}`}
+      onClick={() => onSetView(view)}
+      title={label}
+      aria-label={label}
+    >
+      <Icon size={19} />
+      {extra}
+    </button>
+  );
+  return (
+    <div className="activity-bar">
+      <div className="activity-bar-top">
+        {item('explorer', IconFilePlus, 'Files')}
+        {item('search', IconSearch, 'Search')}
+        {item('tags', IconTag, 'Tags')}
+        {item('bookmarks', IconStar, 'Bookmarks')}
+      </div>
+      <div className="activity-bar-bottom">
+        <button className="activity-btn" onClick={onOpenCommandPalette} title="Command palette (⌘K)">
+          <IconCommand size={18} />
+        </button>
+        <button className="activity-btn" onClick={onSync} title="Sync vault" disabled={syncing}>
+          {syncing ? <IconLoader size={18} /> : <IconRefresh size={18} />}
+        </button>
+        <button className="activity-btn" onClick={onChangeFolder} title={`Vault: ${folderName || ''} — change folder`}>
+          <IconFolder size={18} />
+        </button>
+        <button className="activity-btn" onClick={onSignOut} title="Sign out">
+          <IconLogOut size={18} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// File explorer — tree view, drag-and-drop reorganization, and the merged
+// "add item" dropdown (New note / New folder / Upload files) that replaces
+// the old separate +note / +folder buttons.
+// ---------------------------------------------------------------------------
+const DND_MIME = 'application/x-vault-node';
+
+function AddMenu({ onNewNote, onNewFolder, onUploadFiles, canUpload, align = 'left' }) {
+  const fileInputRef = useRef(null);
+  return (
+    <DropdownMenu
+      align={align}
+      trigger={(toggle) => (
+        <button className="icon-btn" onClick={toggle} title="New note, folder, or upload" aria-label="Add">
+          <IconPlus size={16} />
+        </button>
+      )}
+    >
+      <MenuItem icon={<IconFilePlus size={15} />} onClick={onNewNote}>
+        New note
+      </MenuItem>
+      <MenuItem icon={<IconFolderPlus size={15} />} onClick={onNewFolder}>
+        New folder
+      </MenuItem>
+      <MenuItem
+        icon={<IconUpload size={15} />}
+        disabled={!canUpload}
+        onClick={() => (canUpload ? fileInputRef.current?.click() : null)}
+      >
+        Upload files{!canUpload ? ' (needs Google sign-in)' : ''}
+      </MenuItem>
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          if (e.target.files?.length) onUploadFiles(Array.from(e.target.files));
+          e.target.value = '';
+        }}
+      />
+    </DropdownMenu>
+  );
+}
+
+function TreeItemMenu({ isFolder, canUpload, onNewNote, onNewFolder, onUploadFiles, onRename, onToggleBookmark, isBookmarked, onDelete }) {
+  const fileInputRef = useRef(null);
+  return (
+    <DropdownMenu
+      align="right"
+      trigger={(toggle) => (
+        <button className="tree-menu-btn" onClick={toggle} aria-label="More actions">
+          <IconMoreVertical size={14} />
+        </button>
+      )}
+    >
+      {isFolder && (
+        <MenuItem icon={<IconFilePlus size={15} />} onClick={onNewNote}>
+          New note
+        </MenuItem>
+      )}
+      {isFolder && (
+        <MenuItem icon={<IconFolderPlus size={15} />} onClick={onNewFolder}>
+          New folder
+        </MenuItem>
+      )}
+      {isFolder && (
+        <MenuItem
+          icon={<IconUpload size={15} />}
+          disabled={!canUpload}
+          onClick={() => (canUpload ? fileInputRef.current?.click() : null)}
+        >
+          Upload files{!canUpload ? ' (needs Google sign-in)' : ''}
+        </MenuItem>
+      )}
+      {isFolder && <MenuDivider />}
+      {!isFolder && (
+        <MenuItem icon={isBookmarked ? <IconStarFilled size={15} /> : <IconStar size={15} />} onClick={onToggleBookmark}>
+          {isBookmarked ? 'Remove bookmark' : 'Bookmark'}
+        </MenuItem>
+      )}
+      <MenuItem icon={<IconEdit size={15} />} onClick={onRename}>
+        Rename
+      </MenuItem>
+      <MenuItem icon={<IconTrash size={15} />} danger onClick={onDelete}>
+        Delete
+      </MenuItem>
+      {isFolder && (
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          style={{ display: 'none' }}
+          onChange={(e) => {
+            if (e.target.files?.length) onUploadFiles(Array.from(e.target.files));
+            e.target.value = '';
+          }}
+        />
+      )}
+    </DropdownMenu>
+  );
+}
+
 function TreeNode({
   node,
   depth,
-  currentId,
+  currentIds,
   expanded,
   onToggleExpand,
   onOpenFile,
   onOpenImage,
   onCreateNote,
   onCreateFolder,
+  onUploadFiles,
   onRename,
-  onDelete
+  onDelete,
+  onMoveNode,
+  canUpload,
+  bookmarks,
+  onToggleBookmark,
+  dragState,
+  setDragState
 }) {
-  const indent = { paddingLeft: 10 + depth * 14 };
+  const indent = { paddingLeft: 6 + depth * 16 };
+  const isDragOver = dragState.overId === node.id;
+
+  const handleDragStart = (e) => {
+    e.stopPropagation();
+    e.dataTransfer.setData(DND_MIME, JSON.stringify({ id: node.id, type: node.type }));
+    e.dataTransfer.effectAllowed = 'move';
+    setDragState({ draggingId: node.id, overId: null });
+  };
+  const handleDragEnd = () => setDragState({ draggingId: null, overId: null });
 
   if (node.type === 'file') {
     const isImage = node.kind === 'image';
+    const isBookmarked = bookmarks.has(node.id);
     return (
-      <div className="tree-row">
+      <div className={`tree-row ${isDragOver ? 'drag-over' : ''}`}>
         <button
-          className={`tree-item tree-file ${node.id === currentId ? 'active' : ''}`}
+          className={`tree-item tree-file ${currentIds.has(node.id) ? 'active' : ''}`}
           style={indent}
-          onClick={() => (isImage ? onOpenImage(node) : onOpenFile(node.id))}
+          draggable
+          onDragStart={handleDragStart}
+          onDragEnd={handleDragEnd}
+          onClick={(e) => (isImage ? onOpenImage(node) : onOpenFile(node.id, e))}
         >
-          <span className="tree-icon">{isImage ? '🖼️' : '📄'}</span>
+          {isBookmarked && <IconStarFilled className="bookmark-dot" size={11} />}
           <span className="tree-label">{isImage ? node.name : node.name.replace(/\.md$/i, '')}</span>
         </button>
-        <TreeMenu isFolder={false} onRename={() => onRename(node)} onDelete={() => onDelete(node)} />
+        <TreeItemMenu
+          isFolder={false}
+          isBookmarked={isBookmarked}
+          onToggleBookmark={() => onToggleBookmark(node.id)}
+          onRename={() => onRename(node)}
+          onDelete={() => onDelete(node)}
+        />
       </div>
     );
   }
@@ -1726,16 +2785,40 @@ function TreeNode({
   const isOpen = expanded.has(node.id);
   return (
     <div>
-      <div className="tree-row">
-        <button className="tree-item tree-folder" style={indent} onClick={() => onToggleExpand(node.id)}>
-          <span className="tree-caret">{isOpen ? '▾' : '▸'}</span>
-          <span className="tree-icon">📁</span>
+      <div
+        className={`tree-row ${isDragOver ? 'drag-over' : ''}`}
+        onDragOver={(e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          if (dragState.overId !== node.id) setDragState((s) => ({ ...s, overId: node.id }));
+        }}
+        onDragLeave={() => setDragState((s) => (s.overId === node.id ? { ...s, overId: null } : s))}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragState({ draggingId: null, overId: null });
+          const raw = e.dataTransfer.getData(DND_MIME);
+          if (!raw) return;
+          const dragged = JSON.parse(raw);
+          if (dragged.id !== node.id) onMoveNode(dragged.id, dragged.type, node.id);
+        }}
+      >
+        <button
+          className="tree-item tree-folder"
+          style={indent}
+          draggable
+          onDragStart={handleDragStart}
+          onDragEnd={handleDragEnd}
+          onClick={() => onToggleExpand(node.id)}
+        >
+          <span className="tree-caret">{isOpen ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}</span>
           <span className="tree-label">{node.name}</span>
         </button>
-        <TreeMenu
+        <TreeItemMenu
           isFolder
+          canUpload={canUpload}
           onNewNote={() => onCreateNote(node.id)}
           onNewFolder={() => onCreateFolder(node.id)}
+          onUploadFiles={(files) => onUploadFiles(node.id, files)}
           onRename={() => onRename(node)}
           onDelete={() => onDelete(node)}
         />
@@ -1746,118 +2829,904 @@ function TreeNode({
             key={child.id}
             node={child}
             depth={depth + 1}
-            currentId={currentId}
+            currentIds={currentIds}
             expanded={expanded}
             onToggleExpand={onToggleExpand}
             onOpenFile={onOpenFile}
             onOpenImage={onOpenImage}
             onCreateNote={onCreateNote}
             onCreateFolder={onCreateFolder}
+            onUploadFiles={onUploadFiles}
             onRename={onRename}
             onDelete={onDelete}
+            onMoveNode={onMoveNode}
+            canUpload={canUpload}
+            bookmarks={bookmarks}
+            onToggleBookmark={onToggleBookmark}
+            dragState={dragState}
+            setDragState={setDragState}
           />
         ))}
     </div>
   );
 }
 
-function Sidebar({
+function collectAllFolderIds(tree) {
+  const ids = [];
+  const walk = (nodes) =>
+    nodes.forEach((n) => {
+      if (n.type === 'folder') {
+        ids.push(n.id);
+        walk(n.children);
+      }
+    });
+  walk(tree);
+  return ids;
+}
+
+function ExplorerPanel({
   tree,
-  files,
   vaultRootId,
-  currentId,
+  currentIds,
   onOpenFile,
   onOpenImage,
-  search,
-  setSearch,
-  backlinks,
   onCreateNote,
   onCreateFolder,
+  onUploadFiles,
   onRename,
-  onDelete
+  onDelete,
+  onMoveNode,
+  canUpload,
+  bookmarks,
+  onToggleBookmark
 }) {
   const [expanded, setExpanded] = useState(new Set());
+  const [dragState, setDragState] = useState({ draggingId: null, overId: null });
   const toggleExpand = (id) =>
     setExpanded((prev) => {
       const next = new Set(prev);
       next.has(id) ? next.delete(id) : next.add(id);
       return next;
     });
-
-  const searching = search.trim().length > 0;
-  const flatMatches = searching ? flattenFiles(files, search.trim()) : [];
+  const collapseAll = () => setExpanded(new Set());
+  const expandAll = () => setExpanded(new Set(collectAllFolderIds(tree)));
 
   return (
-    <aside className="sidebar">
-      <div className="sidebar-toolbar">
-        <input
-          className="search-input"
-          placeholder="Search notes and images…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-        <button className="icon-btn" title="New note in vault root" onClick={() => onCreateNote(vaultRootId)}>＋</button>
-        <button className="icon-btn" title="New folder in vault root" onClick={() => onCreateFolder(vaultRootId)}>📁＋</button>
-      </div>
-
-      <nav className="file-tree">
-        {searching ? (
-          <>
-            {flatMatches.map((f) => {
-              const isImage = f.kind === 'image';
-              return (
-                <div className="tree-row" key={f.id}>
-                  <button
-                    className={`tree-item tree-file ${f.id === currentId ? 'active' : ''}`}
-                    style={{ paddingLeft: 10 }}
-                    onClick={() => (isImage ? onOpenImage(f) : onOpenFile(f.id))}
-                  >
-                    <span className="tree-icon">{isImage ? '🖼️' : '📄'}</span>
-                    <span className="tree-label">{isImage ? f.name : f.name.replace(/\.md$/i, '')}</span>
-                  </button>
-                </div>
-              );
-            })}
-            {flatMatches.length === 0 && <p className="muted small">No notes or images match.</p>}
-          </>
-        ) : (
-          <>
-            {tree.map((node) => (
-              <TreeNode
-                key={node.id}
-                node={node}
-                depth={0}
-                currentId={currentId}
-                expanded={expanded}
-                onToggleExpand={toggleExpand}
-                onOpenFile={onOpenFile}
-                onOpenImage={onOpenImage}
-                onCreateNote={onCreateNote}
-                onCreateFolder={onCreateFolder}
-                onRename={onRename}
-                onDelete={onDelete}
-              />
-            ))}
-            {tree.length === 0 && <p className="muted small">Empty vault — use ＋ to add a note.</p>}
-          </>
-        )}
-      </nav>
-
-      <div className="backlinks-panel">
-        <h3>Backlinks</h3>
-        {backlinks.length === 0 && <p className="muted small">No notes link here yet.</p>}
-        {backlinks.map((f) => (
-          <button key={f.id} className="backlink-item" onClick={() => onOpenFile(f.id)}>
-            {f.name.replace(/\.md$/i, '')}
+    <div className="side-panel">
+      <div className="side-panel-header">
+        <span className="side-panel-title">Files</span>
+        <div className="side-panel-actions">
+          <AddMenu
+            onNewNote={() => onCreateNote(vaultRootId)}
+            onNewFolder={() => onCreateFolder(vaultRootId)}
+            onUploadFiles={(files) => onUploadFiles(vaultRootId, files)}
+            canUpload={canUpload}
+          />
+          <button className="icon-btn" title="Expand all" onClick={expandAll}>
+            <IconChevronDown size={15} />
           </button>
-        ))}
+          <button className="icon-btn" title="Collapse all" onClick={collapseAll}>
+            <IconChevronRight size={15} />
+          </button>
+        </div>
       </div>
-    </aside>
+      <div
+        className="side-panel-body file-tree"
+        onDragOver={(e) => {
+          e.preventDefault();
+          if (dragState.overId !== vaultRootId) setDragState((s) => ({ ...s, overId: vaultRootId }));
+        }}
+        onDrop={(e) => {
+          if (e.target !== e.currentTarget) return;
+          e.preventDefault();
+          setDragState({ draggingId: null, overId: null });
+          const raw = e.dataTransfer.getData(DND_MIME);
+          if (!raw) return;
+          const dragged = JSON.parse(raw);
+          onMoveNode(dragged.id, dragged.type, vaultRootId);
+        }}
+      >
+        {tree.map((node) => (
+          <TreeNode
+            key={node.id}
+            node={node}
+            depth={0}
+            currentIds={currentIds}
+            expanded={expanded}
+            onToggleExpand={toggleExpand}
+            onOpenFile={onOpenFile}
+            onOpenImage={onOpenImage}
+            onCreateNote={onCreateNote}
+            onCreateFolder={onCreateFolder}
+            onUploadFiles={onUploadFiles}
+            onRename={onRename}
+            onDelete={onDelete}
+            onMoveNode={onMoveNode}
+            canUpload={canUpload}
+            bookmarks={bookmarks}
+            onToggleBookmark={onToggleBookmark}
+            dragState={dragState}
+            setDragState={setDragState}
+          />
+        ))}
+        {tree.length === 0 && <p className="muted small empty-hint">Empty vault — use + to add a note.</p>}
+        <div className={`root-drop-zone ${dragState.overId === vaultRootId ? 'drag-over' : ''}`} />
+      </div>
+    </div>
   );
 }
 
+// ---------------------------------------------------------------------------
+// Search panel — Obsidian-style operators (path:, file:, tag:, line:,
+// section:, [property]), grouped-by-file results with highlighted context
+// snippets, collapsible per file.
+// ---------------------------------------------------------------------------
+const SEARCH_HELP = [
+  { op: 'path:', desc: 'match path of the file' },
+  { op: 'file:', desc: 'match file name' },
+  { op: 'tag:', desc: 'search for tags' },
+  { op: 'line:', desc: 'keywords on same line' },
+  { op: 'section:', desc: 'keywords under same heading' },
+  { op: '[property]', desc: 'match property' }
+];
+
+function SearchPanel({ query, setQuery, filesMeta, linkIndex, getBody, tagsByFileId, onOpenNote, indexing, ensureIndexed, indexVersion }) {
+  const [caseSensitive, setCaseSensitive] = useState(false);
+  const [collapsed, setCollapsed] = useState(new Set());
+  const [showHelp, setShowHelp] = useState(false);
+  const [sortDesc, setSortDesc] = useState(false);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    ensureIndexed();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const results = useMemo(() => {
+    if (!query.trim()) return [];
+    const effectiveGetBody = caseSensitive ? getBody : (id) => getBody(id);
+    const r = runVaultSearch(query, filesMeta, linkIndex, effectiveGetBody, tagsByFileId);
+    return sortDesc ? r.slice().reverse() : r;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, filesMeta, linkIndex, getBody, tagsByFileId, sortDesc, caseSensitive, indexVersion]);
+
+  const toggleCollapsed = (id) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+
+  const totalMatches = results.reduce((n, r) => n + (r.matchCount ?? (r.matches.length ? r.matches.length : 1)), 0);
+
+  return (
+    <div className="side-panel search-panel">
+      <div className="search-bar">
+        <IconSearch className="search-bar-icon" size={15} />
+        <input
+          ref={inputRef}
+          className="search-bar-input"
+          placeholder="Search…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        {query && (
+          <button className="search-bar-clear" onClick={() => setQuery('')} aria-label="Clear search">
+            <IconX size={13} />
+          </button>
+        )}
+        <button
+          className={`search-bar-case ${caseSensitive ? 'active' : ''}`}
+          onClick={() => setCaseSensitive((v) => !v)}
+          title="Match case"
+        >
+          Aa
+        </button>
+        <DropdownMenu
+          align="right"
+          trigger={(toggle) => (
+            <button className="icon-btn" onClick={toggle} title="Search options">
+              <IconSliders size={15} />
+            </button>
+          )}
+        >
+          <div className="search-options-menu">
+            <div className="search-options-title">
+              Search options
+              <IconInfo size={13} onClick={() => setShowHelp((v) => !v)} />
+            </div>
+            {SEARCH_HELP.map((h) => (
+              <div className="search-options-row" key={h.op}>
+                <code>{h.op}</code>
+                <span>{h.desc}</span>
+              </div>
+            ))}
+          </div>
+        </DropdownMenu>
+      </div>
+
+      {indexing.building && (
+        <div className="indexing-banner">
+          <IconLoader size={13} />
+          Indexing vault… {indexing.progress.loaded}/{indexing.progress.total}
+        </div>
+      )}
+
+      {query.trim() ? (
+        <>
+          <div className="search-results-meta">
+            <span>{results.length} result{results.length === 1 ? '' : 's'}</span>
+            <button className="link-btn small" onClick={() => setSortDesc((v) => !v)}>
+              File name ({sortDesc ? 'Z to A' : 'A to Z'})
+            </button>
+          </div>
+          <div className="side-panel-body search-results">
+            {results.length === 0 && <p className="muted small empty-hint">No matches found.</p>}
+            {results.map(({ file, path, matches }) => {
+              const isCollapsed = collapsed.has(file.id);
+              return (
+                <div className="search-result-group" key={file.id}>
+                  <button className="search-result-header" onClick={() => toggleCollapsed(file.id)}>
+                    {isCollapsed ? <IconChevronRight size={13} /> : <IconChevronDown size={13} />}
+                    <span className="search-result-name">{file.name.replace(/\.md$/i, '')}</span>
+                    <span className="search-result-count">{matches.length || 1}</span>
+                  </button>
+                  {!isCollapsed && (
+                    <div className="search-result-snippets">
+                      {(matches.length ? matches : [{ line: path, lineNumber: null }]).map((m, i) => (
+                        <div className="search-snippet" key={i} onClick={() => onOpenNote(file.id)}>
+                          <SearchHighlightedLine line={m.line} terms={m.terms || []} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </>
+      ) : (
+        <p className="muted small empty-hint">
+          Type to search across your vault. Try <code>tag:</code>, <code>path:</code>, or plain text.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// Highlights every occurrence of any search term within a line of text —
+// used for search result snippets (as opposed to HighlightedSnippet, which
+// highlights a single [[link]] occurrence for the inline mentions panel).
+function SearchHighlightedLine({ line, terms }) {
+  if (!terms.length) return <>{line}</>;
+  const re = new RegExp(`(${terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'gi');
+  const parts = line.split(re);
+  return (
+    <>
+      {parts.map((part, i) => (terms.some((t) => part.toLowerCase() === t.toLowerCase()) ? <mark key={i}>{part}</mark> : part))}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tags panel — every tag in the vault with a note count, clicking opens it
+// as a search query.
+// ---------------------------------------------------------------------------
+function TagsPanel({ filesMeta, getBody, onOpenTag, indexing, ensureIndexed, indexVersion }) {
+  useEffect(() => {
+    ensureIndexed();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const tags = useMemo(() => buildTagIndex(filesMeta, getBody), [filesMeta, getBody, indexVersion]);
+
+  return (
+    <div className="side-panel">
+      <div className="side-panel-header">
+        <span className="side-panel-title">Tags</span>
+        <span className="side-panel-count">{tags.length}</span>
+      </div>
+      {indexing.building && (
+        <div className="indexing-banner">
+          <IconLoader size={13} />
+          Indexing vault… {indexing.progress.loaded}/{indexing.progress.total}
+        </div>
+      )}
+      <div className="side-panel-body tag-list">
+        {tags.length === 0 && <p className="muted small empty-hint">No tags yet. Use #tag anywhere in a note.</p>}
+        {tags.map(({ tag, files }) => (
+          <button key={tag} className="tag-row" onClick={() => onOpenTag(tag)}>
+            <IconTag size={13} className="tag-row-icon" />
+            <span className="tag-row-name">{tag}</span>
+            <span className="tag-row-count">{files.length}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Bookmarks panel — a lightweight take on Obsidian's Bookmarks core plugin.
+// ---------------------------------------------------------------------------
+function BookmarksPanel({ bookmarks, filesMeta, onOpenFile, onOpenImage, onToggleBookmark }) {
+  const items = filesMeta
+    .filter((f) => bookmarks.has(f.id))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return (
+    <div className="side-panel">
+      <div className="side-panel-header">
+        <span className="side-panel-title">Bookmarks</span>
+      </div>
+      <div className="side-panel-body">
+        {items.length === 0 && <p className="muted small empty-hint">Star a note or image to bookmark it.</p>}
+        {items.map((f) => {
+          const isImage = f.kind === 'image';
+          return (
+            <div className="tree-row" key={f.id}>
+              <button
+                className="tree-item tree-file"
+                onClick={() => (isImage ? onOpenImage(f) : onOpenFile(f.id))}
+              >
+                <IconStarFilled size={12} className="bookmark-dot" />
+                <span className="tree-label">{isImage ? f.name : f.name.replace(/\.md$/i, '')}</span>
+              </button>
+              <button className="tree-menu-btn" title="Remove bookmark" onClick={() => onToggleBookmark(f.id)}>
+                <IconX size={13} />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Split-pane tree helpers. A node is either:
+//   { type: 'leaf', id, tabs: [{ id, fileId, mode, history, historyIndex }], activeTabId }
+//   { type: 'split', id, direction: 'row'|'column', children: [node,...], sizes: [%,...] }
+// ---------------------------------------------------------------------------
+let uidCounter = 0;
+function uid(prefix) {
+  uidCounter += 1;
+  return `${prefix}-${Date.now().toString(36)}-${uidCounter}`;
+}
+
+function makeTab(fileId, mode = 'edit') {
+  return { id: uid('tab'), fileId, mode, history: [fileId], historyIndex: 0 };
+}
+
+function makeLeaf(fileId, mode) {
+  const tab = makeTab(fileId, mode);
+  return { type: 'leaf', id: uid('pane'), tabs: fileId ? [tab] : [], activeTabId: fileId ? tab.id : null };
+}
+
+function equalSizes(n) {
+  const each = 100 / n;
+  return Array.from({ length: n }, () => each);
+}
+
+function findLeaf(node, paneId) {
+  if (!node) return null;
+  if (node.type === 'leaf') return node.id === paneId ? node : null;
+  for (const c of node.children) {
+    const found = findLeaf(c, paneId);
+    if (found) return found;
+  }
+  return null;
+}
+
+function getFirstLeaf(node) {
+  if (!node) return null;
+  if (node.type === 'leaf') return node;
+  return getFirstLeaf(node.children[0]);
+}
+
+function collectLeaves(node, out = []) {
+  if (!node) return out;
+  if (node.type === 'leaf') out.push(node);
+  else node.children.forEach((c) => collectLeaves(c, out));
+  return out;
+}
+
+function updateLeaf(node, paneId, updater) {
+  if (node.type === 'leaf') return node.id === paneId ? updater(node) : node;
+  return { ...node, children: node.children.map((c) => updateLeaf(c, paneId, updater)) };
+}
+
+function updateSplitSizes(node, splitId, sizes) {
+  if (node.type === 'leaf') return node;
+  if (node.id === splitId) return { ...node, sizes };
+  return { ...node, children: node.children.map((c) => updateSplitSizes(c, splitId, sizes)) };
+}
+
+function removeLeafFromTree(node, paneId) {
+  if (node.type === 'leaf') return node.id === paneId ? null : node;
+  const newChildren = node.children.map((c) => removeLeafFromTree(c, paneId)).filter(Boolean);
+  if (newChildren.length === 0) return null;
+  if (newChildren.length === 1) return newChildren[0];
+  return { ...node, children: newChildren, sizes: equalSizes(newChildren.length) };
+}
+
+function splitLeafInTree(node, paneId, direction, newLeaf) {
+  if (node.type === 'leaf') {
+    if (node.id !== paneId) return node;
+    return { type: 'split', id: uid('split'), direction, children: [node, newLeaf], sizes: [50, 50] };
+  }
+  const idx = node.children.findIndex((c) => c.type === 'leaf' && c.id === paneId);
+  if (idx !== -1) {
+    if (node.direction === direction) {
+      const children = node.children.slice();
+      children.splice(idx + 1, 0, newLeaf);
+      return { ...node, children, sizes: equalSizes(children.length) };
+    }
+    const children = node.children.slice();
+    children[idx] = { type: 'split', id: uid('split'), direction, children: [node.children[idx], newLeaf], sizes: [50, 50] };
+    return { ...node, children };
+  }
+  return { ...node, children: node.children.map((c) => splitLeafInTree(c, paneId, direction, newLeaf)) };
+}
+
+// ---------------------------------------------------------------------------
+// Tab bar + pane header (breadcrumb, back/forward, edit/preview toggle,
+// split controls) — replaces the old global Split/Edit/Preview buttons.
+// Each pane now toggles Edit <-> Preview independently, and "split" means
+// an actual second pane rather than a side-by-side textarea/preview.
+// ---------------------------------------------------------------------------
+function TabBar({ leaf, filesById, buffers, isActivePane, onSelectTab, onCloseTab, onNewTab, onSplitTab, onCloseOthers, onCloseAll }) {
+  return (
+    <div className={`tab-bar ${isActivePane ? '' : 'inactive'}`}>
+      <div className="tab-bar-scroll">
+        {leaf.tabs.map((tab) => {
+          const file = filesById.get(tab.fileId);
+          const buf = buffers[tab.fileId];
+          const label = file ? file.name.replace(/\.md$/i, '') : 'Untitled';
+          return (
+            <div
+              key={tab.id}
+              className={`tab ${tab.id === leaf.activeTabId ? 'active' : ''}`}
+              onClick={() => onSelectTab(tab.id)}
+              onMouseDown={(e) => {
+                if (e.button === 1) {
+                  e.preventDefault();
+                  onCloseTab(tab.id);
+                }
+              }}
+            >
+              <span className="tab-label">{label}</span>
+              {buf?.dirty && <span className="tab-dirty-dot" />}
+              <button
+                className="tab-close"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onCloseTab(tab.id);
+                }}
+                aria-label="Close tab"
+              >
+                <IconX size={12} />
+              </button>
+              <DropdownMenu
+                className="tab-menu-wrap"
+                trigger={(toggle) => (
+                  <button
+                    className="tab-menu-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggle();
+                    }}
+                    aria-label="Tab options"
+                  >
+                    <IconMoreVertical size={12} />
+                  </button>
+                )}
+              >
+                <MenuItem icon={<IconSplitVertical size={15} />} onClick={() => onSplitTab(tab.id, 'row')}>
+                  Split right
+                </MenuItem>
+                <MenuItem icon={<IconSplitHorizontal size={15} />} onClick={() => onSplitTab(tab.id, 'column')}>
+                  Split down
+                </MenuItem>
+                <MenuDivider />
+                <MenuItem icon={<IconX size={15} />} onClick={() => onCloseOthers(tab.id)}>
+                  Close others
+                </MenuItem>
+                <MenuItem icon={<IconX size={15} />} onClick={onCloseAll}>
+                  Close all
+                </MenuItem>
+              </DropdownMenu>
+            </div>
+          );
+        })}
+      </div>
+      <button className="tab-new" onClick={onNewTab} title="New tab" aria-label="New tab">
+        <IconPlus size={14} />
+      </button>
+    </div>
+  );
+}
+
+function Breadcrumb({ file, linkIndex }) {
+  if (!file) return <span className="breadcrumb-empty">No file open</span>;
+  const rec = linkIndex.records.find((r) => r.id === file.id);
+  const dir = rec ? rec.dir : '';
+  const label = file.kind === 'image' || isImageName(file.name) ? file.name : file.name.replace(/\.md$/i, '');
+  return (
+    <span className="pane-breadcrumb">
+      {dir && <span className="breadcrumb-dir">{dir.replace(/\//g, ' / ')} / </span>}
+      <span className="breadcrumb-name">{label}</span>
+    </span>
+  );
+}
+
+function PaneHeader({
+  leaf,
+  activeTab,
+  file,
+  linkIndex,
+  onBack,
+  onForward,
+  onToggleMode,
+  onSplit,
+  onClosePane,
+  canClosePane,
+  isBookmarked,
+  onToggleBookmark,
+  onToggleDock
+}) {
+  const canBack = activeTab && activeTab.historyIndex > 0;
+  const canForward = activeTab && activeTab.historyIndex < activeTab.history.length - 1;
+  const mode = activeTab?.mode || 'edit';
+  return (
+    <div className="pane-header">
+      <div className="pane-header-nav">
+        <button className="icon-btn mobile-only" onClick={onToggleDock} title="Toggle sidebar" aria-label="Toggle sidebar">
+          <IconPanelLeft size={15} />
+        </button>
+        <button className="icon-btn" disabled={!canBack} onClick={onBack} title="Navigate back">
+          <IconArrowLeft size={15} />
+        </button>
+        <button className="icon-btn" disabled={!canForward} onClick={onForward} title="Navigate forward">
+          <IconArrowRight size={15} />
+        </button>
+        <Breadcrumb file={file} linkIndex={linkIndex} />
+      </div>
+      <div className="pane-header-actions">
+        {file && file.kind !== 'image' && (
+          <button className="icon-btn" onClick={onToggleBookmark} title={isBookmarked ? 'Remove bookmark' : 'Bookmark note'}>
+            {isBookmarked ? <IconStarFilled size={15} /> : <IconStar size={15} />}
+          </button>
+        )}
+        {file && file.kind !== 'image' && (
+          <button className="icon-btn" onClick={onToggleMode} title={mode === 'edit' ? 'Switch to reading view' : 'Switch to editing view'}>
+            {mode === 'edit' ? <IconEye size={15} /> : <IconEdit size={15} />}
+          </button>
+        )}
+        <button className="icon-btn" onClick={() => onSplit('row')} title="Split right">
+          <IconSplitVertical size={15} />
+        </button>
+        <button className="icon-btn" onClick={() => onSplit('column')} title="Split down">
+          <IconSplitHorizontal size={15} />
+        </button>
+        {canClosePane && (
+          <button className="icon-btn" onClick={onClosePane} title="Close pane">
+            <IconX size={15} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Editor content — the textarea (source) or rendered preview for a single
+// open tab. Mode is a per-tab property now, toggled from PaneHeader.
+// ---------------------------------------------------------------------------
+function EditorContent({ file, content, onChange, linkIndex, handlers, mode, loadingNote, backlinkIndex, allFiles, getBody }) {
+  const textareaRef = useRef(null);
+  const autocomplete = useLinkAutocomplete(textareaRef, onChange, linkIndex);
+
+  if (!file) {
+    return (
+      <div className="editor-empty">
+        <p className="muted">Select a note, or click a [[wikilink]] to create one.</p>
+      </div>
+    );
+  }
+
+  if (file.kind === 'image') {
+    return <EmbeddedImagePane token={handlers.token} file={file} />;
+  }
+
+  const { properties, body } = parseFrontmatter(content);
+
+  return (
+    <div className="editor-panes">
+      {loadingNote && <div className="note-loading-bar" aria-hidden="true" />}
+      {mode === 'edit' ? (
+        <div className="editor-textarea-wrap">
+          <textarea
+            ref={textareaRef}
+            className="editor-textarea"
+            value={content}
+            onChange={(e) => {
+              onChange(e.target.value);
+              autocomplete.updateFromCaret();
+            }}
+            onKeyUp={(e) => {
+              if (!['ArrowUp', 'ArrowDown', 'Enter', 'Tab', 'Escape'].includes(e.key)) autocomplete.updateFromCaret();
+            }}
+            onKeyDown={(e) => {
+              if (!autocomplete.suggestion) return;
+              if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                autocomplete.move(1);
+              } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                autocomplete.move(-1);
+              } else if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault();
+                autocomplete.accept(autocomplete.suggestion.items[autocomplete.suggestion.activeIndex]);
+              } else if (e.key === 'Escape') {
+                autocomplete.dismiss();
+              }
+            }}
+            onClick={autocomplete.updateFromCaret}
+            onBlur={() => setTimeout(autocomplete.dismiss, 120)}
+            spellCheck={false}
+            placeholder="Start writing… use [[Note Name]] to link, #tag to tag, or [[image.png]] for images."
+          />
+          {autocomplete.suggestion && (
+            <ul className="autocomplete-menu" style={{ top: autocomplete.suggestion.top, left: autocomplete.suggestion.left }}>
+              {autocomplete.suggestion.items.map((item, idx) => (
+                <li
+                  key={item.id}
+                  className={idx === autocomplete.suggestion.activeIndex ? 'active' : ''}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    autocomplete.accept(item);
+                  }}
+                >
+                  <span className="autocomplete-label">{item.baseName}</span>
+                  {item.relativePath !== item.baseName && <span className="autocomplete-path">{item.dir}/</span>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : (
+        <div className="editor-preview">
+          <h1 className="preview-title">{file.name.replace(/\.md$/i, '')}</h1>
+          <PropertiesPanel properties={properties} handlers={handlers} />
+          {renderMarkdownBlocks(body, handlers, linkIndex)}
+          <InlineMentions
+            file={linkIndex.records.find((r) => r.id === file.id) || file}
+            linkIndex={linkIndex}
+            getBody={getBody}
+            backlinkFileIds={Array.from(backlinkIndex.get(file.id) || [])}
+            allFiles={allFiles}
+            onOpenNote={handlers.onOpenById}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EmbeddedImagePane({ token, file }) {
+  const { url, error } = useDriveImageUrl(token, file.id);
+  return (
+    <div className="editor-preview image-pane">
+      <h1 className="preview-title">{file.name}</h1>
+      {error && <p className="muted small">{error}</p>}
+      {!error && !url && <p className="muted small">Loading…</p>}
+      {url && <img src={url} alt={file.name} className="image-pane-img" />}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Status bar — global footer reflecting the currently focused pane's file:
+// word count, character count, backlink count, property count, plus a
+// small live sync indicator on the far right.
+// ---------------------------------------------------------------------------
+function StatusBar({ file, content, backlinkCount, syncing, syncError, dirty, saving }) {
+  const { properties, body } = parseFrontmatter(content || '');
+  const words = body.trim() ? body.trim().split(/\s+/).length : 0;
+  const chars = body.length;
+
+  return (
+    <footer className="status-bar">
+      <div className="status-bar-left">
+        {file && (
+          <>
+            <span>{backlinkCount} backlink{backlinkCount === 1 ? '' : 's'}</span>
+            <span>{properties.length} propert{properties.length === 1 ? 'y' : 'ies'}</span>
+            <span>{words} word{words === 1 ? '' : 's'}</span>
+            <span>{chars} character{chars === 1 ? '' : 's'}</span>
+            {file.kind !== 'image' && (
+              <span className="status-save-state" title={saving ? 'Saving…' : dirty ? 'Unsaved changes' : 'Saved'}>
+                {saving ? <IconLoader size={12} /> : dirty ? null : <IconCheck size={12} />}
+              </span>
+            )}
+          </>
+        )}
+      </div>
+      <div className="status-bar-right">
+        {syncError && (
+          <span className="status-sync-error" title={syncError}>
+            <IconAlertTriangle size={13} />
+          </span>
+        )}
+        <span className={`status-sync-dot ${syncing ? 'syncing' : ''}`} title={syncing ? 'Syncing…' : 'Synced with Drive'} />
+      </div>
+    </footer>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Recursive pane-tree renderer, with a draggable resize handle between
+// each pair of siblings in a split.
+// ---------------------------------------------------------------------------
+function ResizeHandle({ direction, onResize }) {
+  const draggingRef = useRef(false);
+  const onMouseDown = (e) => {
+    e.preventDefault();
+    draggingRef.current = true;
+    const move = (ev) => {
+      if (!draggingRef.current) return;
+      onResize(direction === 'row' ? ev.movementX : ev.movementY);
+    };
+    const up = () => {
+      draggingRef.current = false;
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  };
+  return <div className={`resize-handle resize-${direction}`} onMouseDown={onMouseDown} />;
+}
+
+function PaneNode({ node, ...paneProps }) {
+  const containerRef = useRef(null);
+  if (node.type === 'split') {
+    return (
+      <div className={`pane-split pane-split-${node.direction}`} ref={containerRef}>
+        {node.children.map((child, i) => (
+          <React.Fragment key={child.id}>
+            <div className="pane-split-cell" style={{ flexBasis: `${node.sizes[i]}%` }}>
+              <PaneNode node={child} {...paneProps} />
+            </div>
+            {i < node.children.length - 1 && (
+              <ResizeHandle
+                direction={node.direction}
+                onResize={(deltaPx) => paneProps.onResizeSplit(node.id, i, deltaPx, containerRef)}
+              />
+            )}
+          </React.Fragment>
+        ))}
+      </div>
+    );
+  }
+  return <LeafPane leaf={node} {...paneProps} />;
+}
+
+function findSplitNode(node, splitId) {
+  if (node.type === 'leaf') return null;
+  if (node.id === splitId) return node;
+  for (const c of node.children) {
+    const found = findSplitNode(c, splitId);
+    if (found) return found;
+  }
+  return null;
+}
+
+function purgeFileFromTree(node, fileId) {
+  if (node.type === 'leaf') {
+    const tabs = node.tabs.filter((t) => t.fileId !== fileId);
+    let activeTabId = node.activeTabId;
+    if (!tabs.find((t) => t.id === activeTabId)) activeTabId = tabs[0]?.id || null;
+    return { ...node, tabs, activeTabId };
+  }
+  return { ...node, children: node.children.map((c) => purgeFileFromTree(c, fileId)) };
+}
+
+function collapseEmptyLeaves(node) {
+  if (node.type === 'leaf') return node;
+  const children = node.children.map(collapseEmptyLeaves).filter((c) => !(c.type === 'leaf' && c.tabs.length === 0));
+  if (children.length === 0) return null;
+  if (children.length === 1) return children[0];
+  return { ...node, children, sizes: equalSizes(children.length) };
+}
+
+function LeafPane({
+  leaf,
+  filesById,
+  linkIndex,
+  buffers,
+  activePaneId,
+  onFocusPane,
+  onSelectTab,
+  onCloseTab,
+  onNewTab,
+  onSplitTab,
+  onCloseOthers,
+  onCloseAll,
+  onSplit,
+  onClosePane,
+  canClosePane,
+  onBack,
+  onForward,
+  onToggleMode,
+  onChange,
+  handlers,
+  backlinkIndex,
+  allFiles,
+  getBody,
+  bookmarks,
+  onToggleBookmark,
+  onToggleDock
+}) {
+  const activeTab = leaf.tabs.find((t) => t.id === leaf.activeTabId) || null;
+  const file = activeTab ? filesById.get(activeTab.fileId) : null;
+  const buf = activeTab ? buffers[activeTab.fileId] : null;
+  const isActivePane = leaf.id === activePaneId;
+
+  return (
+    <div className={`pane-leaf ${isActivePane ? 'active' : ''}`} onMouseDown={() => onFocusPane(leaf.id)}>
+      <TabBar
+        leaf={leaf}
+        filesById={filesById}
+        buffers={buffers}
+        isActivePane={isActivePane}
+        onSelectTab={(tabId) => onSelectTab(leaf.id, tabId)}
+        onCloseTab={(tabId) => onCloseTab(leaf.id, tabId)}
+        onNewTab={() => onNewTab(leaf.id)}
+        onSplitTab={(tabId, direction) => onSplitTab(leaf.id, tabId, direction)}
+        onCloseOthers={(tabId) => onCloseOthers(leaf.id, tabId)}
+        onCloseAll={() => onCloseAll(leaf.id)}
+      />
+      {activeTab && (
+        <PaneHeader
+          leaf={leaf}
+          activeTab={activeTab}
+          file={file}
+          linkIndex={linkIndex}
+          onBack={() => onBack(leaf.id)}
+          onForward={() => onForward(leaf.id)}
+          onToggleMode={() => onToggleMode(leaf.id, activeTab.id)}
+          onSplit={(direction) => onSplit(leaf.id, direction)}
+          onClosePane={() => onClosePane(leaf.id)}
+          canClosePane={canClosePane}
+          isBookmarked={file ? bookmarks.has(file.id) : false}
+          onToggleBookmark={() => file && onToggleBookmark(file.id)}
+          onToggleDock={onToggleDock}
+        />
+      )}
+      <div className="pane-content">
+        <EditorContent
+          key={file ? file.id : 'empty'}
+          file={file}
+          content={buf ? buf.content : ''}
+          onChange={(value) => activeTab && onChange(activeTab.fileId, value)}
+          linkIndex={linkIndex}
+          handlers={handlers}
+          mode={activeTab?.mode || 'edit'}
+          loadingNote={buf?.loading}
+          backlinkIndex={backlinkIndex}
+          allFiles={allFiles}
+          getBody={getBody}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Inline popover for an ambiguous [[link]] — shown when a bare name matches
 // more than one file, so the reader can pick which one was actually meant.
+// ---------------------------------------------------------------------------
 function AmbiguousLink({ label, candidates, onPick }) {
   const [open, setOpen] = useState(false);
   return (
@@ -1883,7 +3752,7 @@ function AmbiguousLink({ label, candidates, onPick }) {
                 onPick(c);
               }}
             >
-              {c.isImage ? '🖼️' : '📄'} {c.relativePath}
+              {c.relativePath}
             </button>
           ))}
         </span>
@@ -1900,7 +3769,7 @@ function ImageEmbed({ token, fileId, name, caption, onOpen }) {
   if (error) {
     return (
       <span className="wikilink wikilink-missing-image" title={error}>
-        🖼 {name}
+        <IconImageMissing size={13} /> {name}
       </span>
     );
   }
@@ -1917,7 +3786,7 @@ function ImageEmbed({ token, fileId, name, caption, onOpen }) {
 // Full-size image viewer modal — opened from the sidebar, search results,
 // or clicking an embedded/linked image inside a note. Shows which notes
 // link to this image, reusing the same backlink graph notes get.
-function ImageViewer({ token, file, backlinks, onOpenNote, onClose }) {
+function ImageViewer({ token, file, backlinks, isBookmarked, onToggleBookmark, onOpenNote, onClose }) {
   const { url, error } = useDriveImageUrl(token, file?.id);
 
   useEffect(() => {
@@ -1934,9 +3803,14 @@ function ImageViewer({ token, file, backlinks, onOpenNote, onClose }) {
       <div className="image-viewer" onClick={(e) => e.stopPropagation()}>
         <div className="image-viewer-header">
           <span className="image-viewer-name">{file.name}</span>
-          <button className="icon-btn" onClick={onClose} aria-label="Close">
-            ✕
-          </button>
+          <div className="image-viewer-header-actions">
+            <button className="icon-btn" onClick={onToggleBookmark} title={isBookmarked ? 'Remove bookmark' : 'Bookmark'}>
+              {isBookmarked ? <IconStarFilled size={15} /> : <IconStar size={15} />}
+            </button>
+            <button className="icon-btn" onClick={onClose} aria-label="Close">
+              <IconX size={16} />
+            </button>
+          </div>
         </div>
         <div className="image-viewer-body">
           {error && <p className="muted small">{error}</p>}
@@ -1958,89 +3832,100 @@ function ImageViewer({ token, file, backlinks, onOpenNote, onClose }) {
   );
 }
 
-function Editor({ file, content, onChange, linkIndex, handlers, mode, setMode, loadingNote }) {
-  const textareaRef = useRef(null);
-  const autocomplete = useLinkAutocomplete(textareaRef, onChange, linkIndex);
+// ---------------------------------------------------------------------------
+// Command palette / quick switcher — one shared modal component. In
+// 'switcher' mode it fuzzy-matches file names (⌘O); in 'commands' mode it
+// fuzzy-matches a fixed command list (⌘K / ⌘P).
+// ---------------------------------------------------------------------------
+function PaletteModal({ mode, files, commands, onClose, onPickFile, onRunCommand }) {
+  const [query, setQuery] = useState('');
+  const [activeIndex, setActiveIndex] = useState(0);
+  const inputRef = useRef(null);
 
-  if (!file) {
-    return (
-      <main className="editor-empty">
-        <p className="muted">Select a note, or click a [[wikilink]] to create one.</p>
-      </main>
-    );
-  }
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  const results = useMemo(() => {
+    if (mode === 'switcher') {
+      return files
+        .map((f) => ({ f, score: fuzzyScore(query, f.name.replace(/\.md$/i, '')) }))
+        .filter((s) => s.score !== null)
+        .sort((a, b) => a.score - b.score)
+        .slice(0, 50)
+        .map((s) => s.f);
+    }
+    return commands
+      .map((c) => ({ c, score: fuzzyScore(query, c.label) }))
+      .filter((s) => s.score !== null)
+      .sort((a, b) => a.score - b.score)
+      .map((s) => s.c);
+  }, [mode, query, files, commands]);
+
+  useEffect(() => setActiveIndex(0), [query, mode]);
+
+  const runActive = (opts) => {
+    const item = results[activeIndex];
+    if (!item) return;
+    if (mode === 'switcher') onPickFile(item, opts);
+    else onRunCommand(item);
+  };
 
   return (
-    <main className={`editor-shell mode-${mode}`}>
-      <div className="editor-tabs">
-        <button className={mode === 'split' ? 'active' : ''} onClick={() => setMode('split')}>
-          Split
-        </button>
-        <button className={mode === 'edit' ? 'active' : ''} onClick={() => setMode('edit')}>
-          Edit
-        </button>
-        <button className={mode === 'preview' ? 'active' : ''} onClick={() => setMode('preview')}>
-          Preview
-        </button>
+    <div className="modal-overlay palette-overlay" onClick={onClose}>
+      <div className="palette-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="palette-input-row">
+          {mode === 'switcher' ? <IconSearch size={16} /> : <IconCommand size={16} />}
+          <input
+            ref={inputRef}
+            className="palette-input"
+            placeholder={mode === 'switcher' ? 'Jump to note…' : 'Type a command…'}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                setActiveIndex((i) => Math.min(i + 1, results.length - 1));
+              } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                setActiveIndex((i) => Math.max(i - 1, 0));
+              } else if (e.key === 'Enter') {
+                e.preventDefault();
+                runActive({ newTab: e.metaKey || e.ctrlKey });
+              } else if (e.key === 'Escape') {
+                onClose();
+              }
+            }}
+          />
+        </div>
+        <div className="palette-results">
+          {results.length === 0 && <p className="muted small empty-hint">No matches.</p>}
+          {mode === 'switcher'
+            ? results.map((f, i) => (
+                <button
+                  key={f.id}
+                  className={`palette-result ${i === activeIndex ? 'active' : ''}`}
+                  onMouseEnter={() => setActiveIndex(i)}
+                  onClick={(e) => onPickFile(f, { newTab: e.metaKey || e.ctrlKey })}
+                >
+                  <span className="palette-result-name">{f.name.replace(/\.md$/i, '')}</span>
+                </button>
+              ))
+            : results.map((c, i) => (
+                <button
+                  key={c.id}
+                  className={`palette-result ${i === activeIndex ? 'active' : ''}`}
+                  onMouseEnter={() => setActiveIndex(i)}
+                  onClick={() => onRunCommand(c)}
+                >
+                  {c.icon}
+                  <span className="palette-result-name">{c.label}</span>
+                  {c.hint && <span className="palette-result-hint">{c.hint}</span>}
+                </button>
+              ))}
+        </div>
       </div>
-      {loadingNote && <div className="note-loading-bar" aria-hidden="true" />}
-      <div className="editor-panes">
-        {mode !== 'preview' && (
-          <div className="editor-textarea-wrap">
-            <textarea
-              ref={textareaRef}
-              className="editor-textarea"
-              value={content}
-              onChange={(e) => {
-                onChange(e.target.value);
-                autocomplete.updateFromCaret();
-              }}
-              onKeyUp={(e) => {
-                if (!['ArrowUp', 'ArrowDown', 'Enter', 'Tab', 'Escape'].includes(e.key)) autocomplete.updateFromCaret();
-              }}
-              onKeyDown={(e) => {
-                if (!autocomplete.suggestion) return;
-                if (e.key === 'ArrowDown') {
-                  e.preventDefault();
-                  autocomplete.move(1);
-                } else if (e.key === 'ArrowUp') {
-                  e.preventDefault();
-                  autocomplete.move(-1);
-                } else if (e.key === 'Enter' || e.key === 'Tab') {
-                  e.preventDefault();
-                  autocomplete.accept(autocomplete.suggestion.items[autocomplete.suggestion.activeIndex]);
-                } else if (e.key === 'Escape') {
-                  autocomplete.dismiss();
-                }
-              }}
-              onClick={autocomplete.updateFromCaret}
-              onBlur={() => setTimeout(autocomplete.dismiss, 120)}
-              spellCheck={false}
-              placeholder="Start writing… use [[Note Name]] to link, or [[image.png]] for images."
-            />
-            {autocomplete.suggestion && (
-              <ul className="autocomplete-menu" style={{ top: autocomplete.suggestion.top, left: autocomplete.suggestion.left }}>
-                {autocomplete.suggestion.items.map((item, idx) => (
-                  <li
-                    key={item.id}
-                    className={idx === autocomplete.suggestion.activeIndex ? 'active' : ''}
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      autocomplete.accept(item);
-                    }}
-                  >
-                    <span className="autocomplete-icon">{item.isImage ? '🖼️' : '📄'}</span>
-                    <span className="autocomplete-label">{item.baseName}</span>
-                    {item.relativePath !== item.baseName && <span className="autocomplete-path">{item.relativePath}</span>}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-        {mode !== 'edit' && <div className="editor-preview">{renderPreview(content, handlers, linkIndex)}</div>}
-      </div>
-    </main>
+    </div>
   );
 }
 
@@ -2051,26 +3936,32 @@ export default function App() {
   const { token: googleToken, gisReady, signIn, signOut: signOutGoogle } = useGoogleAuth();
   const { proxyToken, signInProxy, signOutProxy } = useProxyAuth();
   const token = googleToken || proxyToken;
-  const signOut = () => {
+  const signOut = useCallback(() => {
     signOutGoogle();
     signOutProxy();
-  };
+  }, [signOutGoogle, signOutProxy]);
+
   const [showProxyFolderPicker, setShowProxyFolderPicker] = useState(false);
   const [folder, setFolder] = useState(null);
   const [folderRestoring, setFolderRestoring] = useState(true);
   const sync = useVaultSync(token, folder);
+  const vaultIndex = useVaultIndex(token, sync.filesMeta);
 
-  const [currentFile, setCurrentFile] = useState(null);
-  const [content, setContent] = useState('');
-  const [dirty, setDirty] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [loadingNote, setLoadingNote] = useState(false);
+  // buffers: fileId -> { content, dirty, saving, loading, loadError }
+  const [buffers, setBuffers] = useState({});
+  const loadingFileIds = useRef(new Set());
+  const saveTimers = useRef({});
+
+  const [paneTree, setPaneTree] = useState(() => makeLeaf(null));
+  const [activePaneId, setActivePaneId] = useState(() => paneTree.id);
   const [viewingImage, setViewingImage] = useState(null);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [search, setSearch] = useState('');
-  const [mode, setMode] = useState(window.innerWidth < 768 ? 'edit' : 'split');
 
-  const saveTimer = useRef(null);
+  const [activeSideView, setActiveSideView] = useState('explorer'); // explorer | search | tags | bookmarks
+  const [mobileDockOpen, setMobileDockOpen] = useState(false);
+  const [sideDockWidth, setSideDockWidth] = useState(280);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [bookmarks, setBookmarks] = useState(new Set());
+  const [paletteMode, setPaletteMode] = useState(null); // null | 'commands' | 'switcher'
 
   // Restore the last-selected vault folder (an ID string, not note content).
   useEffect(() => {
@@ -2086,8 +3977,29 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, folder?.id]);
 
+  // Load this vault's bookmark list (just fileIds — metadata, not content).
+  useEffect(() => {
+    if (!folder?.id) {
+      setBookmarks(new Set());
+      return;
+    }
+    idbGet(STORE_META, `bookmarks:${folder.id}`).then((rec) => setBookmarks(new Set(rec?.value || [])));
+  }, [folder?.id]);
+
+  const toggleBookmark = useCallback(
+    (fileId) => {
+      setBookmarks((prev) => {
+        const next = new Set(prev);
+        next.has(fileId) ? next.delete(fileId) : next.add(fileId);
+        if (folder?.id) idbPut(STORE_META, { key: `bookmarks:${folder.id}`, value: Array.from(next) });
+        return next;
+      });
+    },
+    [folder?.id]
+  );
+
   // Used both for the first-time folder prompt and for switching vaults
-  // later from the top bar. Resets editor + sync state so nothing from the
+  // later from the ribbon. Resets editor + sync state so nothing from the
   // previous vault lingers on screen.
   const applyPickedFolder = useCallback(
     (picked) => {
@@ -2095,12 +4007,14 @@ export default function App() {
       releaseImageUrlCache();
       setFolder(picked);
       idbPut(STORE_META, { key: 'vaultFolder', value: picked });
-      setCurrentFile(null);
-      setContent('');
-      setDirty(false);
-      setSearch('');
-      setSidebarOpen(false);
+      setBuffers({});
+      saveTimers.current = {};
+      setPaneTree(makeLeaf(null));
+      setActivePaneId((prev) => prev);
+      setSearchQuery('');
+      setMobileDockOpen(false);
       setViewingImage(null);
+      setActiveSideView('explorer');
     },
     [sync]
   );
@@ -2123,46 +4037,301 @@ export default function App() {
     [applyPickedFolder]
   );
 
+  // Keep activePaneId valid whenever the pane tree changes shape (closing
+  // the active pane, vault switch, etc.).
+  useEffect(() => {
+    if (!findLeaf(paneTree, activePaneId)) {
+      const first = getFirstLeaf(paneTree);
+      if (first) setActivePaneId(first.id);
+    }
+  }, [paneTree, activePaneId]);
+
+  const filesById = useMemo(() => new Map(sync.filesMeta.map((f) => [f.id, f])), [sync.filesMeta]);
+  const tree = useMemo(() => buildVaultTree(folder?.id, sync.foldersMeta, sync.filesMeta), [folder?.id, sync.foldersMeta, sync.filesMeta]);
+  const tagsByFileId = useMemo(() => {
+    const map = new Map();
+    sync.filesMeta.forEach((f) => {
+      if (f.kind === 'note') map.set(f.id, extractTags(vaultIndex.getBody(f.id)));
+    });
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sync.filesMeta, vaultIndex.getBody, vaultIndex.version]);
+
+  // --- Content loading (per open tab) --------------------------------------
+  const ensureFileLoaded = useCallback(
+    (fileId) => {
+      if (!fileId || !token) return;
+      if (buffers[fileId] || loadingFileIds.current.has(fileId)) return;
+      const meta = sync.filesMeta.find((f) => f.id === fileId);
+      if (!meta || meta.kind === 'image') return;
+      loadingFileIds.current.add(fileId);
+      setBuffers((prev) => ({ ...prev, [fileId]: { content: '', dirty: false, saving: false, loading: true } }));
+      driveGetFileContent(token, fileId)
+        .then((text) => {
+          vaultIndex.updateBody(fileId, text);
+          setBuffers((prev) => ({ ...prev, [fileId]: { content: text, dirty: false, saving: false, loading: false } }));
+        })
+        .catch((err) => {
+          setBuffers((prev) => ({
+            ...prev,
+            [fileId]: { content: '', dirty: false, saving: false, loading: false, loadError: err.message }
+          }));
+        })
+        .finally(() => loadingFileIds.current.delete(fileId));
+    },
+    [token, buffers, sync.filesMeta, vaultIndex]
+  );
+
   const saveNow = useCallback(
-    async (value) => {
-      if (!currentFile || !token) return;
-      setSaving(true);
+    async (fileId, value) => {
+      if (!token) return;
+      setBuffers((prev) => (prev[fileId] ? { ...prev, [fileId]: { ...prev[fileId], saving: true } } : prev));
       try {
-        const updated = await driveUpdateFileContent(token, currentFile.id, value);
-        sync.applyLocalEdit(currentFile.id, value, updated.modifiedTime || new Date().toISOString());
-        setDirty(false);
+        const updated = await driveUpdateFileContent(token, fileId, value);
+        sync.applyLocalEdit(fileId, value, updated.modifiedTime || new Date().toISOString());
+        vaultIndex.updateBody(fileId, value);
+        setBuffers((prev) => (prev[fileId] ? { ...prev, [fileId]: { ...prev[fileId], dirty: false, saving: false } } : prev));
       } catch (err) {
         console.error(err);
-      } finally {
-        setSaving(false);
+        setBuffers((prev) => (prev[fileId] ? { ...prev, [fileId]: { ...prev[fileId], saving: false } } : prev));
       }
     },
-    [currentFile, token, sync]
+    [token, sync, vaultIndex]
   );
 
-  const openNoteById = useCallback(
-    async (id) => {
-      const meta = sync.filesMeta.find((f) => f.id === id);
-      if (!meta || !token || meta.kind === 'image') return;
-      setLoadingNote(true);
-      try {
-        const text = await driveGetFileContent(token, id);
-        setCurrentFile(meta);
-        setContent(text);
-        setDirty(false);
-        setSidebarOpen(false);
-      } finally {
-        setLoadingNote(false);
-      }
+  const handleContentChange = useCallback(
+    (fileId, value) => {
+      setBuffers((prev) => ({ ...prev, [fileId]: { ...prev[fileId], content: value, dirty: true } }));
+      if (saveTimers.current[fileId]) clearTimeout(saveTimers.current[fileId]);
+      saveTimers.current[fileId] = setTimeout(() => saveNow(fileId, value), 1200);
     },
-    [token, sync.filesMeta]
+    [saveNow]
   );
 
+  // Manual save shortcut — saves whichever file the focused pane has open.
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+        e.preventDefault();
+        const leaf = findLeaf(paneTree, activePaneId);
+        const tab = leaf?.tabs.find((t) => t.id === leaf.activeTabId);
+        if (tab) {
+          if (saveTimers.current[tab.fileId]) clearTimeout(saveTimers.current[tab.fileId]);
+          const buf = buffers[tab.fileId];
+          if (buf) saveNow(tab.fileId, buf.content);
+        }
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [paneTree, activePaneId, buffers, saveNow]);
+
+  // Command palette (⌘K / ⌘P) + quick switcher (⌘O).
+  useEffect(() => {
+    const handler = (e) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && (e.key === 'k' || e.key === 'p')) {
+        e.preventDefault();
+        setPaletteMode('commands');
+      } else if (mod && e.key === 'o') {
+        e.preventDefault();
+        setPaletteMode('switcher');
+      } else if (e.key === 'Escape') {
+        setPaletteMode(null);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
+  // --- Pane-tree actions -----------------------------------------------------
+  const openFileInPane = useCallback(
+    (paneId, fileId, { newTab = false } = {}) => {
+      if (!paneId || !fileId) return;
+      ensureFileLoaded(fileId);
+      const next = updateLeaf(paneTree, paneId, (leaf) => {
+        const existingTab = leaf.tabs.find((t) => t.fileId === fileId);
+        if (existingTab && !newTab) {
+          return { ...leaf, activeTabId: existingTab.id };
+        }
+        if (!newTab && leaf.activeTabId) {
+          const tabs = leaf.tabs.map((t) => {
+            if (t.id !== leaf.activeTabId) return t;
+            const history = t.history.slice(0, t.historyIndex + 1);
+            history.push(fileId);
+            return { ...t, fileId, history, historyIndex: history.length - 1 };
+          });
+          return { ...leaf, tabs };
+        }
+        const tab = makeTab(fileId, 'edit');
+        return { ...leaf, tabs: [...leaf.tabs, tab], activeTabId: tab.id };
+      });
+      setPaneTree(next);
+      setActivePaneId(paneId);
+      setMobileDockOpen(false);
+    },
+    [paneTree, ensureFileLoaded]
+  );
+
+  const selectTab = useCallback(
+    (paneId, tabId) => {
+      setPaneTree(updateLeaf(paneTree, paneId, (leaf) => ({ ...leaf, activeTabId: tabId })));
+      setActivePaneId(paneId);
+    },
+    [paneTree]
+  );
+
+  const closeTab = useCallback(
+    (paneId, tabId) => {
+      let next = updateLeaf(paneTree, paneId, (leaf) => {
+        const idx = leaf.tabs.findIndex((t) => t.id === tabId);
+        const tabs = leaf.tabs.filter((t) => t.id !== tabId);
+        let activeTabId = leaf.activeTabId;
+        if (activeTabId === tabId) {
+          const fallback = tabs[idx] || tabs[idx - 1] || tabs[tabs.length - 1] || null;
+          activeTabId = fallback ? fallback.id : null;
+        }
+        return { ...leaf, tabs, activeTabId };
+      });
+      const leaf = findLeaf(next, paneId);
+      if (leaf && leaf.tabs.length === 0 && collectLeaves(next).length > 1) {
+        next = removeLeafFromTree(next, paneId);
+      }
+      setPaneTree(next || makeLeaf(null));
+    },
+    [paneTree]
+  );
+
+  const closeOthers = useCallback(
+    (paneId, tabId) => {
+      setPaneTree(updateLeaf(paneTree, paneId, (leaf) => ({ ...leaf, tabs: leaf.tabs.filter((t) => t.id === tabId), activeTabId: tabId })));
+    },
+    [paneTree]
+  );
+
+  const closeAllTabs = useCallback(
+    (paneId) => {
+      let next = updateLeaf(paneTree, paneId, (leaf) => ({ ...leaf, tabs: [], activeTabId: null }));
+      if (collectLeaves(next).length > 1) next = removeLeafFromTree(next, paneId);
+      setPaneTree(next || makeLeaf(null));
+    },
+    [paneTree]
+  );
+
+  const closePane = useCallback(
+    (paneId) => {
+      const next = removeLeafFromTree(paneTree, paneId);
+      setPaneTree(next || makeLeaf(null));
+    },
+    [paneTree]
+  );
+
+  const splitPane = useCallback(
+    (paneId, direction) => {
+      const leaf = findLeaf(paneTree, paneId);
+      const activeTab = leaf?.tabs.find((t) => t.id === leaf.activeTabId);
+      const newLeaf = makeLeaf(activeTab?.fileId || null, activeTab?.mode || 'edit');
+      setPaneTree(splitLeafInTree(paneTree, paneId, direction, newLeaf));
+      setActivePaneId(newLeaf.id);
+      if (activeTab?.fileId) ensureFileLoaded(activeTab.fileId);
+    },
+    [paneTree, ensureFileLoaded]
+  );
+
+  const splitTabDirect = useCallback(
+    (paneId, tabId, direction) => {
+      const leaf = findLeaf(paneTree, paneId);
+      const tab = leaf?.tabs.find((t) => t.id === tabId);
+      const newLeaf = makeLeaf(tab?.fileId || null, tab?.mode || 'edit');
+      setPaneTree(splitLeafInTree(paneTree, paneId, direction, newLeaf));
+      setActivePaneId(newLeaf.id);
+    },
+    [paneTree]
+  );
+
+  const toggleTabMode = useCallback(
+    (paneId, tabId) => {
+      setPaneTree(
+        updateLeaf(paneTree, paneId, (leaf) => ({
+          ...leaf,
+          tabs: leaf.tabs.map((t) => (t.id === tabId ? { ...t, mode: t.mode === 'edit' ? 'preview' : 'edit' } : t))
+        }))
+      );
+    },
+    [paneTree]
+  );
+
+  const navigateHistory = useCallback(
+    (paneId, delta) => {
+      const leaf = findLeaf(paneTree, paneId);
+      const tab = leaf?.tabs.find((t) => t.id === leaf.activeTabId);
+      if (!tab) return;
+      const idx = tab.historyIndex + delta;
+      if (idx < 0 || idx >= tab.history.length) return;
+      const fileId = tab.history[idx];
+      ensureFileLoaded(fileId);
+      setPaneTree(
+        updateLeaf(paneTree, paneId, (l) => ({
+          ...l,
+          tabs: l.tabs.map((t) => (t.id === tab.id ? { ...t, fileId, historyIndex: idx } : t))
+        }))
+      );
+    },
+    [paneTree, ensureFileLoaded]
+  );
+
+  const resizeSplit = useCallback(
+    (splitId, index, deltaPx, containerRef) => {
+      const el = containerRef?.current;
+      if (!el) return;
+      const node = findSplitNode(paneTree, splitId);
+      if (!node) return;
+      const rect = el.getBoundingClientRect();
+      const totalPx = node.direction === 'row' ? rect.width : rect.height;
+      if (!totalPx) return;
+      const deltaPct = (deltaPx / totalPx) * 100;
+      const sizes = node.sizes.slice();
+      const a = index;
+      const b = index + 1;
+      const minPct = 12;
+      let newA = sizes[a] + deltaPct;
+      let newB = sizes[b] - deltaPct;
+      if (newA < minPct) {
+        newB -= minPct - newA;
+        newA = minPct;
+      }
+      if (newB < minPct) {
+        newA -= minPct - newB;
+        newB = minPct;
+      }
+      sizes[a] = newA;
+      sizes[b] = newB;
+      setPaneTree(updateSplitSizes(paneTree, splitId, sizes));
+    },
+    [paneTree]
+  );
+
+  const purgeFileEverywhere = useCallback((fileId) => {
+    setPaneTree((prev) => collapseEmptyLeaves(purgeFileFromTree(prev, fileId)) || makeLeaf(null));
+    setBuffers((prev) => {
+      if (!prev[fileId]) return prev;
+      const next = { ...prev };
+      delete next[fileId];
+      return next;
+    });
+    if (saveTimers.current[fileId]) {
+      clearTimeout(saveTimers.current[fileId]);
+      delete saveTimers.current[fileId];
+    }
+  }, []);
+
+  // --- Create / open-by-name / rename / delete / move / upload -------------
   const openNoteByName = useCallback(
     async (name) => {
       const resolution = resolveLinkTarget(name, sync.linkIndex);
       if (resolution.status === 'resolved' && !resolution.file.isImage) {
-        return openNoteById(resolution.file.id);
+        openFileInPane(activePaneId, resolution.file.id);
+        return;
       }
       if (!folder || !token) return;
       const skeleton = `# ${name}\n\n`;
@@ -2175,57 +4344,18 @@ export default function App() {
         kind: 'note'
       };
       sync.registerNewFile(fileRecord);
-      setCurrentFile(fileRecord);
-      setContent(skeleton);
-      setDirty(false);
-      setSidebarOpen(false);
+      setBuffers((prev) => ({ ...prev, [created.id]: { content: skeleton, dirty: false, saving: false, loading: false } }));
+      vaultIndex.updateBody(created.id, skeleton);
+      openFileInPane(activePaneId, created.id);
     },
-    [token, folder, sync, openNoteById]
+    [sync, folder, token, activePaneId, openFileInPane, vaultIndex]
   );
 
-  // Flush any pending save before switching notes so nothing is lost.
-  const navigateTo = useCallback(
-    async (opener) => {
-      if (dirty && currentFile) {
-        if (saveTimer.current) clearTimeout(saveTimer.current);
-        await saveNow(content);
-      }
-      await opener();
-    },
-    [dirty, currentFile, content, saveNow]
-  );
-
-  const handleContentChange = useCallback(
-    (value) => {
-      setContent(value);
-      setDirty(true);
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => saveNow(value), 1200);
-    },
-    [saveNow]
-  );
-
-  // Manual save shortcut.
-  useEffect(() => {
-    const handler = (e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 's') {
-        e.preventDefault();
-        if (saveTimer.current) clearTimeout(saveTimer.current);
-        saveNow(content);
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [content, saveNow]);
-
-  // Create a note inside a specific folder (root or any subfolder), used by
-  // the sidebar's root-level "+", each folder's context menu, and the top
-  // bar's quick-add button (which always targets the vault root).
   const handleCreateNoteIn = useCallback(
     (parentId) => {
       const name = window.prompt('New note name:');
       if (!name || !name.trim()) return;
-      navigateTo(async () => {
+      (async () => {
         try {
           const skeleton = `# ${name.trim()}\n\n`;
           const created = await driveCreateFile(token, parentId, name.trim(), skeleton);
@@ -2237,16 +4367,15 @@ export default function App() {
             kind: 'note'
           };
           sync.registerNewFile(fileRecord);
-          setCurrentFile(fileRecord);
-          setContent(skeleton);
-          setDirty(false);
-          setSidebarOpen(false);
+          setBuffers((prev) => ({ ...prev, [created.id]: { content: skeleton, dirty: false, saving: false, loading: false } }));
+          vaultIndex.updateBody(created.id, skeleton);
+          openFileInPane(activePaneId, created.id);
         } catch (err) {
           window.alert(`Couldn't create note: ${err.message}`);
         }
-      });
+      })();
     },
-    [token, sync, navigateTo]
+    [token, sync, activePaneId, openFileInPane, vaultIndex]
   );
 
   const handleCreateFolderIn = useCallback(
@@ -2263,6 +4392,31 @@ export default function App() {
     [token, sync]
   );
 
+  const handleUploadFiles = useCallback(
+    async (parentId, files) => {
+      if (!token) return;
+      const results = await mapWithConcurrency(files, 4, (file) => driveUploadBinary(token, parentId, file));
+      const failed = [];
+      results.forEach((r, i) => {
+        if (r.ok) {
+          const created = r.value;
+          const kind = isImageName(created.name) || IMAGE_MIME_TYPES.includes(created.mimeType) ? 'image' : 'note';
+          sync.registerNewFile({
+            id: created.id,
+            name: created.name,
+            modifiedTime: created.modifiedTime || new Date().toISOString(),
+            parents: [parentId],
+            kind
+          });
+        } else {
+          failed.push(files[i].name);
+        }
+      });
+      if (failed.length) window.alert(`Some files couldn't be uploaded: ${failed.join(', ')}`);
+    },
+    [token, sync]
+  );
+
   const handleRenameNode = useCallback(
     async (node) => {
       const isImage = node.type === 'file' && node.kind === 'image';
@@ -2274,9 +4428,6 @@ export default function App() {
       if (node.type !== 'file') {
         newName = input.trim();
       } else if (isImage) {
-        // Images keep whatever extension is typed; if the user dropped it,
-        // fall back to the original extension instead of silently turning
-        // the file into a ".md" note.
         const typed = input.trim();
         newName = fileExtension(typed) ? typed : `${typed}.${fileExtension(node.name) || 'png'}`;
       } else {
@@ -2287,7 +4438,6 @@ export default function App() {
         await driveRenameItem(token, node.id, newName);
         if (node.type === 'file') {
           sync.renameFile(node.id, newName);
-          setCurrentFile((prev) => (prev && prev.id === node.id ? { ...prev, name: newName } : prev));
         } else {
           sync.renameFolder(node.id, newName);
         }
@@ -2311,54 +4461,153 @@ export default function App() {
         await driveTrashItem(token, node.id);
         if (node.type === 'file') {
           sync.removeFile(node.id);
-          if (currentFile?.id === node.id) {
-            setCurrentFile(null);
-            setContent('');
-            setDirty(false);
-          }
+          purgeFileEverywhere(node.id);
           if (viewingImage?.id === node.id) setViewingImage(null);
+          if (bookmarks.has(node.id)) toggleBookmark(node.id);
         } else {
           const removedFileIds = sync.removeFolder(node.id);
-          if (currentFile && removedFileIds.includes(currentFile.id)) {
-            setCurrentFile(null);
-            setContent('');
-            setDirty(false);
-          }
+          removedFileIds.forEach(purgeFileEverywhere);
           if (viewingImage && removedFileIds.includes(viewingImage.id)) setViewingImage(null);
+          removedFileIds.forEach((id) => {
+            if (bookmarks.has(id)) toggleBookmark(id);
+          });
         }
       } catch (err) {
         window.alert(`Couldn't delete: ${err.message}`);
       }
     },
-    [token, sync, currentFile, viewingImage]
+    [token, sync, purgeFileEverywhere, viewingImage, bookmarks, toggleBookmark]
   );
 
-  const tree = useMemo(
-    () => buildVaultTree(folder?.id, sync.foldersMeta, sync.filesMeta),
-    [folder?.id, sync.foldersMeta, sync.filesMeta]
+  const handleMoveNode = useCallback(
+    async (id, type, targetFolderId) => {
+      if (id === targetFolderId) return;
+      const record = type === 'folder' ? sync.foldersMeta.find((f) => f.id === id) : sync.filesMeta.find((f) => f.id === id);
+      if (!record) return;
+      const oldParentId = (record.parents && record.parents[0]) || folder.id;
+      if (oldParentId === targetFolderId) return;
+      if (type === 'folder') {
+        const isDescendant = (candidateId) => {
+          let cur = sync.foldersMeta.find((f) => f.id === candidateId);
+          while (cur) {
+            const parentId = (cur.parents && cur.parents[0]) || folder.id;
+            if (parentId === id) return true;
+            if (parentId === folder.id) return false;
+            cur = sync.foldersMeta.find((f) => f.id === parentId);
+          }
+          return false;
+        };
+        if (targetFolderId === id || isDescendant(targetFolderId)) return;
+      }
+      try {
+        await driveMoveItem(token, id, targetFolderId, oldParentId);
+        if (type === 'folder') sync.moveFolder(id, targetFolderId);
+        else sync.moveFile(id, targetFolderId);
+      } catch (err) {
+        window.alert(err.code === 'proxy-unsupported' ? err.message : `Couldn't move: ${err.message}`);
+      }
+    },
+    [token, sync, folder]
   );
 
-  const backlinksForCurrent = currentFile
-    ? Array.from(sync.backlinkIndex.get(currentFile.id) || [])
-        .map((id) => sync.filesMeta.find((f) => f.id === id))
-        .filter(Boolean)
-    : [];
-
-  const imageBacklinks = viewingImage
-    ? Array.from(sync.backlinkIndex.get(viewingImage.id) || [])
-        .map((id) => sync.filesMeta.find((f) => f.id === id))
-        .filter(Boolean)
-    : [];
-
-  const linkHandlers = useMemo(
+  const handlers = useMemo(
     () => ({
       token,
-      onOpenById: (id) => navigateTo(() => openNoteById(id)),
-      onCreateOrOpenByName: (name) => navigateTo(() => openNoteByName(name)),
-      onOpenImage: (file) => setViewingImage(file)
+      onOpenById: (id) => openFileInPane(activePaneId, id),
+      onCreateOrOpenByName: (name) => openNoteByName(name),
+      onOpenImage: (file) => setViewingImage(file),
+      onOpenTag: (tag) => {
+        setActiveSideView('search');
+        setSearchQuery(`tag:${tag}`);
+        setMobileDockOpen(true);
+      }
     }),
-    [token, navigateTo, openNoteById, openNoteByName]
+    [token, openFileInPane, activePaneId, openNoteByName]
   );
+
+  const handlePaletteFilePick = useCallback(
+    (file, opts) => {
+      setPaletteMode(null);
+      if (file.kind === 'image') {
+        setViewingImage(file);
+        return;
+      }
+      openFileInPane(activePaneId, file.id, opts);
+    },
+    [activePaneId, openFileInPane]
+  );
+
+  const commands = useMemo(() => {
+    if (!folder) return [];
+    return [
+      { id: 'new-note', label: 'Create new note', icon: <IconFilePlus size={15} />, run: () => handleCreateNoteIn(folder.id) },
+      { id: 'new-folder', label: 'Create new folder', icon: <IconFolderPlus size={15} />, run: () => handleCreateFolderIn(folder.id) },
+      { id: 'toggle-sidebar', label: 'Toggle left sidebar', icon: <IconPanelLeft size={15} />, run: () => setMobileDockOpen((v) => !v) },
+      { id: 'split-right', label: 'Split pane right', icon: <IconSplitVertical size={15} />, run: () => splitPane(activePaneId, 'row') },
+      { id: 'split-down', label: 'Split pane down', icon: <IconSplitHorizontal size={15} />, run: () => splitPane(activePaneId, 'column') },
+      {
+        id: 'toggle-mode',
+        label: 'Toggle edit / reading view',
+        icon: <IconEye size={15} />,
+        run: () => {
+          const leaf = findLeaf(paneTree, activePaneId);
+          const tab = leaf?.tabs.find((t) => t.id === leaf.activeTabId);
+          if (tab) toggleTabMode(activePaneId, tab.id);
+        }
+      },
+      { id: 'sync', label: 'Sync vault now', icon: <IconRefresh size={15} />, run: () => sync.syncNow() },
+      {
+        id: 'open-search',
+        label: 'Open search',
+        icon: <IconSearch size={15} />,
+        run: () => {
+          setActiveSideView('search');
+          setMobileDockOpen(true);
+        }
+      },
+      {
+        id: 'open-tags',
+        label: 'Open tag pane',
+        icon: <IconTag size={15} />,
+        run: () => {
+          setActiveSideView('tags');
+          setMobileDockOpen(true);
+        }
+      },
+      {
+        id: 'open-bookmarks',
+        label: 'Open bookmarks',
+        icon: <IconStar size={15} />,
+        run: () => {
+          setActiveSideView('bookmarks');
+          setMobileDockOpen(true);
+        }
+      },
+      { id: 'quick-switcher', label: 'Quick switcher: jump to note', icon: <IconSearch size={15} />, hint: '⌘O', run: () => setPaletteMode('switcher') },
+      { id: 'change-folder', label: 'Change vault folder', icon: <IconFolder size={15} />, run: handlePickFolder },
+      { id: 'sign-out', label: 'Sign out', icon: <IconLogOut size={15} />, run: signOut }
+    ];
+  }, [folder, handleCreateNoteIn, handleCreateFolderIn, activePaneId, splitPane, paneTree, toggleTabMode, sync, handlePickFolder, signOut]);
+
+  const handlePaletteCommand = useCallback((cmd) => {
+    setPaletteMode(null);
+    cmd.run();
+  }, []);
+
+  const showShortcutsHelp = useCallback(() => {
+    window.alert(
+      [
+        'Keyboard shortcuts',
+        '',
+        '⌘/Ctrl K or P — Command palette',
+        '⌘/Ctrl O — Quick switcher (jump to note)',
+        '⌘/Ctrl S — Save current note',
+        '[[ — Link autocomplete while typing',
+        'Middle-click a tab — Close it',
+        'Drag a file/folder in the sidebar — Move it'
+      ].join('\n')
+    );
+  }, []);
 
   if (!token) {
     return <LoginScreen onSignIn={signIn} ready={gisReady} onSignInProxy={signInProxy} />;
@@ -2371,11 +4620,7 @@ export default function App() {
       <>
         <FolderPrompt onPick={handlePickFolder} />
         {showProxyFolderPicker && (
-          <ProxyFolderPicker
-            token={token}
-            onPick={handleProxyFolderPicked}
-            onCancel={() => setShowProxyFolderPicker(false)}
-          />
+          <ProxyFolderPicker token={token} onPick={handleProxyFolderPicked} onCancel={() => setShowProxyFolderPicker(false)} />
         )}
       </>
     );
@@ -2387,77 +4632,185 @@ export default function App() {
     return <VaultLoadingScreen progress={sync.syncProgress} />;
   }
 
-  const syncPct =
-    sync.syncProgress.total > 0 ? Math.round((sync.syncProgress.loaded / sync.syncProgress.total) * 100) : null;
+  const syncPct = sync.syncProgress.total > 0 ? Math.round((sync.syncProgress.loaded / sync.syncProgress.total) * 100) : null;
+
+  const activeLeafForStatus = findLeaf(paneTree, activePaneId);
+  const activeTabForStatus = activeLeafForStatus?.tabs.find((t) => t.id === activeLeafForStatus.activeTabId);
+  const activeFileForStatus = activeTabForStatus ? filesById.get(activeTabForStatus.fileId) : null;
+  const activeContentForStatus = activeTabForStatus ? buffers[activeTabForStatus.fileId]?.content || '' : '';
+  const activeBacklinkCount = activeFileForStatus ? (sync.backlinkIndex.get(activeFileForStatus.id) || new Set()).size : 0;
+  const imageBacklinks = viewingImage
+    ? Array.from(sync.backlinkIndex.get(viewingImage.id) || [])
+        .map((id) => sync.filesMeta.find((f) => f.id === id))
+        .filter(Boolean)
+    : [];
+  const currentOpenIds = new Set(collectLeaves(paneTree).flatMap((l) => l.tabs.map((t) => t.fileId)));
 
   return (
     <div className="app-shell">
-      <TopBar
-        folderName={folder.name}
-        syncing={sync.syncing}
-        syncError={sync.syncError}
-        onSync={sync.syncNow}
-        onNewNote={() => handleCreateNoteIn(folder.id)}
-        onChangeFolder={handlePickFolder}
-        onSignOut={signOut}
-        onToggleSidebar={() => setSidebarOpen((v) => !v)}
-        dirty={dirty}
-        saving={saving}
-      />
       {sync.syncing && syncPct !== null && (
         <div className="topbar-progress">
           <div className="topbar-progress-fill" style={{ width: `${syncPct}%` }} />
         </div>
       )}
-      <div className={`workspace ${sidebarOpen ? 'sidebar-open' : ''}`}>
-        <Sidebar
-          tree={tree}
-          files={sync.filesMeta}
-          vaultRootId={folder.id}
-          currentId={currentFile?.id}
-          onOpenFile={(id) => navigateTo(() => openNoteById(id))}
-          onOpenImage={(file) => {
-            setViewingImage(file);
-            setSidebarOpen(false);
+      <div className={`workspace ${mobileDockOpen ? 'dock-open' : ''}`}>
+        <ActivityBar
+          activeView={activeSideView}
+          onSetView={(v) => {
+            setActiveSideView(v);
+            setMobileDockOpen(true);
           }}
-          search={search}
-          setSearch={setSearch}
-          backlinks={backlinksForCurrent}
-          onCreateNote={handleCreateNoteIn}
-          onCreateFolder={handleCreateFolderIn}
-          onRename={handleRenameNode}
-          onDelete={handleDeleteNode}
+          onOpenCommandPalette={() => setPaletteMode('commands')}
+          onSync={() => sync.syncNow()}
+          syncing={sync.syncing}
+          onChangeFolder={handlePickFolder}
+          onSignOut={signOut}
+          folderName={folder.name}
         />
-        <div className="sidebar-scrim" onClick={() => setSidebarOpen(false)} />
-        <Editor
-          file={currentFile}
-          content={content}
-          onChange={handleContentChange}
-          linkIndex={sync.linkIndex}
-          handlers={linkHandlers}
-          mode={mode}
-          setMode={setMode}
-          loadingNote={loadingNote}
-        />
+        <div className="side-dock" style={{ width: sideDockWidth }}>
+          <div className="side-dock-panels">
+            {activeSideView === 'explorer' && (
+              <ExplorerPanel
+                tree={tree}
+                vaultRootId={folder.id}
+                currentIds={currentOpenIds}
+                onOpenFile={(id, e) => openFileInPane(activePaneId, id, { newTab: !!(e && (e.metaKey || e.ctrlKey)) })}
+                onOpenImage={(file) => setViewingImage(file)}
+                onCreateNote={handleCreateNoteIn}
+                onCreateFolder={handleCreateFolderIn}
+                onUploadFiles={handleUploadFiles}
+                onRename={handleRenameNode}
+                onDelete={handleDeleteNode}
+                onMoveNode={handleMoveNode}
+                canUpload={!isProxy(token)}
+                bookmarks={bookmarks}
+                onToggleBookmark={toggleBookmark}
+              />
+            )}
+            {activeSideView === 'search' && (
+              <SearchPanel
+                query={searchQuery}
+                setQuery={setSearchQuery}
+                filesMeta={sync.filesMeta}
+                linkIndex={sync.linkIndex}
+                getBody={vaultIndex.getBody}
+                tagsByFileId={tagsByFileId}
+                onOpenNote={(id) => openFileInPane(activePaneId, id)}
+                indexing={vaultIndex}
+                ensureIndexed={vaultIndex.ensureIndexed}
+                indexVersion={vaultIndex.version}
+              />
+            )}
+            {activeSideView === 'tags' && (
+              <TagsPanel
+                filesMeta={sync.filesMeta}
+                getBody={vaultIndex.getBody}
+                onOpenTag={(tag) => {
+                  setActiveSideView('search');
+                  setSearchQuery(`tag:${tag}`);
+                }}
+                indexing={vaultIndex}
+                ensureIndexed={vaultIndex.ensureIndexed}
+                indexVersion={vaultIndex.version}
+              />
+            )}
+            {activeSideView === 'bookmarks' && (
+              <BookmarksPanel
+                bookmarks={bookmarks}
+                filesMeta={sync.filesMeta}
+                onOpenFile={(id) => openFileInPane(activePaneId, id)}
+                onOpenImage={(file) => setViewingImage(file)}
+                onToggleBookmark={toggleBookmark}
+              />
+            )}
+          </div>
+          <div className="vault-footer">
+            <span className="vault-footer-name">
+              <IconFolder size={13} />
+              {folder.name}
+            </span>
+            <div className="vault-footer-actions">
+              <button className="icon-btn" title="Keyboard shortcuts" onClick={showShortcutsHelp}>
+                <IconHelp size={15} />
+              </button>
+              <button className="icon-btn" title="Change vault folder" onClick={handlePickFolder}>
+                <IconSettings size={15} />
+              </button>
+            </div>
+          </div>
+        </div>
+        <ResizeHandle direction="row" onResize={(dx) => setSideDockWidth((w) => Math.min(480, Math.max(200, w + dx)))} />
+        <div className="dock-scrim" onClick={() => setMobileDockOpen(false)} />
+        <div className="pane-area">
+          <PaneNode
+            node={paneTree}
+            filesById={filesById}
+            linkIndex={sync.linkIndex}
+            buffers={buffers}
+            activePaneId={activePaneId}
+            onFocusPane={setActivePaneId}
+            onSelectTab={selectTab}
+            onCloseTab={closeTab}
+            onNewTab={(paneId) => {
+              setActivePaneId(paneId);
+              setPaletteMode('switcher');
+            }}
+            onSplitTab={splitTabDirect}
+            onCloseOthers={closeOthers}
+            onCloseAll={closeAllTabs}
+            onSplit={splitPane}
+            onClosePane={closePane}
+            canClosePane={collectLeaves(paneTree).length > 1}
+            onBack={(paneId) => navigateHistory(paneId, -1)}
+            onForward={(paneId) => navigateHistory(paneId, 1)}
+            onToggleMode={toggleTabMode}
+            onChange={handleContentChange}
+            handlers={handlers}
+            backlinkIndex={sync.backlinkIndex}
+            allFiles={sync.filesMeta}
+            getBody={vaultIndex.getBody}
+            bookmarks={bookmarks}
+            onToggleBookmark={toggleBookmark}
+            onResizeSplit={resizeSplit}
+            onToggleDock={() => setMobileDockOpen((v) => !v)}
+          />
+        </div>
       </div>
+      <StatusBar
+        file={activeFileForStatus}
+        content={activeContentForStatus}
+        backlinkCount={activeBacklinkCount}
+        syncing={sync.syncing}
+        syncError={sync.syncError}
+        dirty={activeTabForStatus ? !!buffers[activeTabForStatus.fileId]?.dirty : false}
+        saving={activeTabForStatus ? !!buffers[activeTabForStatus.fileId]?.saving : false}
+      />
       {viewingImage && (
         <ImageViewer
           token={token}
           file={viewingImage}
           backlinks={imageBacklinks}
+          isBookmarked={bookmarks.has(viewingImage.id)}
+          onToggleBookmark={() => toggleBookmark(viewingImage.id)}
           onOpenNote={(id) => {
             setViewingImage(null);
-            navigateTo(() => openNoteById(id));
+            openFileInPane(activePaneId, id);
           }}
           onClose={() => setViewingImage(null)}
         />
       )}
-      {showProxyFolderPicker && (
-        <ProxyFolderPicker
-          token={token}
-          onPick={handleProxyFolderPicked}
-          onCancel={() => setShowProxyFolderPicker(false)}
+      {paletteMode && (
+        <PaletteModal
+          mode={paletteMode}
+          files={sync.filesMeta}
+          commands={commands}
+          onClose={() => setPaletteMode(null)}
+          onPickFile={handlePaletteFilePick}
+          onRunCommand={handlePaletteCommand}
         />
+      )}
+      {showProxyFolderPicker && (
+        <ProxyFolderPicker token={token} onPick={handleProxyFolderPicked} onCancel={() => setShowProxyFolderPicker(false)} />
       )}
     </div>
   );
