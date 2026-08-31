@@ -979,7 +979,7 @@ button:disabled {
   font-size: 28px;
   font-weight: 700;
   color: var(--text-normal);
-  caret-color: var(--accent);
+  caret-color: var(--text-muted);
 }
 .note-title-input:focus {
   outline: none;
@@ -1009,9 +1009,13 @@ button:disabled {
   font-family: var(--font-mono);
   color: transparent;
   background: transparent;
-  caret-color: var(--accent);
+  caret-color: var(--text-muted);
   position: relative;
   z-index: 1;
+  /* Explicit (not just the browser default) so it's guaranteed to match
+     .editor-highlight below exactly — see the comment there. */
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 .editor-textarea::placeholder {
   color: var(--text-faint);
@@ -1022,15 +1026,22 @@ button:disabled {
 
 /* Highlight overlay — sits directly behind the (text-transparent) textarea
    above, sharing identical box metrics (font, padding, line-height, wrap)
-   so its line-wrapping matches exactly. Purely decorative: dims marker
-   characters and colors/weights the content they wrap, but never changes
-   what text is present or how wide it renders, so nothing drifts out of
-   sync with the real textarea underneath. */
+   so its line-wrapping matches exactly, and the real caret above it lines
+   up with the styled text. That also means it must reserve the exact same
+   scrollbar gutter as the textarea: `overflow: hidden` (no gutter, ever)
+   would make this layer a few pixels wider than the textarea as soon as a
+   note is tall enough to scroll, silently shifting every wrap point (and
+   therefore the caret) out of alignment with the visible text. Matching
+   `overflow-y: auto` keeps the two in lockstep at any note length; its own
+   scrollbar thumb is simply hidden and driven from the textarea's via JS
+   (see the onScroll handler), never interactive on its own. */
 .editor-highlight {
   position: absolute;
   inset: 0;
   z-index: 0;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
   padding: 14px clamp(20px, 8vw, 120px) 28px;
   line-height: var(--editor-line-px);
   font-size: 15px;
@@ -1039,6 +1050,9 @@ button:disabled {
   white-space: pre-wrap;
   overflow-wrap: break-word;
   pointer-events: none;
+}
+.editor-highlight::-webkit-scrollbar {
+  display: none;
 }
 .syn-mark {
   color: var(--text-faint);

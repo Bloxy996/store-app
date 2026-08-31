@@ -22,7 +22,7 @@ export default defineConfig({
     VitePWA({
       registerType: 'autoUpdate',
       injectRegister: 'auto',
-      includeAssets: ['icon-192.png', 'icon-512.png'],
+      includeAssets: ['icon-192.png', 'icon-512.png', 'icon-512-maskable.png', 'apple-touch-icon.png'],
       manifest: {
         name: 'Vault — Notes on Drive',
         short_name: 'Vault',
@@ -37,9 +37,29 @@ export default defineConfig({
         // dev) and '/<repo>/' (GitHub Pages project site) without edits.
         categories: ['productivity', 'utilities'],
         icons: [
-          { src: 'icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
-          { src: 'icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
-          { src: 'icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
+          // Icon `src` here is NOT automatically base-prefixed by
+          // vite-plugin-pwa (long-standing upstream gap — see
+          // github.com/vite-pwa/vite-plugin-pwa/issues/713), unlike
+          // start_url/scope above. On a GitHub Pages *project* site
+          // (base === '/<repo>/') an un-prefixed 'icon-192.png' resolves to
+          // https://<user>.github.io/icon-192.png instead of
+          // https://<user>.github.io/<repo>/icon-192.png — a 404. Chrome's
+          // installability check silently fails when it can't fetch a
+          // qualifying icon, so the browser falls back to a plain
+          // "Add to Home Screen" bookmark shortcut (generic browser icon,
+          // opens in a tab, removed like a bookmark rather than uninstalled
+          // like an app) instead of a real install — which matches exactly
+          // what's being reported. Prefixing with `base` here works for
+          // both '/' and '/<repo>/' and costs nothing either way.
+          { src: `${base}icon-192.png`, sizes: '192x192', type: 'image/png', purpose: 'any' },
+          { src: `${base}icon-512.png`, sizes: '512x512', type: 'image/png', purpose: 'any' },
+          // A maskable icon needs its own artwork, not the transparent
+          // 'any' icon reused: the OS crops maskable icons to an arbitrary
+          // shape (circle, squircle, ...), so it needs real fill behind the
+          // mark and the mark inset within the ~80% "safe zone" — a
+          // transparent background there shows as a transparent/black gap
+          // wherever the crop shape extends past the artwork.
+          { src: `${base}icon-512-maskable.png`, sizes: '512x512', type: 'image/png', purpose: 'maskable' }
         ]
       },
       workbox: {
