@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 /* ============================================================================
  * VAULT — a markdown notebook that reads/writes .md files directly to and
@@ -1259,6 +1260,36 @@ function releaseImageUrlCache() {
   imageUrlPromises.clear();
 }
 
+// Opens an image file in a real new browser tab (rather than an in-app
+// viewer). The blank tab is opened synchronously, in direct response to the
+// user gesture, so popup blockers don't swallow it — its location is filled
+// in once the Drive blob has been fetched/decoded.
+async function openImageInNewTab(token, file) {
+  if (!file) return;
+  const win = window.open('', '_blank');
+  try {
+    let url = imageUrlCache.get(file.id);
+    if (!url) {
+      let promise = imageUrlPromises.get(file.id);
+      if (!promise) {
+        promise = driveGetFileBlob(token, file.id).then((blob) => {
+          const objectUrl = URL.createObjectURL(blob);
+          imageUrlCache.set(file.id, objectUrl);
+          return objectUrl;
+        });
+        imageUrlPromises.set(file.id, promise);
+        promise.finally(() => imageUrlPromises.delete(file.id));
+      }
+      url = await promise;
+    }
+    if (win) win.location.href = url;
+    else window.open(url, '_blank');
+  } catch (err) {
+    if (win) win.close();
+    window.alert(`Couldn't open image: ${err.message || err}`);
+  }
+}
+
 function useDriveImageUrl(token, fileId) {
   const [url, setUrl] = useState(() => (fileId ? imageUrlCache.get(fileId) || null : null));
   const [error, setError] = useState('');
@@ -1606,25 +1637,24 @@ function getCaretCoordinates(textarea, position) {
 // Powers the [[link autocomplete dropdown. Reads/writes the textarea's DOM
 // value directly (rather than through the React `content` prop) so it never
 // races a stale closure against the just-typed keystroke.
-function useLinkAutocomplete(textareaRef, onChange, linkIndex) {
+function useLinkAutocomplete(textareaRef, onChange, linkIndex, phantomRecords) {
   const [state, setState] = useState(null); // { start, items, activeIndex, top, left }
 
   const computeSuggestions = useCallback(
     (query) => {
       const q = query.toLowerCase();
       const scoreOf = (hay) => (q ? hay.indexOf(q) : 0);
-      const byBase = linkIndex.records
-        .map((r) => ({ r, score: scoreOf(r.baseName.toLowerCase()) }))
-        .filter((s) => s.score !== -1);
-      const pool = byBase.length
+      const pool = linkIndex.records.concat(phantomRecords || []);
+      const byBase = pool.map((r) => ({ r, score: scoreOf(r.baseName.toLowerCase()) })).filter((s) => s.score !== -1);
+      const finalPool = byBase.length
         ? byBase
-        : linkIndex.records.map((r) => ({ r, score: scoreOf(r.relativePath.toLowerCase()) })).filter((s) => s.score !== -1);
-      return pool
+        : pool.map((r) => ({ r, score: scoreOf(r.relativePath.toLowerCase()) })).filter((s) => s.score !== -1);
+      return finalPool
         .sort((a, b) => a.score - b.score || a.r.baseName.localeCompare(b.r.baseName))
         .slice(0, 8)
         .map((s) => s.r);
     },
-    [linkIndex]
+    [linkIndex, phantomRecords]
   );
 
   const updateFromCaret = useCallback(() => {
@@ -2535,10 +2565,16 @@ function VaultLoadingScreen({ progress }) {
 // outside click or Escape. Backs the merged "add item" button, per-row
 // "⋮" menus, and the tab context menu.
 // ---------------------------------------------------------------------------
-function useClickOutside(ref, onOutside) {
+// Accepts either a single ref or an array of refs — a click/touch is only
+// "outside" if it falls outside every ref's subtree. Used so a menu rendered
+// via portal (outside the trigger's DOM subtree) can still be treated as
+// "inside" for the purposes of dismissal.
+function useClickOutside(refs, onOutside) {
   useEffect(() => {
+    const list = Array.isArray(refs) ? refs : [refs];
     function handler(e) {
-      if (ref.current && !ref.current.contains(e.target)) onOutside();
+      const inside = list.some((r) => r.current && r.current.contains(e.target));
+      if (!inside) onOutside();
     }
     document.addEventListener('mousedown', handler);
     document.addEventListener('touchstart', handler);
@@ -2546,22 +2582,59 @@ function useClickOutside(ref, onOutside) {
       document.removeEventListener('mousedown', handler);
       document.removeEventListener('touchstart', handler);
     };
-  }, [ref, onOutside]);
+  }, [refs, onOutside]);
 }
 
+// Dropdown menu whose panel is rendered into a portal at the document root
+// and positioned with `position: fixed` from the trigger's live bounding
+// rect. Rendering in-place (as a plain absolutely-positioned child) would
+// get clipped by any scrolling/overflow ancestor between the trigger and the
+// viewport (e.g. the horizontally-scrolling tab bar) — the portal sidesteps
+// that entirely, and keeps the menu above every other layer of the UI.
 function DropdownMenu({ trigger, children, align = 'left', className = '' }) {
   const [open, setOpen] = useState(false);
-  const wrapRef = useRef(null);
-  useClickOutside(wrapRef, () => setOpen(false));
+  const [pos, setPos] = useState(null);
+  const anchorRef = useRef(null);
+  const menuRef = useRef(null);
+  useClickOutside([anchorRef, menuRef], () => setOpen(false));
+
+  const computePos = useCallback(() => {
+    const el = anchorRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    setPos({ top: rect.bottom + 4, left: rect.left, right: window.innerWidth - rect.right });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    computePos();
+    const onReflow = () => computePos();
+    window.addEventListener('resize', onReflow);
+    window.addEventListener('scroll', onReflow, true);
+    return () => {
+      window.removeEventListener('resize', onReflow);
+      window.removeEventListener('scroll', onReflow, true);
+    };
+  }, [open, computePos]);
+
+  const toggle = useCallback(() => setOpen((v) => !v), []);
 
   return (
-    <div className={`dropdown-wrap ${className}`} ref={wrapRef}>
-      {trigger(() => setOpen((v) => !v), open)}
-      {open && (
-        <div className={`dropdown-menu align-${align}`} onClick={() => setOpen(false)}>
-          {children}
-        </div>
-      )}
+    <div className={`dropdown-wrap ${className}`} ref={anchorRef}>
+      {trigger(toggle, open)}
+      {open &&
+        pos &&
+        createPortal(
+          <div
+            ref={menuRef}
+            className={`dropdown-menu portal align-${align}`}
+            style={align === 'right' ? { top: pos.top, right: pos.right } : { top: pos.top, left: pos.left }}
+            onClick={() => setOpen(false)}
+          >
+            {children}
+          </div>,
+          document.body
+        )}
     </div>
   );
 }
@@ -3422,9 +3495,296 @@ function PaneHeader({
 // Editor content — the textarea (source) or rendered preview for a single
 // open tab. Mode is a per-tab property now, toggled from PaneHeader.
 // ---------------------------------------------------------------------------
-function EditorContent({ file, content, onChange, linkIndex, handlers, mode, loadingNote, backlinkIndex, allFiles, getBody }) {
+// ---------------------------------------------------------------------------
+// Source-mode syntax highlighting — mirrors Obsidian's "source mode": the
+// raw markdown stays fully intact and editable (nothing is hidden or
+// stripped), but the marker characters (#, *, _, `, [[ ]]) are dimmed and
+// the content they wrap is styled (headings sized up, links colored, etc).
+// Rendered as a layer positioned exactly behind a transparent-text textarea
+// (see the `.editor-textarea-source` styles) — this function only ever
+// changes color/weight/size, never the text content or its layout width, so
+// the overlay's line-wrapping stays pixel-identical to the real textarea.
+// ---------------------------------------------------------------------------
+const INLINE_SYNTAX_RE =
+  /(\[\[[^\]|]+(?:\|[^\]]+)?\]\])|(\[[^\]]+\]\([^)]+\))|(\*\*[^*]+\*\*)|(__[^_]+__)|(`[^`]+`)|(#[\w/-]+)|(\*[^*\s][^*]*?\*)|(_[^_\s][^_]*?_)/g;
+
+function highlightInlineSyntax(text, keyPrefix) {
+  if (!text) return null;
+  const nodes = [];
+  let lastIndex = 0;
+  let i = 0;
+  let m;
+  INLINE_SYNTAX_RE.lastIndex = 0;
+  while ((m = INLINE_SYNTAX_RE.exec(text)) !== null) {
+    const token = m[0];
+    if (m.index > lastIndex) nodes.push(text.slice(lastIndex, m.index));
+    const key = `${keyPrefix}-i${i++}`;
+    if (token.startsWith('[[')) {
+      const inner = token.slice(2, -2);
+      const pipe = inner.indexOf('|');
+      const target = pipe === -1 ? inner : inner.slice(0, pipe);
+      const alias = pipe === -1 ? null : inner.slice(pipe + 1);
+      nodes.push(
+        <span key={key}>
+          <span className="syn-mark">[[</span>
+          <span className="syn-link">{target}</span>
+          {alias !== null && (
+            <span>
+              <span className="syn-mark">|</span>
+              <span className="syn-link">{alias}</span>
+            </span>
+          )}
+          <span className="syn-mark">]]</span>
+        </span>
+      );
+    } else if (token[0] === '[') {
+      const mm = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token);
+      nodes.push(
+        <span key={key}>
+          <span className="syn-mark">[</span>
+          <span className="syn-link">{mm ? mm[1] : token}</span>
+          <span className="syn-mark">{`](${mm ? mm[2] : ''})`}</span>
+        </span>
+      );
+    } else if (token.startsWith('**')) {
+      nodes.push(
+        <span key={key}>
+          <span className="syn-mark">**</span>
+          <span className="syn-bold">{token.slice(2, -2)}</span>
+          <span className="syn-mark">**</span>
+        </span>
+      );
+    } else if (token.startsWith('__')) {
+      nodes.push(
+        <span key={key}>
+          <span className="syn-mark">__</span>
+          <span className="syn-bold">{token.slice(2, -2)}</span>
+          <span className="syn-mark">__</span>
+        </span>
+      );
+    } else if (token[0] === '`') {
+      nodes.push(
+        <span key={key}>
+          <span className="syn-mark">`</span>
+          <span className="syn-code">{token.slice(1, -1)}</span>
+          <span className="syn-mark">`</span>
+        </span>
+      );
+    } else if (token[0] === '#') {
+      nodes.push(
+        <span key={key} className="syn-tag">
+          {token}
+        </span>
+      );
+    } else if (token[0] === '*') {
+      nodes.push(
+        <span key={key}>
+          <span className="syn-mark">*</span>
+          <span className="syn-italic">{token.slice(1, -1)}</span>
+          <span className="syn-mark">*</span>
+        </span>
+      );
+    } else {
+      nodes.push(
+        <span key={key}>
+          <span className="syn-mark">_</span>
+          <span className="syn-italic">{token.slice(1, -1)}</span>
+          <span className="syn-mark">_</span>
+        </span>
+      );
+    }
+    lastIndex = m.index + token.length;
+  }
+  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
+  return nodes;
+}
+
+// A list item's text can start with a "[ ]" / "[x]" task checkbox before any
+// other inline syntax — handled as its own leading token, then the rest goes
+// through the normal inline pass.
+function highlightListBody(text, keyPrefix) {
+  const m = /^(\[[ xX]\])(.*)$/.exec(text);
+  if (!m) return highlightInlineSyntax(text, keyPrefix);
+  return (
+    <span key={`${keyPrefix}-task`}>
+      <span className="syn-mark syn-task">{m[1]}</span>
+      {highlightInlineSyntax(m[2], `${keyPrefix}-t`)}
+    </span>
+  );
+}
+
+function highlightSourceLine(line, lineKey) {
+  let m = /^(#{1,6})( +)(.*)$/.exec(line);
+  if (m) {
+    return (
+      <span key={lineKey}>
+        <span className="syn-mark">{m[1] + m[2]}</span>
+        <span className={`syn-h syn-h${m[1].length}`}>{highlightInlineSyntax(m[3], `${lineKey}h`)}</span>
+      </span>
+    );
+  }
+
+  if (/^ {0,3}(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+    return (
+      <span key={lineKey} className="syn-mark">
+        {line}
+      </span>
+    );
+  }
+
+  m = /^(\s{0,3}>+)( ?)(.*)$/.exec(line);
+  if (m) {
+    return (
+      <span key={lineKey}>
+        <span className="syn-mark">{m[1] + m[2]}</span>
+        <span className="syn-quote">{highlightInlineSyntax(m[3], `${lineKey}q`)}</span>
+      </span>
+    );
+  }
+
+  m = /^(\s*)(\d{1,9}[.)])( +)(.*)$/.exec(line);
+  if (m) {
+    return (
+      <span key={lineKey}>
+        {m[1]}
+        <span className="syn-mark">{m[2]}</span>
+        {m[3]}
+        {highlightListBody(m[4], `${lineKey}ol`)}
+      </span>
+    );
+  }
+
+  m = /^(\s*)([-*+])( +)(.*)$/.exec(line);
+  if (m) {
+    return (
+      <span key={lineKey}>
+        {m[1]}
+        <span className="syn-mark">{m[2]}</span>
+        {m[3]}
+        {highlightListBody(m[4], `${lineKey}ul`)}
+      </span>
+    );
+  }
+
+  return <span key={lineKey}>{highlightInlineSyntax(line, lineKey)}</span>;
+}
+
+function highlightMarkdownSource(text) {
+  const lines = text.split('\n');
+  const out = [];
+  lines.forEach((line, idx) => {
+    out.push(highlightSourceLine(line, `l${idx}`));
+    if (idx < lines.length - 1) out.push('\n');
+  });
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Custom undo/redo for the note editor. The textarea is fully React-
+// controlled, so any programmatic value swap (accepting a [[ autocomplete
+// suggestion, etc.) clears the browser's native undo stack — this keeps its
+// own stack instead, coalescing rapid same-size keystrokes (ordinary typing)
+// into a single undo step and treating pastes/deletes/programmatic jumps as
+// their own step, the same grouping heuristic most text editors use.
+// ---------------------------------------------------------------------------
+const UNDO_COALESCE_MS = 700;
+
+function useEditorUndo(initialValue) {
+  const historyRef = useRef({ past: [], future: [], last: initialValue, lastTime: 0 });
+
+  const record = useCallback((newValue) => {
+    const h = historyRef.current;
+    const now = Date.now();
+    const bigJump = Math.abs(newValue.length - h.last.length) > 1;
+    if (now - h.lastTime > UNDO_COALESCE_MS || bigJump) {
+      h.past.push(h.last);
+      if (h.past.length > 200) h.past.shift();
+      h.future = [];
+    }
+    h.last = newValue;
+    h.lastTime = now;
+  }, []);
+
+  const undo = useCallback(() => {
+    const h = historyRef.current;
+    if (!h.past.length) return null;
+    const prev = h.past.pop();
+    h.future.push(h.last);
+    h.last = prev;
+    h.lastTime = 0;
+    return prev;
+  }, []);
+
+  const redo = useCallback(() => {
+    const h = historyRef.current;
+    if (!h.future.length) return null;
+    const next = h.future.pop();
+    h.past.push(h.last);
+    h.last = next;
+    h.lastTime = 0;
+    return next;
+  }, []);
+
+  return { record, undo, redo };
+}
+
+// Inline-editable note title, shown above the note content in both edit and
+// reading view. Renames the underlying file on blur / Enter, matching
+// Obsidian's "click the title to rename" behavior. Keeps its own draft state
+// so keystrokes aren't round-tripped through a Drive rename on every change —
+// only committed once editing settles.
+function NoteTitleField({ file, onRename }) {
+  const [draft, setDraft] = useState(() => file.name.replace(/\.md$/i, ''));
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    setDraft(file.name.replace(/\.md$/i, ''));
+  }, [file.id, file.name]);
+
+  const commit = useCallback(() => {
+    const trimmed = draft.trim();
+    const current = file.name.replace(/\.md$/i, '');
+    if (trimmed && trimmed !== current) {
+      onRename(file.id, trimmed);
+    } else {
+      setDraft(current);
+    }
+  }, [draft, file.id, file.name, onRename]);
+
+  return (
+    <input
+      ref={inputRef}
+      className="note-title-input"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          inputRef.current?.blur();
+        } else if (e.key === 'Escape') {
+          setDraft(file.name.replace(/\.md$/i, ''));
+          inputRef.current?.blur();
+        }
+      }}
+      placeholder="Untitled"
+      aria-label="Note title"
+    />
+  );
+}
+
+function EditorContent({ file, content, onChange, linkIndex, phantomRecords, handlers, mode, loadingNote, backlinkIndex, allFiles, getBody }) {
   const textareaRef = useRef(null);
-  const autocomplete = useLinkAutocomplete(textareaRef, onChange, linkIndex);
+  const highlightRef = useRef(null);
+  const undoCtl = useEditorUndo(content);
+  const wrappedOnChange = useCallback(
+    (v) => {
+      undoCtl.record(v);
+      onChange(v);
+    },
+    [onChange, undoCtl]
+  );
+  const autocomplete = useLinkAutocomplete(textareaRef, wrappedOnChange, linkIndex, phantomRecords);
 
   if (!file) {
     return (
@@ -3445,58 +3805,100 @@ function EditorContent({ file, content, onChange, linkIndex, handlers, mode, loa
       {loadingNote && <div className="note-loading-bar" aria-hidden="true" />}
       {mode === 'edit' ? (
         <div className="editor-textarea-wrap">
-          <textarea
-            ref={textareaRef}
-            className="editor-textarea"
-            value={content}
-            onChange={(e) => {
-              onChange(e.target.value);
-              autocomplete.updateFromCaret();
-            }}
-            onKeyUp={(e) => {
-              if (!['ArrowUp', 'ArrowDown', 'Enter', 'Tab', 'Escape'].includes(e.key)) autocomplete.updateFromCaret();
-            }}
-            onKeyDown={(e) => {
-              if (!autocomplete.suggestion) return;
-              if (e.key === 'ArrowDown') {
-                e.preventDefault();
-                autocomplete.move(1);
-              } else if (e.key === 'ArrowUp') {
-                e.preventDefault();
-                autocomplete.move(-1);
-              } else if (e.key === 'Enter' || e.key === 'Tab') {
-                e.preventDefault();
-                autocomplete.accept(autocomplete.suggestion.items[autocomplete.suggestion.activeIndex]);
-              } else if (e.key === 'Escape') {
-                autocomplete.dismiss();
-              }
-            }}
-            onClick={autocomplete.updateFromCaret}
-            onBlur={() => setTimeout(autocomplete.dismiss, 120)}
-            spellCheck={false}
-            placeholder="Start writing… use [[Note Name]] to link, #tag to tag, or [[image.png]] for images."
-          />
-          {autocomplete.suggestion && (
-            <ul className="autocomplete-menu" style={{ top: autocomplete.suggestion.top, left: autocomplete.suggestion.left }}>
-              {autocomplete.suggestion.items.map((item, idx) => (
-                <li
-                  key={item.id}
-                  className={idx === autocomplete.suggestion.activeIndex ? 'active' : ''}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    autocomplete.accept(item);
-                  }}
-                >
-                  <span className="autocomplete-label">{item.baseName}</span>
-                  {item.relativePath !== item.baseName && <span className="autocomplete-path">{item.dir}/</span>}
-                </li>
-              ))}
-            </ul>
-          )}
+          <NoteTitleField file={file} onRename={handlers.onRenameFile} />
+          <div className="editor-textarea-source">
+            <div ref={highlightRef} className="editor-highlight" aria-hidden="true">
+              {highlightMarkdownSource(content)}
+              {'\n'}
+            </div>
+            <textarea
+              ref={textareaRef}
+              className="editor-textarea"
+              value={content}
+              onChange={(e) => {
+                wrappedOnChange(e.target.value);
+                autocomplete.updateFromCaret();
+              }}
+              onScroll={(e) => {
+                if (highlightRef.current) {
+                  highlightRef.current.scrollTop = e.target.scrollTop;
+                  highlightRef.current.scrollLeft = e.target.scrollLeft;
+                }
+              }}
+              onKeyUp={(e) => {
+                if (!['ArrowUp', 'ArrowDown', 'Enter', 'Tab', 'Escape'].includes(e.key)) autocomplete.updateFromCaret();
+              }}
+              onKeyDown={(e) => {
+                const mod = e.metaKey || e.ctrlKey;
+                if (mod && !e.altKey && (e.key === 'z' || e.key === 'Z')) {
+                  e.preventDefault();
+                  const val = e.shiftKey ? undoCtl.redo() : undoCtl.undo();
+                  if (val != null) {
+                    onChange(val);
+                    requestAnimationFrame(() => {
+                      const ta = textareaRef.current;
+                      if (ta) ta.setSelectionRange(val.length, val.length);
+                    });
+                  }
+                  return;
+                }
+                if (mod && !e.altKey && (e.key === 'y' || e.key === 'Y')) {
+                  e.preventDefault();
+                  const val = undoCtl.redo();
+                  if (val != null) {
+                    onChange(val);
+                    requestAnimationFrame(() => {
+                      const ta = textareaRef.current;
+                      if (ta) ta.setSelectionRange(val.length, val.length);
+                    });
+                  }
+                  return;
+                }
+                if (!autocomplete.suggestion) return;
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  autocomplete.move(1);
+                } else if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  autocomplete.move(-1);
+                } else if (e.key === 'Enter' || e.key === 'Tab') {
+                  e.preventDefault();
+                  autocomplete.accept(autocomplete.suggestion.items[autocomplete.suggestion.activeIndex]);
+                } else if (e.key === 'Escape') {
+                  autocomplete.dismiss();
+                }
+              }}
+              onClick={autocomplete.updateFromCaret}
+              onBlur={() => setTimeout(autocomplete.dismiss, 120)}
+              spellCheck={false}
+              placeholder="Start writing… use [[Note Name]] to link, #tag to tag, or [[image.png]] for images."
+            />
+            {autocomplete.suggestion && (
+              <ul className="autocomplete-menu" style={{ top: autocomplete.suggestion.top, left: autocomplete.suggestion.left }}>
+                {autocomplete.suggestion.items.map((item, idx) => (
+                  <li
+                    key={item.id}
+                    className={idx === autocomplete.suggestion.activeIndex ? 'active' : ''}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      autocomplete.accept(item);
+                    }}
+                  >
+                    <span className="autocomplete-label">{item.baseName}</span>
+                    {item.isPhantom ? (
+                      <span className="autocomplete-new">new</span>
+                    ) : (
+                      item.relativePath !== item.baseName && <span className="autocomplete-path">{item.dir}/</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </div>
       ) : (
         <div className="editor-preview">
-          <h1 className="preview-title">{file.name.replace(/\.md$/i, '')}</h1>
+          <NoteTitleField file={file} onRename={handlers.onRenameFile} />
           <PropertiesPanel properties={properties} handlers={handlers} />
           {renderMarkdownBlocks(body, handlers, linkIndex)}
           <InlineMentions
@@ -3644,6 +4046,7 @@ function LeafPane({
   leaf,
   filesById,
   linkIndex,
+  phantomRecords,
   buffers,
   activePaneId,
   onFocusPane,
@@ -3711,6 +4114,7 @@ function LeafPane({
           content={buf ? buf.content : ''}
           onChange={(value) => activeTab && onChange(activeTab.fileId, value)}
           linkIndex={linkIndex}
+          phantomRecords={phantomRecords}
           handlers={handlers}
           mode={activeTab?.mode || 'edit'}
           loadingNote={buf?.loading}
@@ -3786,52 +4190,6 @@ function ImageEmbed({ token, fileId, name, caption, onOpen }) {
 // Full-size image viewer modal — opened from the sidebar, search results,
 // or clicking an embedded/linked image inside a note. Shows which notes
 // link to this image, reusing the same backlink graph notes get.
-function ImageViewer({ token, file, backlinks, isBookmarked, onToggleBookmark, onOpenNote, onClose }) {
-  const { url, error } = useDriveImageUrl(token, file?.id);
-
-  useEffect(() => {
-    const onKey = (e) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
-
-  if (!file) return null;
-  return (
-    <div className="image-viewer-scrim" onClick={onClose}>
-      <div className="image-viewer" onClick={(e) => e.stopPropagation()}>
-        <div className="image-viewer-header">
-          <span className="image-viewer-name">{file.name}</span>
-          <div className="image-viewer-header-actions">
-            <button className="icon-btn" onClick={onToggleBookmark} title={isBookmarked ? 'Remove bookmark' : 'Bookmark'}>
-              {isBookmarked ? <IconStarFilled size={15} /> : <IconStar size={15} />}
-            </button>
-            <button className="icon-btn" onClick={onClose} aria-label="Close">
-              <IconX size={16} />
-            </button>
-          </div>
-        </div>
-        <div className="image-viewer-body">
-          {error && <p className="muted small">{error}</p>}
-          {!error && !url && <p className="muted small">Loading…</p>}
-          {url && <img src={url} alt={file.name} />}
-        </div>
-        {backlinks.length > 0 && (
-          <div className="image-viewer-backlinks">
-            <h3>Linked from</h3>
-            {backlinks.map((f) => (
-              <button key={f.id} className="backlink-item" onClick={() => onOpenNote(f.id)}>
-                {f.name.replace(/\.md$/i, '')}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Command palette / quick switcher — one shared modal component. In
 // 'switcher' mode it fuzzy-matches file names (⌘O); in 'commands' mode it
@@ -3954,7 +4312,6 @@ export default function App() {
 
   const [paneTree, setPaneTree] = useState(() => makeLeaf(null));
   const [activePaneId, setActivePaneId] = useState(() => paneTree.id);
-  const [viewingImage, setViewingImage] = useState(null);
 
   const [activeSideView, setActiveSideView] = useState('explorer'); // explorer | search | tags | bookmarks
   const [mobileDockOpen, setMobileDockOpen] = useState(false);
@@ -3962,6 +4319,11 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [bookmarks, setBookmarks] = useState(new Set());
   const [paletteMode, setPaletteMode] = useState(null); // null | 'commands' | 'switcher'
+  // When the switcher is opened via the tab bar's "+" button, the next pick
+  // should always open in a new tab — unlike ⌘O, which navigates the current
+  // tab unless the user holds Cmd/Ctrl. Tracked as a ref (not state) since it
+  // only needs to be read once, synchronously, when a pick is made.
+  const paletteForceNewTabRef = useRef(false);
 
   // Restore the last-selected vault folder (an ID string, not note content).
   useEffect(() => {
@@ -4013,7 +4375,6 @@ export default function App() {
       setActivePaneId((prev) => prev);
       setSearchQuery('');
       setMobileDockOpen(false);
-      setViewingImage(null);
       setActiveSideView('explorer');
     },
     [sync]
@@ -4047,6 +4408,41 @@ export default function App() {
   }, [paneTree, activePaneId]);
 
   const filesById = useMemo(() => new Map(sync.filesMeta.map((f) => [f.id, f])), [sync.filesMeta]);
+
+  // Wikilink targets that don't resolve to any real file yet ("phantom"
+  // notes, in Obsidian's terminology) — collected from every link in the
+  // vault so they still show up in [[ autocomplete even though nothing has
+  // been created for them. Picking one from the list just inserts the link;
+  // the note itself is created the normal way, on first click-through.
+  const phantomRecords = useMemo(() => {
+    const seen = new Set();
+    const out = [];
+    for (const links of sync.linksByFileId.values()) {
+      for (const link of links) {
+        const res = resolveLinkTarget(link.target, sync.linkIndex);
+        if (res.status !== 'missing') continue;
+        const raw = String(link.target || '').trim();
+        if (!raw) continue;
+        const isImage = res.isImage;
+        const cleaned = isImage ? raw : raw.replace(/\.md$/i, '');
+        const key = `${isImage ? 'img' : 'note'}:${cleaned.toLowerCase()}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const slash = cleaned.lastIndexOf('/');
+        const baseName = slash === -1 ? cleaned : cleaned.slice(slash + 1);
+        out.push({
+          id: `phantom:${key}`,
+          name: isImage ? baseName : `${baseName}.md`,
+          baseName,
+          relativePath: cleaned,
+          dir: slash === -1 ? '' : cleaned.slice(0, slash),
+          isImage,
+          isPhantom: true
+        });
+      }
+    }
+    return out;
+  }, [sync.linksByFileId, sync.linkIndex]);
   const tree = useMemo(() => buildVaultTree(folder?.id, sync.foldersMeta, sync.filesMeta), [folder?.id, sync.foldersMeta, sync.filesMeta]);
   const tagsByFileId = useMemo(() => {
     const map = new Map();
@@ -4135,6 +4531,7 @@ export default function App() {
         setPaletteMode('commands');
       } else if (mod && e.key === 'o') {
         e.preventDefault();
+        paletteForceNewTabRef.current = false;
         setPaletteMode('switcher');
       } else if (e.key === 'Escape') {
         setPaletteMode(null);
@@ -4417,6 +4814,26 @@ export default function App() {
     [token, sync]
   );
 
+  // Shared rename primitive: renames on Drive, then updates local sync state.
+  // `kind` is only meaningful for files ('image' vs a note); ignored for folders.
+  const performRename = useCallback(
+    async (id, type, kind, newName) => {
+      try {
+        await driveRenameItem(token, id, newName);
+        if (type === 'file') {
+          sync.renameFile(id, newName);
+        } else {
+          sync.renameFolder(id, newName);
+        }
+        return true;
+      } catch (err) {
+        window.alert(`Couldn't rename: ${err.message}`);
+        return false;
+      }
+    },
+    [token, sync]
+  );
+
   const handleRenameNode = useCallback(
     async (node) => {
       const isImage = node.type === 'file' && node.kind === 'image';
@@ -4434,18 +4851,33 @@ export default function App() {
         newName = input.trim().toLowerCase().endsWith('.md') ? input.trim() : `${input.trim()}.md`;
       }
 
-      try {
-        await driveRenameItem(token, node.id, newName);
-        if (node.type === 'file') {
-          sync.renameFile(node.id, newName);
-        } else {
-          sync.renameFolder(node.id, newName);
-        }
-      } catch (err) {
-        window.alert(`Couldn't rename: ${err.message}`);
-      }
+      performRename(node.id, node.type, node.kind, newName);
     },
-    [token, sync]
+    [performRename]
+  );
+
+  // Rename driven by the inline title field above the note content (edit or
+  // reading view) rather than the tree's context menu. `newDisplayTitle` has
+  // no extension — this adds one back based on the file's current kind.
+  const handleInlineRenameFile = useCallback(
+    (fileId, newDisplayTitle) => {
+      const file = filesById.get(fileId);
+      if (!file) return;
+      const trimmed = (newDisplayTitle || '').trim();
+      if (!trimmed) return;
+      const isImage = file.kind === 'image';
+      const currentDisplayName = isImage ? file.name : file.name.replace(/\.md$/i, '');
+      if (trimmed === currentDisplayName) return;
+      const newName = isImage
+        ? fileExtension(trimmed)
+          ? trimmed
+          : `${trimmed}.${fileExtension(file.name) || 'png'}`
+        : trimmed.toLowerCase().endsWith('.md')
+          ? trimmed
+          : `${trimmed}.md`;
+      performRename(fileId, 'file', file.kind, newName);
+    },
+    [filesById, performRename]
   );
 
   const handleDeleteNode = useCallback(
@@ -4462,12 +4894,10 @@ export default function App() {
         if (node.type === 'file') {
           sync.removeFile(node.id);
           purgeFileEverywhere(node.id);
-          if (viewingImage?.id === node.id) setViewingImage(null);
           if (bookmarks.has(node.id)) toggleBookmark(node.id);
         } else {
           const removedFileIds = sync.removeFolder(node.id);
           removedFileIds.forEach(purgeFileEverywhere);
-          if (viewingImage && removedFileIds.includes(viewingImage.id)) setViewingImage(null);
           removedFileIds.forEach((id) => {
             if (bookmarks.has(id)) toggleBookmark(id);
           });
@@ -4476,7 +4906,7 @@ export default function App() {
         window.alert(`Couldn't delete: ${err.message}`);
       }
     },
-    [token, sync, purgeFileEverywhere, viewingImage, bookmarks, toggleBookmark]
+    [token, sync, purgeFileEverywhere, bookmarks, toggleBookmark]
   );
 
   const handleMoveNode = useCallback(
@@ -4515,26 +4945,28 @@ export default function App() {
       token,
       onOpenById: (id) => openFileInPane(activePaneId, id),
       onCreateOrOpenByName: (name) => openNoteByName(name),
-      onOpenImage: (file) => setViewingImage(file),
+      onOpenImage: (file) => openImageInNewTab(token, file),
+      onRenameFile: (fileId, newDisplayName) => handleInlineRenameFile(fileId, newDisplayName),
       onOpenTag: (tag) => {
         setActiveSideView('search');
         setSearchQuery(`tag:${tag}`);
         setMobileDockOpen(true);
       }
     }),
-    [token, openFileInPane, activePaneId, openNoteByName]
+    [token, openFileInPane, activePaneId, openNoteByName, handleInlineRenameFile]
   );
 
   const handlePaletteFilePick = useCallback(
     (file, opts) => {
       setPaletteMode(null);
       if (file.kind === 'image') {
-        setViewingImage(file);
+        openImageInNewTab(token, file);
         return;
       }
-      openFileInPane(activePaneId, file.id, opts);
+      openFileInPane(activePaneId, file.id, { ...opts, newTab: opts?.newTab || paletteForceNewTabRef.current });
+      paletteForceNewTabRef.current = false;
     },
-    [activePaneId, openFileInPane]
+    [activePaneId, openFileInPane, token]
   );
 
   const commands = useMemo(() => {
@@ -4583,7 +5015,16 @@ export default function App() {
           setMobileDockOpen(true);
         }
       },
-      { id: 'quick-switcher', label: 'Quick switcher: jump to note', icon: <IconSearch size={15} />, hint: '⌘O', run: () => setPaletteMode('switcher') },
+      {
+        id: 'quick-switcher',
+        label: 'Quick switcher: jump to note',
+        icon: <IconSearch size={15} />,
+        hint: '⌘O',
+        run: () => {
+          paletteForceNewTabRef.current = false;
+          setPaletteMode('switcher');
+        }
+      },
       { id: 'change-folder', label: 'Change vault folder', icon: <IconFolder size={15} />, run: handlePickFolder },
       { id: 'sign-out', label: 'Sign out', icon: <IconLogOut size={15} />, run: signOut }
     ];
@@ -4639,11 +5080,6 @@ export default function App() {
   const activeFileForStatus = activeTabForStatus ? filesById.get(activeTabForStatus.fileId) : null;
   const activeContentForStatus = activeTabForStatus ? buffers[activeTabForStatus.fileId]?.content || '' : '';
   const activeBacklinkCount = activeFileForStatus ? (sync.backlinkIndex.get(activeFileForStatus.id) || new Set()).size : 0;
-  const imageBacklinks = viewingImage
-    ? Array.from(sync.backlinkIndex.get(viewingImage.id) || [])
-        .map((id) => sync.filesMeta.find((f) => f.id === id))
-        .filter(Boolean)
-    : [];
   const currentOpenIds = new Set(collectLeaves(paneTree).flatMap((l) => l.tabs.map((t) => t.fileId)));
 
   return (
@@ -4675,7 +5111,7 @@ export default function App() {
                 vaultRootId={folder.id}
                 currentIds={currentOpenIds}
                 onOpenFile={(id, e) => openFileInPane(activePaneId, id, { newTab: !!(e && (e.metaKey || e.ctrlKey)) })}
-                onOpenImage={(file) => setViewingImage(file)}
+                onOpenImage={(file) => openImageInNewTab(token, file)}
                 onCreateNote={handleCreateNoteIn}
                 onCreateFolder={handleCreateFolderIn}
                 onUploadFiles={handleUploadFiles}
@@ -4719,7 +5155,7 @@ export default function App() {
                 bookmarks={bookmarks}
                 filesMeta={sync.filesMeta}
                 onOpenFile={(id) => openFileInPane(activePaneId, id)}
-                onOpenImage={(file) => setViewingImage(file)}
+                onOpenImage={(file) => openImageInNewTab(token, file)}
                 onToggleBookmark={toggleBookmark}
               />
             )}
@@ -4746,6 +5182,7 @@ export default function App() {
             node={paneTree}
             filesById={filesById}
             linkIndex={sync.linkIndex}
+            phantomRecords={phantomRecords}
             buffers={buffers}
             activePaneId={activePaneId}
             onFocusPane={setActivePaneId}
@@ -4753,6 +5190,7 @@ export default function App() {
             onCloseTab={closeTab}
             onNewTab={(paneId) => {
               setActivePaneId(paneId);
+              paletteForceNewTabRef.current = true;
               setPaletteMode('switcher');
             }}
             onSplitTab={splitTabDirect}
@@ -4785,20 +5223,6 @@ export default function App() {
         dirty={activeTabForStatus ? !!buffers[activeTabForStatus.fileId]?.dirty : false}
         saving={activeTabForStatus ? !!buffers[activeTabForStatus.fileId]?.saving : false}
       />
-      {viewingImage && (
-        <ImageViewer
-          token={token}
-          file={viewingImage}
-          backlinks={imageBacklinks}
-          isBookmarked={bookmarks.has(viewingImage.id)}
-          onToggleBookmark={() => toggleBookmark(viewingImage.id)}
-          onOpenNote={(id) => {
-            setViewingImage(null);
-            openFileInPane(activePaneId, id);
-          }}
-          onClose={() => setViewingImage(null)}
-        />
-      )}
       {paletteMode && (
         <PaletteModal
           mode={paletteMode}
