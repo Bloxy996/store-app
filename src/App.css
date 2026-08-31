@@ -437,6 +437,15 @@ button:disabled {
 .dropdown-menu.align-right {
   right: 0;
 }
+/* Portal-rendered menus are positioned in JS via inline top/left/right
+   (fixed to the viewport, computed from the trigger's live bounding rect),
+   so they're never clipped by a scrolling ancestor like the tab bar. z-index
+   sits above the mobile drawer (120) but below modals (200+), since a menu
+   shouldn't outlive a modal opening over it. */
+.dropdown-menu.portal {
+  position: fixed;
+  z-index: 150;
+}
 
 .menu-item {
   display: flex;
@@ -954,22 +963,135 @@ button:disabled {
 .editor-textarea-wrap {
   flex: 1;
   min-width: 0;
-  position: relative;
   height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1);
+}
+.note-title-input {
+  flex-shrink: 0;
+  width: 100%;
+  padding: 28px clamp(20px, 8vw, 120px) 0;
+  margin: 0;
+  border: none;
+  background: transparent;
+  font-family: var(--font-ui);
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text-normal);
+  caret-color: var(--accent);
+}
+.note-title-input:focus {
+  outline: none;
+}
+.note-title-input::placeholder {
+  color: var(--text-faint);
+}
+.editor-textarea-source {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  /* Single source of truth for the editor's line box height in px (not em/
+     unitless) — headings below pin their line-height to this exact value
+     rather than scaling it with their own bigger font-size, so a taller
+     heading glyph never grows its row's height in the highlight overlay
+     relative to the plain textarea underneath. Keep in sync with the
+     font-size/line-height pair on .editor-textarea and .editor-highlight. */
+  --editor-line-px: 25.5px;
 }
 .editor-textarea {
   width: 100%;
   height: 100%;
   resize: none;
-  padding: 28px clamp(20px, 8vw, 120px);
-  line-height: 1.7;
+  padding: 14px clamp(20px, 8vw, 120px) 28px;
+  line-height: var(--editor-line-px);
   font-size: 15px;
-  color: var(--text-normal);
-  background: var(--bg-1);
+  font-family: var(--font-mono);
+  color: transparent;
+  background: transparent;
   caret-color: var(--accent);
+  position: relative;
+  z-index: 1;
 }
 .editor-textarea::placeholder {
   color: var(--text-faint);
+}
+.editor-textarea::selection {
+  background: var(--accent-soft);
+}
+
+/* Highlight overlay — sits directly behind the (text-transparent) textarea
+   above, sharing identical box metrics (font, padding, line-height, wrap)
+   so its line-wrapping matches exactly. Purely decorative: dims marker
+   characters and colors/weights the content they wrap, but never changes
+   what text is present or how wide it renders, so nothing drifts out of
+   sync with the real textarea underneath. */
+.editor-highlight {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  padding: 14px clamp(20px, 8vw, 120px) 28px;
+  line-height: var(--editor-line-px);
+  font-size: 15px;
+  font-family: var(--font-mono);
+  color: var(--text-normal);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  pointer-events: none;
+}
+.syn-mark {
+  color: var(--text-faint);
+  opacity: 0.7;
+}
+.syn-task {
+  color: var(--accent);
+  opacity: 1;
+}
+.syn-h {
+  font-weight: 700;
+  color: var(--text-normal);
+  /* Pinned to the plain-text line height (not scaled with the bigger
+     font-size below) so this row doesn't grow taller than the same row in
+     the real textarea — see --editor-line-px above. */
+  line-height: var(--editor-line-px);
+}
+.syn-h1 {
+  font-size: 1.55em;
+}
+.syn-h2 {
+  font-size: 1.35em;
+}
+.syn-h3 {
+  font-size: 1.2em;
+}
+.syn-h4,
+.syn-h5,
+.syn-h6 {
+  font-size: 1.08em;
+}
+.syn-quote {
+  color: var(--text-muted);
+  font-style: italic;
+}
+.syn-link {
+  color: var(--link-color);
+}
+.syn-tag {
+  color: var(--accent-hover);
+}
+.syn-bold {
+  color: var(--text-normal);
+  font-weight: 700;
+}
+.syn-italic {
+  color: var(--text-normal);
+  font-style: italic;
+}
+.syn-code {
+  color: #e3b8ac;
+  background: var(--bg-2);
+  border-radius: 3px;
 }
 
 .autocomplete-menu {
@@ -1011,6 +1133,16 @@ button:disabled {
   color: var(--text-faint);
   font-size: 11.5px;
   flex-shrink: 0;
+}
+.autocomplete-new {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+  border: 1px solid var(--bg-4);
+  border-radius: 3px;
+  padding: 1px 4px;
 }
 
 .editor-preview {
