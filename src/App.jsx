@@ -3809,7 +3809,6 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
           <div className="editor-textarea-source">
             <div ref={highlightRef} className="editor-highlight" aria-hidden="true">
               {highlightMarkdownSource(content)}
-              {'\n'}
             </div>
             <textarea
               ref={textareaRef}
