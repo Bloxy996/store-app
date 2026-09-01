@@ -996,8 +996,17 @@ button:disabled {
      rather than scaling it with their own bigger font-size, so a taller
      heading glyph never grows its row's height in the highlight overlay
      relative to the plain textarea underneath. Keep in sync with the
-     font-size/line-height pair on .editor-textarea and .editor-highlight. */
-  --editor-line-px: 25.5px;
+     font-size/line-height pair on .editor-textarea and .editor-highlight.
+     Deliberately a whole pixel number, not e.g. 25.5px: a native textarea's
+     internal text layout can round each line to the nearest device pixel
+     independently of this div's (sub-pixel-accurate) CSS line-height, so a
+     fractional value here has the two disagreeing by a fraction of a pixel
+     on every single line — invisible for the first few lines, but by the
+     bottom of a long note that accumulates into a full line's worth of
+     drift between where the overlay shows the caret and where the browser
+     actually places it. An integer line-height gives both layouts the same
+     number to round (or not round) to, so nothing can accumulate. */
+  --editor-line-px: 26px;
 }
 .editor-textarea {
   width: 100%;
