@@ -1054,27 +1054,43 @@ button:disabled {
    so its line-wrapping matches exactly, and the real caret above it lines
    up with the styled text.
 
-   Earlier this was its own independently-scrolling element with its
-   scrollTop mirrored from the textarea via JS on every scroll event, and
-   its own scrollbar hidden via `scrollbar-width: none` — the idea being
-   that matching `overflow-y: auto` on both would make them reserve the
-   same gutter width. That doesn't hold: hiding a scrollbar this way tells
-   the browser not to reserve space for it at all, so this layer was a few
-   pixels *wider* than the textarea any time a note was tall enough to
-   actually need scrolling — silently shifting every wrap point (and so
-   every click/typing position) below that point out of alignment with the
-   real textarea, worse the longer the note got. Mirroring two independent
-   native scrollTops also has an inherent one-frame lag between them.
+   This is a genuinely-scrolling element in its own right (`overflow-y:
+   auto`), with its scrollbar hidden via `scrollbar-width: none` /
+   `::-webkit-scrollbar { display: none }` below, and its scrollTop
+   mirrored from the real textarea via JS on every scroll (and on content/
+   resize changes) — see syncEditorOverlay.
 
-   Fixed by removing this layer from the scrolling equation entirely: it is
-   never itself a scroll container. Its vertical position is set with a
-   `transform: translateY()` computed directly from the textarea's real
-   `scrollTop` in the same event handler (no round trip, no lag), and its
-   `right` inset is set in JS to the textarea's *actual measured* scrollbar
-   width (`textarea.offsetWidth - textarea.clientWidth`), recomputed on
-   every content change and on resize — see syncEditorOverlay. That keeps
-   its content-box width pixel-identical to the textarea's at all times,
-   which is what actually determines where text wraps. */
+   An earlier version instead left this element's own size fixed to the
+   viewport and just translated its content with `transform:
+   translateY(-scrollTop)`, so the whole note's text lived in one
+   GPU-composited layer that got sled up and down. That works for short
+   notes, but a composited layer has a real height ceiling (GPU/browser
+   dependent, and lower on some mobile GPUs) — a note tall enough to
+   exceed it silently stopped painting anything past that height, even
+   though the (correctly full) content was still in the DOM. Content
+   that wasn't already in view the moment the note was opened would
+   never render as you scrolled to it. A native scrolling element doesn't
+   have that ceiling; the browser handles arbitrarily long scrollable
+   content the same well-tested way it does everywhere else.
+
+   Mirroring two independent native scrollTops does mean applying
+   `hl.scrollTop = ta.scrollTop` on every scroll event rather than reading
+   a single computed offset, but that's a cheap, synchronous assignment —
+   no meaningful lag in practice.
+
+   The one real risk with a second `overflow-y: auto` element is width:
+   hiding its scrollbar tells the browser not to reserve a gutter for it
+   at all, so without correction this layer would be a few pixels *wider*
+   than the textarea (which does reserve one, via `scrollbar-gutter:
+   stable` above) any time a note is tall enough to actually scroll —
+   silently shifting every wrap point below that point out of alignment
+   with the real textarea, worse the longer the note gets. Fixed the same
+   way regardless of sync method: this element's `right` inset is set in
+   JS to the textarea's *actual measured* scrollbar width
+   (`textarea.offsetWidth - textarea.clientWidth`), recomputed on every
+   content change and on resize. That keeps its content-box width
+   pixel-identical to the textarea's at all times, which is what actually
+   determines where text wraps. */
 .editor-highlight {
   position: absolute;
   top: 0;
@@ -1082,7 +1098,8 @@ button:disabled {
   right: 0;
   bottom: 0;
   z-index: 0;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 14px clamp(20px, 8vw, 120px) 28px;
   line-height: var(--editor-line-px);
   font-size: 15px;
@@ -1091,7 +1108,11 @@ button:disabled {
   white-space: pre-wrap;
   overflow-wrap: break-word;
   pointer-events: none;
-  will-change: transform;
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* old Edge */
+}
+.editor-highlight::-webkit-scrollbar {
+  display: none; /* Chrome / Safari */
 }
 .syn-mark {
   color: var(--text-faint);
