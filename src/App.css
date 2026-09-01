@@ -148,7 +148,16 @@ button:disabled {
    App shell
 --------------------------------------------------------------------------- */
 .app-shell {
-  height: 100vh;
+  height: 100vh; /* fallback for browsers without dvh support */
+  height: 100dvh; /* on mobile, 100vh is measured against the *largest* possible
+    viewport (address/toolbar collapsed), not what's actually visible. As the
+    page scrolls and the browser chrome shows/hides, the real visible area
+    shrinks and grows while this box stayed the same fixed height — content
+    near the bottom got clipped (still in the DOM, just outside the visible
+    area) and anything positioned relative to the top of this now-taller-than-
+    the-screen box could appear to "stick" as the chrome animated. 100dvh
+    tracks the actual visible viewport instead, so the shell (and everything
+    that scrolls inside it) resizes with the chrome rather than around it. */
   width: 100vw;
   display: flex;
   flex-direction: column;
@@ -1201,6 +1210,17 @@ button:disabled {
   font-weight: 700;
   margin: 0 0 14px;
   color: var(--text-normal);
+}
+/* The title field is the same shared <input class="note-title-input"> used
+   in edit mode, where its parent (.editor-textarea-wrap) has no padding of
+   its own, so the input supplies its own. Here it's nested inside
+   .editor-preview, which already pads its content on every side — without
+   this override the input's padding stacks on top of that, pushing the
+   title right of (and further down than) the properties panel/body text
+   beneath it, which only get .editor-preview's padding once. */
+.editor-preview .note-title-input {
+  padding: 0;
+  margin: 0 0 14px;
 }
 
 /* Markdown block typography */
