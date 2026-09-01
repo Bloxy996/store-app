@@ -1761,6 +1761,26 @@ const IconMenu = (p) => (
     <line x1="4" y1="17" x2="20" y2="17" />
   </Svg>
 );
+const IconListTree = (p) => (
+  <Svg {...p}>
+    <line x1="9" y1="6" x2="20" y2="6" />
+    <line x1="12" y1="12" x2="20" y2="12" />
+    <line x1="12" y1="18" x2="20" y2="18" />
+    <circle cx="5" cy="6" r="1.5" />
+    <line x1="5" y1="7.5" x2="5" y2="10.5" />
+    <line x1="5" y1="10.5" x2="8" y2="12" />
+    <line x1="5" y1="10.5" x2="5" y2="16.5" />
+    <line x1="5" y1="16.5" x2="8" y2="18" />
+  </Svg>
+);
+const IconPalette = (p) => (
+  <Svg {...p}>
+    <path d="M12 3a9 9 0 1 0 0 18c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.4-.3-.4-.5-.9-.5-1.4 0-1.1.9-2 2-2h1.5c1.9 0 3.5-1.6 3.5-3.5C20 6.6 16.4 3 12 3z" />
+    <circle cx="7.5" cy="10.5" r="1.1" fill="currentColor" stroke="none" />
+    <circle cx="11" cy="7" r="1.1" fill="currentColor" stroke="none" />
+    <circle cx="15.5" cy="8" r="1.1" fill="currentColor" stroke="none" />
+  </Svg>
+);
 const IconPlus = (p) => (
   <Svg {...p}>
     <line x1="12" y1="5" x2="12" y2="19" />
@@ -2088,12 +2108,23 @@ function renderInline(text, keyPrefix, handlers, linkIndex) {
   return nodes;
 }
 
-function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '') {
+// `foldState` (optional) enables Obsidian-style heading fold/collapse in
+// reading view: { collapsed: Set<headingId>, onToggle: (headingId) => void }.
+// Headings whose id is in `collapsed` render with their content (down to the
+// next heading of equal-or-shallower level) hidden. Purely a reading-view
+// affordance — the underlying markdown/content is never mutated, so it's
+// safe to leave out entirely (edit mode, or any caller that omits
+// foldState) and get the old unfolded behavior.
+function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldState = null) {
   const lines = content.split('\n');
   const blocks = [];
   let listBuffer = [];
   let listType = null;
   let codeBuffer = null;
+  // While set, we're inside a collapsed heading's section: everything is
+  // parsed (to keep fence/list state consistent) but nothing is pushed to
+  // `blocks`, until a heading at this level or shallower closes it.
+  let hiddenUntilLevel = null;
 
   const flushList = () => {
     if (!listBuffer.length) return;
@@ -2112,11 +2143,13 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '') {
   lines.forEach((line, idx) => {
     if (codeBuffer !== null) {
       if (/^```/.test(line.trim())) {
-        blocks.push(
-          <pre key={`${keyBase}code-${idx}`}>
-            <code>{codeBuffer.join('\n')}</code>
-          </pre>
-        );
+        if (hiddenUntilLevel === null) {
+          blocks.push(
+            <pre key={`${keyBase}code-${idx}`}>
+              <code>{codeBuffer.join('\n')}</code>
+            </pre>
+          );
+        }
         codeBuffer = null;
       } else {
         codeBuffer.push(line);
@@ -2131,6 +2164,52 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '') {
     const hr = /^(-{3,}|\*{3,})$/.test(line.trim());
     const taskUl = line.match(/^\s*[-*]\s+\[( |x|X)\]\s+(.*)$/);
 
+    if (heading) {
+      const level = Math.min(heading[1].length, 6);
+      if (hiddenUntilLevel !== null) {
+        if (level <= hiddenUntilLevel) {
+          hiddenUntilLevel = null;
+        } else {
+          // Nested inside a collapsed ancestor — stays hidden entirely.
+          return;
+        }
+      }
+      flushList();
+      const headingId = heading[2].trim().toLowerCase().replace(/[^a-z0-9]+/g, '-');
+      const fullId = `${keyBase}${headingId}`;
+      const isCollapsed = !!foldState?.collapsed?.has(fullId);
+      blocks.push(
+        React.createElement(
+          `h${level}`,
+          { key: `${keyBase}h-${idx}`, id: fullId },
+          foldState && (
+            <span
+              className={`heading-fold-toggle ${isCollapsed ? 'collapsed' : ''}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                foldState.onToggle(fullId);
+              }}
+              role="button"
+              aria-label={isCollapsed ? 'Expand section' : 'Collapse section'}
+            >
+              <IconChevronDown size={12} />
+            </span>
+          ),
+          renderInline(heading[2], `${keyBase}h-${idx}`, handlers, linkIndex)
+        )
+      );
+      if (isCollapsed) hiddenUntilLevel = level;
+      return;
+    }
+
+    if (hiddenUntilLevel !== null) {
+      // Inside a collapsed section: still track fence-open so line
+      // interpretation downstream (once we exit) stays correct, but don't
+      // render anything.
+      if (fence) codeBuffer = [];
+      return;
+    }
+
     if (fence) {
       flushList();
       codeBuffer = [];
@@ -2142,17 +2221,6 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '') {
           <input type="checkbox" checked={checked} readOnly />
           <span className={checked ? 'task-done' : ''}>{renderInline(taskUl[2], `${keyBase}t-${idx}`, handlers, linkIndex)}</span>
         </div>
-      );
-    } else if (heading) {
-      flushList();
-      const level = Math.min(heading[1].length, 6);
-      const headingId = heading[2].trim().toLowerCase().replace(/[^a-z0-9]+/g, '-');
-      blocks.push(
-        React.createElement(
-          `h${level}`,
-          { key: `${keyBase}h-${idx}`, id: `${keyBase}${headingId}` },
-          renderInline(heading[2], `${keyBase}h-${idx}`, handlers, linkIndex)
-        )
       );
     } else if (hr) {
       flushList();
@@ -2174,7 +2242,7 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '') {
     }
   });
   flushList();
-  if (codeBuffer !== null) {
+  if (codeBuffer !== null && hiddenUntilLevel === null) {
     blocks.push(
       <pre key={`${keyBase}code-end`}>
         <code>{codeBuffer.join('\n')}</code>
@@ -2656,7 +2724,7 @@ function MenuDivider() {
 // Activity bar — the thin left-most icon ribbon, mirroring Obsidian's icon
 // strip. Switches which panel the side dock shows.
 // ---------------------------------------------------------------------------
-function ActivityBar({ activeView, onSetView, onOpenCommandPalette, onSync, syncing, onChangeFolder, onSignOut, folderName }) {
+const ActivityBar = React.memo(function ActivityBar({ activeView, onSetView, onOpenCommandPalette, onSync, syncing, onChangeFolder, onSignOut, folderName }) {
   const item = (view, Icon, label, extra) => (
     <button
       className={`activity-btn ${activeView === view ? 'active' : ''}`}
@@ -2673,6 +2741,7 @@ function ActivityBar({ activeView, onSetView, onOpenCommandPalette, onSync, sync
       <div className="activity-bar-top">
         {item('explorer', IconFilePlus, 'Files')}
         {item('search', IconSearch, 'Search')}
+        {item('toc', IconListTree, 'Outline')}
         {item('tags', IconTag, 'Tags')}
         {item('bookmarks', IconStar, 'Bookmarks')}
       </div>
@@ -2692,7 +2761,7 @@ function ActivityBar({ activeView, onSetView, onOpenCommandPalette, onSync, sync
       </div>
     </div>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // File explorer — tree view, drag-and-drop reorganization, and the merged
@@ -2937,7 +3006,7 @@ function collectAllFolderIds(tree) {
   return ids;
 }
 
-function ExplorerPanel({
+const ExplorerPanel = React.memo(function ExplorerPanel({
   tree,
   vaultRootId,
   currentIds,
@@ -3027,7 +3096,7 @@ function ExplorerPanel({
       </div>
     </div>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // Search panel — Obsidian-style operators (path:, file:, tag:, line:,
@@ -3043,7 +3112,7 @@ const SEARCH_HELP = [
   { op: '[property]', desc: 'match property' }
 ];
 
-function SearchPanel({ query, setQuery, filesMeta, linkIndex, getBody, tagsByFileId, onOpenNote, indexing, ensureIndexed, indexVersion }) {
+const SearchPanel = React.memo(function SearchPanel({ query, setQuery, filesMeta, linkIndex, getBody, tagsByFileId, onOpenNote, indexing, ensureIndexed, indexVersion }) {
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [collapsed, setCollapsed] = useState(new Set());
   const [showHelp, setShowHelp] = useState(false);
@@ -3165,7 +3234,7 @@ function SearchPanel({ query, setQuery, filesMeta, linkIndex, getBody, tagsByFil
       )}
     </div>
   );
-}
+});
 
 // Highlights every occurrence of any search term within a line of text —
 // used for search result snippets (as opposed to HighlightedSnippet, which
@@ -3185,7 +3254,7 @@ function SearchHighlightedLine({ line, terms }) {
 // Tags panel — every tag in the vault with a note count, clicking opens it
 // as a search query.
 // ---------------------------------------------------------------------------
-function TagsPanel({ filesMeta, getBody, onOpenTag, indexing, ensureIndexed, indexVersion }) {
+const TagsPanel = React.memo(function TagsPanel({ filesMeta, getBody, onOpenTag, indexing, ensureIndexed, indexVersion }) {
   useEffect(() => {
     ensureIndexed();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3217,12 +3286,12 @@ function TagsPanel({ filesMeta, getBody, onOpenTag, indexing, ensureIndexed, ind
       </div>
     </div>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // Bookmarks panel — a lightweight take on Obsidian's Bookmarks core plugin.
 // ---------------------------------------------------------------------------
-function BookmarksPanel({ bookmarks, filesMeta, onOpenFile, onOpenImage, onToggleBookmark }) {
+const BookmarksPanel = React.memo(function BookmarksPanel({ bookmarks, filesMeta, onOpenFile, onOpenImage, onToggleBookmark }) {
   const items = filesMeta
     .filter((f) => bookmarks.has(f.id))
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -3253,10 +3322,67 @@ function BookmarksPanel({ bookmarks, filesMeta, onOpenFile, onOpenImage, onToggl
       </div>
     </div>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
-// Split-pane tree helpers. A node is either:
+// Table of contents / outline panel — Obsidian-style, lists the active
+// note's headings, indented by level, click to jump to that heading. Works
+// in both edit and reading view via `onNavigate` (see EditorContent /
+// App-level `activeEditorNav` for how the actual scrolling happens
+// differently in each mode).
+// ---------------------------------------------------------------------------
+function extractHeadings(content) {
+  const { body } = parseFrontmatter(content || '');
+  const lines = body.split('\n');
+  const headings = [];
+  lines.forEach((line, lineIndex) => {
+    const m = line.match(/^(#{1,6})\s+(.*)$/);
+    if (!m) return;
+    const level = Math.min(m[1].length, 6);
+    const text = m[2].trim();
+    const id = text.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    headings.push({ level, text, id, lineIndex });
+  });
+  return headings;
+}
+
+const TocPanel = React.memo(function TocPanel({ file, content, onNavigate }) {
+  const headings = useMemo(() => extractHeadings(content), [content]);
+  if (!file) {
+    return (
+      <div className="side-panel">
+        <div className="side-panel-header">
+          <span className="side-panel-title">Outline</span>
+        </div>
+        <div className="side-panel-body">
+          <p className="muted small empty-hint">Open a note to see its outline.</p>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="side-panel">
+      <div className="side-panel-header">
+        <span className="side-panel-title">Outline</span>
+      </div>
+      <div className="side-panel-body toc-panel-body">
+        {headings.length === 0 && <p className="muted small empty-hint">No headings in this note yet.</p>}
+        {headings.map((h, idx) => (
+          <button
+            key={`${h.id}-${idx}`}
+            className="toc-row"
+            style={{ paddingLeft: `${10 + (h.level - 1) * 14}px` }}
+            onClick={() => onNavigate(h.lineIndex, h.id)}
+            title={h.text}
+          >
+            {h.text || <span className="muted">Untitled heading</span>}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+});
+
 //   { type: 'leaf', id, tabs: [{ id, fileId, mode, history, historyIndex }], activeTabId }
 //   { type: 'split', id, direction: 'row'|'column', children: [node,...], sizes: [%,...] }
 // ---------------------------------------------------------------------------
@@ -3797,9 +3923,31 @@ function NoteTitleField({ file, onRename }) {
   );
 }
 
-function EditorContent({ file, content, onChange, linkIndex, phantomRecords, handlers, mode, loadingNote, backlinkIndex, allFiles, getBody }) {
+function EditorContent({ file, content, onChange, linkIndex, phantomRecords, handlers, mode, loadingNote, backlinkIndex, allFiles, getBody, isActivePane }) {
   const textareaRef = useRef(null);
   const highlightRef = useRef(null);
+  // Heading fold state (reading-view only), keyed by heading id, reset per
+  // note so collapsing a section in one note doesn't leak into another.
+  const [collapsedHeadings, setCollapsedHeadings] = useState(() => new Set());
+  const collapsedHeadingsFileRef = useRef(file?.id);
+  if (collapsedHeadingsFileRef.current !== file?.id) {
+    collapsedHeadingsFileRef.current = file?.id;
+    // Reset synchronously on file change (avoids a stale-collapse flash).
+    if (collapsedHeadings.size) setCollapsedHeadings(new Set());
+  }
+  const foldState = useMemo(
+    () => ({
+      collapsed: collapsedHeadings,
+      onToggle: (headingId) =>
+        setCollapsedHeadings((prev) => {
+          const next = new Set(prev);
+          if (next.has(headingId)) next.delete(headingId);
+          else next.add(headingId);
+          return next;
+        })
+    }),
+    [collapsedHeadings]
+  );
   const undoCtl = useEditorUndo(content);
   const wrappedOnChange = useCallback(
     (v) => {
@@ -3809,6 +3957,63 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
     [onChange, undoCtl]
   );
   const autocomplete = useLinkAutocomplete(textareaRef, wrappedOnChange, linkIndex, phantomRecords);
+
+  // Tab / Shift+Tab indent-outdent. Operates on whole lines (like every
+  // other markdown editor) so it works for plain text, list items, and
+  // nested lists alike — indenting a `- item` line's leading whitespace is
+  // exactly what turns it into a nested list item.
+  const INDENT_UNIT = '  ';
+  const applyIndent = useCallback(
+    (outdent) => {
+      const ta = textareaRef.current;
+      if (!ta) return;
+      const { selectionStart, selectionEnd, value } = ta;
+      const lineStart = value.lastIndexOf('\n', selectionStart - 1) + 1;
+      let lineEnd = value.indexOf('\n', selectionEnd > selectionStart ? selectionEnd - 1 : selectionEnd);
+      if (lineEnd === -1) lineEnd = value.length;
+      const before = value.slice(0, lineStart);
+      const after = value.slice(lineEnd);
+      const selectedLines = value.slice(lineStart, lineEnd).split('\n');
+
+      let firstLineDelta = 0;
+      let totalDelta = 0;
+      const newLines = selectedLines.map((line, i) => {
+        if (outdent) {
+          let removed = 0;
+          let next = line;
+          if (line.startsWith(INDENT_UNIT)) {
+            removed = INDENT_UNIT.length;
+            next = line.slice(INDENT_UNIT.length);
+          } else if (line.startsWith('\t')) {
+            removed = 1;
+            next = line.slice(1);
+          } else {
+            const m = line.match(/^ +/);
+            if (m) {
+              removed = m[0].length;
+              next = line.slice(removed);
+            }
+          }
+          if (i === 0) firstLineDelta = -removed;
+          totalDelta -= removed;
+          return next;
+        }
+        if (i === 0) firstLineDelta = INDENT_UNIT.length;
+        totalDelta += INDENT_UNIT.length;
+        return INDENT_UNIT + line;
+      });
+
+      const newValue = before + newLines.join('\n') + after;
+      const newStart = Math.max(lineStart, selectionStart + firstLineDelta);
+      const newEnd = Math.max(lineStart, selectionEnd + totalDelta);
+      wrappedOnChange(newValue);
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (el) el.setSelectionRange(newStart, newEnd);
+      });
+    },
+    [wrappedOnChange]
+  );
 
   // highlightMarkdownSource re-parses and re-renders the syntax highlighting
   // for the note on every call. An earlier version called it directly with
@@ -3862,6 +4067,46 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
     syncEditorOverlay();
   }, [content, mode, syncEditorOverlay]);
 
+  // Selection-based word/char count (status bar) only makes sense while
+  // there's an actual textarea selection to reflect — clear it whenever we
+  // leave edit mode or switch notes, so the status bar doesn't keep
+  // showing counts for a selection that no longer exists on screen.
+  useEffect(() => {
+    return () => handlers.onEditorSelectionChange?.(null);
+  }, [file?.id, mode, handlers]);
+
+  // Table-of-contents navigation bridge — registers a scroll-to-heading
+  // function for this pane while it's the active one, so the Outline panel
+  // (which lives outside the pane tree entirely and has no DOM access to a
+  // specific editor instance) can jump to a heading regardless of whether
+  // this pane is currently in edit or reading view. Reading view has real
+  // heading elements with ids to scroll to; edit mode doesn't (it's one
+  // giant textarea), so there we estimate the target scrollTop from the
+  // line's index times the editor's fixed line-height and also move the
+  // caret there, which is the closest a plain textarea gets to "jump to
+  // heading".
+  useEffect(() => {
+    if (!isActivePane || !file) return undefined;
+    const scrollToHeading = (lineIndex, headingId) => {
+      if (mode === 'edit') {
+        const ta = textareaRef.current;
+        if (!ta) return;
+        const lines = ta.value.split('\n');
+        const charOffset = lines.slice(0, lineIndex).reduce((sum, l) => sum + l.length + 1, 0);
+        ta.focus();
+        ta.setSelectionRange(charOffset, charOffset + (lines[lineIndex]?.length || 0));
+        const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || 21;
+        ta.scrollTop = Math.max(0, lineIndex * lineHeight - ta.clientHeight / 3);
+        syncEditorOverlay();
+      } else {
+        const el = document.getElementById(headingId);
+        el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    };
+    handlers.registerActiveEditorNav?.(scrollToHeading);
+    return () => handlers.registerActiveEditorNav?.(null);
+  }, [isActivePane, file, mode, handlers, syncEditorOverlay]);
+
   useEffect(() => {
     const ta = textareaRef.current;
     if (!ta || typeof ResizeObserver === 'undefined') return undefined;
@@ -3907,6 +4152,12 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
                 autocomplete.updateFromCaret();
               }}
               onScroll={syncEditorOverlay}
+              onSelect={(e) => {
+                const { selectionStart, selectionEnd, value } = e.target;
+                handlers.onEditorSelectionChange?.(
+                  selectionEnd > selectionStart ? value.slice(selectionStart, selectionEnd) : null
+                );
+              }}
               onKeyUp={(e) => {
                 if (!['ArrowUp', 'ArrowDown', 'Enter', 'Tab', 'Escape'].includes(e.key)) autocomplete.updateFromCaret();
               }}
@@ -3936,6 +4187,11 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
                   }
                   return;
                 }
+                if (e.key === 'Tab' && !autocomplete.suggestion) {
+                  e.preventDefault();
+                  applyIndent(e.shiftKey);
+                  return;
+                }
                 if (!autocomplete.suggestion) return;
                 if (e.key === 'ArrowDown') {
                   e.preventDefault();
@@ -3951,7 +4207,10 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
                 }
               }}
               onClick={autocomplete.updateFromCaret}
-              onBlur={() => setTimeout(autocomplete.dismiss, 120)}
+              onBlur={() => {
+                setTimeout(autocomplete.dismiss, 120);
+                handlers.onEditorSelectionChange?.(null);
+              }}
               spellCheck={false}
               placeholder="Start writing… use [[Note Name]] to link, #tag to tag, or [[image.png]] for images."
             />
@@ -3982,7 +4241,7 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
         <div className="editor-preview">
           <NoteTitleField file={file} onRename={handlers.onRenameFile} />
           <PropertiesPanel properties={properties} handlers={handlers} />
-          {renderMarkdownBlocks(body, handlers, linkIndex)}
+          {renderMarkdownBlocks(body, handlers, linkIndex, '', foldState)}
           <InlineMentions
             file={linkIndex.records.find((r) => r.id === file.id) || file}
             linkIndex={linkIndex}
@@ -4014,10 +4273,12 @@ function EmbeddedImagePane({ token, file }) {
 // word count, character count, backlink count, property count, plus a
 // small live sync indicator on the far right.
 // ---------------------------------------------------------------------------
-function StatusBar({ file, content, backlinkCount, syncing, syncError, dirty, saving }) {
+function StatusBar({ file, content, backlinkCount, syncing, syncError, dirty, saving, selectionText }) {
   const { properties, body } = parseFrontmatter(content || '');
-  const words = body.trim() ? body.trim().split(/\s+/).length : 0;
-  const chars = body.length;
+  const hasSelection = !!selectionText && selectionText.trim().length > 0;
+  const countSource = hasSelection ? selectionText : body;
+  const words = countSource.trim() ? countSource.trim().split(/\s+/).length : 0;
+  const chars = countSource.length;
 
   return (
     <footer className="status-bar">
@@ -4026,7 +4287,7 @@ function StatusBar({ file, content, backlinkCount, syncing, syncError, dirty, sa
           <>
             <span>{backlinkCount} backlink{backlinkCount === 1 ? '' : 's'}</span>
             <span>{properties.length} propert{properties.length === 1 ? 'y' : 'ies'}</span>
-            <span>{words} word{words === 1 ? '' : 's'}</span>
+            <span>{hasSelection ? 'Selected: ' : ''}{words} word{words === 1 ? '' : 's'}</span>
             <span>{chars} character{chars === 1 ? '' : 's'}</span>
             {file.kind !== 'image' && (
               <span className="status-save-state" title={saving ? 'Saving…' : dirty ? 'Unsaved changes' : 'Saved'}>
@@ -4201,6 +4462,7 @@ function LeafPane({
           backlinkIndex={backlinkIndex}
           allFiles={allFiles}
           getBody={getBody}
+          isActivePane={isActivePane}
         />
       </div>
     </div>
@@ -4370,6 +4632,105 @@ function PaletteModal({ mode, files, commands, onClose, onPickFile, onRunCommand
 // ---------------------------------------------------------------------------
 // App — top-level composition and view-transition wiring
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Accent color — user-customizable, persisted to localStorage, applied as
+// CSS custom properties on the document root. Every accent-derived color in
+// App.css (--accent-hover, --accent-soft, --link-color, --tag-bg,
+// --tag-color) is computed from the one base hex here rather than being a
+// second hardcoded value, so picking a new accent recolors links, tags,
+// active states, and the selection highlight consistently in one place.
+// ---------------------------------------------------------------------------
+const ACCENT_STORAGE_KEY = 'vault_accent_color';
+const DEFAULT_ACCENT = '#8875e0';
+const ACCENT_PRESETS = ['#8875e0', '#4f8ef7', '#3fb27f', '#e0a23f', '#e0685f', '#e85d9c', '#5fc3e0', '#9e9e9e'];
+
+function hexToRgbArr(hex) {
+  const clean = (hex || DEFAULT_ACCENT).replace('#', '');
+  const full = clean.length === 3 ? clean.split('').map((c) => c + c).join('') : clean;
+  const n = parseInt(full, 16);
+  if (Number.isNaN(n)) return hexToRgbArr(DEFAULT_ACCENT);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+function rgbArrToHex([r, g, b]) {
+  const clamp = (v) => Math.max(0, Math.min(255, Math.round(v)));
+  return '#' + [r, g, b].map((v) => clamp(v).toString(16).padStart(2, '0')).join('');
+}
+function lightenRgb(rgb, amount) {
+  return rgb.map((v) => v + (255 - v) * amount);
+}
+
+function applyAccentColor(hex) {
+  const rgb = hexToRgbArr(hex);
+  const hoverHex = rgbArrToHex(lightenRgb(rgb, 0.12));
+  const linkHex = rgbArrToHex(lightenRgb(rgb, 0.3));
+  const root = document.documentElement.style;
+  root.setProperty('--accent', hex);
+  root.setProperty('--accent-hover', hoverHex);
+  root.setProperty('--accent-soft', `rgba(${rgb.join(', ')}, 0.16)`);
+  root.setProperty('--link-color', linkHex);
+  root.setProperty('--tag-bg', `rgba(${rgb.join(', ')}, 0.14)`);
+  root.setProperty('--tag-color', linkHex);
+}
+
+function useAccentColor() {
+  const [accent, setAccentState] = useState(() => {
+    try {
+      return localStorage.getItem(ACCENT_STORAGE_KEY) || DEFAULT_ACCENT;
+    } catch {
+      return DEFAULT_ACCENT;
+    }
+  });
+  useEffect(() => {
+    applyAccentColor(accent);
+  }, [accent]);
+  const setAccent = useCallback((hex) => {
+    setAccentState(hex);
+    try {
+      localStorage.setItem(ACCENT_STORAGE_KEY, hex);
+    } catch {
+      // localStorage unavailable (private mode, quota) — color still
+      // applies for this session via state, just won't persist.
+    }
+  }, []);
+  return [accent, setAccent];
+}
+
+function AccentColorPicker({ accent, onChange, onClose }) {
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [onClose]);
+  return (
+    <div className="accent-picker" onClick={(e) => e.stopPropagation()}>
+      <div className="accent-picker-title">Accent color</div>
+      <div className="accent-picker-swatches">
+        {ACCENT_PRESETS.map((hex) => (
+          <button
+            key={hex}
+            className={`accent-swatch ${accent.toLowerCase() === hex.toLowerCase() ? 'active' : ''}`}
+            style={{ background: hex }}
+            title={hex}
+            aria-label={`Use accent color ${hex}`}
+            onClick={() => onChange(hex)}
+          />
+        ))}
+      </div>
+      <label className="accent-picker-custom">
+        Custom
+        <input type="color" value={accent} onChange={(e) => onChange(e.target.value)} />
+      </label>
+      {accent !== DEFAULT_ACCENT && (
+        <button className="accent-picker-reset" onClick={() => onChange(DEFAULT_ACCENT)}>
+          Reset to default
+        </button>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const { token: googleToken, gisReady, signIn, signOut: signOutGoogle } = useGoogleAuth();
   const { proxyToken, signInProxy, signOutProxy } = useProxyAuth();
@@ -4380,6 +4741,19 @@ export default function App() {
   }, [signOutGoogle, signOutProxy]);
 
   const [showProxyFolderPicker, setShowProxyFolderPicker] = useState(false);
+  const [accentColor, setAccentColor] = useAccentColor();
+  const [accentPickerOpen, setAccentPickerOpen] = useState(false);
+  const accentPickerAnchorRef = useRef(null);
+  useEffect(() => {
+    if (!accentPickerOpen) return undefined;
+    const onDocMouseDown = (e) => {
+      if (accentPickerAnchorRef.current && !accentPickerAnchorRef.current.contains(e.target)) {
+        setAccentPickerOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+    return () => document.removeEventListener('mousedown', onDocMouseDown);
+  }, [accentPickerOpen]);
   const [folder, setFolder] = useState(null);
   const [folderRestoring, setFolderRestoring] = useState(true);
   const sync = useVaultSync(token, folder);
@@ -5020,6 +5394,18 @@ export default function App() {
     [token, sync, folder]
   );
 
+  // Selected text in the active editor, so the status bar can show
+  // selection-scoped word/char counts instead of the whole note's — null
+  // when nothing's selected.
+  const [editorSelectionText, setEditorSelectionText] = useState(null);
+
+  // Bridge for the Outline panel: the currently-active pane's EditorContent
+  // registers its scroll-to-heading function here (see the comment in
+  // EditorContent), and onNavigateToHeading below just forwards to whatever
+  // is currently registered. A ref, not state — this changes on every pane
+  // focus / mode toggle and doesn't need to trigger a re-render itself.
+  const activeEditorNavRef = useRef(null);
+
   const handlers = useMemo(
     () => ({
       token,
@@ -5031,6 +5417,14 @@ export default function App() {
         setActiveSideView('search');
         setSearchQuery(`tag:${tag}`);
         setMobileDockOpen(true);
+      },
+      onEditorSelectionChange: setEditorSelectionText,
+      registerActiveEditorNav: (fn) => {
+        activeEditorNavRef.current = fn;
+      },
+      onNavigateToHeading: (lineIndex, headingId) => {
+        activeEditorNavRef.current?.(lineIndex, headingId);
+        setMobileDockOpen(false);
       }
     }),
     [token, openFileInPane, activePaneId, openNoteByName, handleInlineRenameFile]
@@ -5230,6 +5624,13 @@ export default function App() {
                 indexVersion={vaultIndex.version}
               />
             )}
+            {activeSideView === 'toc' && (
+              <TocPanel
+                file={activeFileForStatus}
+                content={activeContentForStatus}
+                onNavigate={handlers.onNavigateToHeading}
+              />
+            )}
             {activeSideView === 'bookmarks' && (
               <BookmarksPanel
                 bookmarks={bookmarks}
@@ -5246,6 +5647,22 @@ export default function App() {
               {folder.name}
             </span>
             <div className="vault-footer-actions">
+              <div className="accent-picker-anchor" ref={accentPickerAnchorRef}>
+                <button
+                  className="icon-btn"
+                  title="Accent color"
+                  onClick={() => setAccentPickerOpen((v) => !v)}
+                >
+                  <IconPalette size={15} />
+                </button>
+                {accentPickerOpen && (
+                  <AccentColorPicker
+                    accent={accentColor}
+                    onChange={setAccentColor}
+                    onClose={() => setAccentPickerOpen(false)}
+                  />
+                )}
+              </div>
               <button className="icon-btn" title="Keyboard shortcuts" onClick={showShortcutsHelp}>
                 <IconHelp size={15} />
               </button>
@@ -5302,6 +5719,7 @@ export default function App() {
         syncError={sync.syncError}
         dirty={activeTabForStatus ? !!buffers[activeTabForStatus.fileId]?.dirty : false}
         saving={activeTabForStatus ? !!buffers[activeTabForStatus.fileId]?.saving : false}
+        selectionText={editorSelectionText}
       />
       {paletteMode && (
         <PaletteModal
