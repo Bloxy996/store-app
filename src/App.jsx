@@ -1,4 +1,4 @@
-import React, { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 /* ============================================================================
@@ -3669,11 +3669,35 @@ function highlightSourceLine(line, lineKey) {
   return <span key={lineKey}>{highlightInlineSyntax(line, lineKey)}</span>;
 }
 
-function highlightMarkdownSource(text) {
+// Per-line cache for highlightMarkdownSource, below. highlightSourceLine is a
+// pure function of a single line's text (it never looks at neighboring
+// lines), so a line whose text hasn't changed always produces an identical
+// result — caching by line content turns a full-note re-highlight into
+// work proportional to the lines that actually changed, typically just the
+// one being typed on. Capped and cleared wholesale rather than LRU-evicted:
+// simplicity over precision here, since hitting the cap just means one
+// full-cost recompute burst before the cache starts paying off again.
+const LINE_HIGHLIGHT_CACHE_LIMIT = 4000;
+
+function highlightMarkdownSource(text, cache) {
   const lines = text.split('\n');
   const out = [];
+  if (cache && cache.size > LINE_HIGHLIGHT_CACHE_LIMIT) cache.clear();
   lines.forEach((line, idx) => {
-    out.push(highlightSourceLine(line, `l${idx}`));
+    const lineKey = `l${idx}`;
+    let node = cache?.get(line);
+    if (node) {
+      // Reuse the cached highlighting, just re-keyed for this line's
+      // current position — line content can legitimately repeat (blank
+      // lines, repeated headings), and React needs a key matching this
+      // position for stable reconciliation even though nothing about the
+      // highlighting itself needs recomputing.
+      node = React.cloneElement(node, { key: lineKey });
+    } else {
+      node = highlightSourceLine(line, lineKey);
+      cache?.set(line, node);
+    }
+    out.push(node);
     if (idx < lines.length - 1) out.push('\n');
   });
   return out;
@@ -3787,25 +3811,36 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
   const autocomplete = useLinkAutocomplete(textareaRef, wrappedOnChange, linkIndex, phantomRecords);
 
   // highlightMarkdownSource re-parses and re-renders the syntax highlighting
-  // for the ENTIRE note on every call, and it was being called directly in
-  // JSX with the live `content` — meaning every single keystroke, on a note
-  // of any real length, forced a synchronous full-note re-highlight before
-  // the browser could paint that keystroke. On a fast desktop that's just
-  // some jank; on a phone it's slow enough to block the main thread past
-  // the point where the OS's own IME/autocorrect expects a response, which
-  // is what turns into dropped or garbled characters — "typing is broken",
-  // not just "typing is slow", even though they share one cause.
+  // for the note on every call. An earlier version called it directly with
+  // the live `content` on every keystroke — on a note of any real length
+  // that's a full-note re-highlight blocking every single character typed,
+  // slow enough on a phone to desync from the OS's own IME/autocorrect
+  // (dropped or garbled characters, not just visible lag).
   //
-  // `useDeferredValue` decouples the two: the real (invisible) textarea
-  // above is uncontrolled-in-spirit here — its value comes from the
-  // browser's own input handling via onChange, so it updates instantly no
-  // matter what — while this deferred copy tells React it's fine for the
-  // highlight overlay underneath to catch up a moment later, at low
-  // priority, once the browser has room to breathe. `useMemo` on top makes
-  // sure the highlight itself isn't redone on renders where the deferred
-  // value hasn't actually changed yet (e.g. a pure scroll).
-  const deferredContent = useDeferredValue(content);
-  const highlightedSource = useMemo(() => highlightMarkdownSource(deferredContent), [deferredContent]);
+  // The fix that replaced that (`useDeferredValue`) traded the blocking for
+  // staleness: it let the highlight overlay catch up a moment *after* the
+  // real (invisible) textarea updated, at low priority. That hid the lag on
+  // desktop, where React usually catches the deferred render up between
+  // individual keystrokes — but mobile swipe-typing and predictive text
+  // fire bursts of input fast enough that the overlay can stay measurably
+  // behind the real caret, which looked identical to the original
+  // wrap-divergence bug: text appearing somewhere other than where you're
+  // actually typing.
+  //
+  // Deferring is the wrong lever regardless of tuning — this overlay is
+  // supposed to be a live readout of the real caret position, so it can
+  // never be allowed to lag it, at any typing speed. Fixed instead by
+  // making the recompute itself cheap: highlightSourceLine is a pure
+  // function of one line's text, so a persistent cache keyed by line
+  // content turns "re-highlight everything" into "re-highlight the one
+  // line that changed" on ordinary typing. That's fast enough to run
+  // synchronously in step with every keystroke, so the overlay is never
+  // out of date relative to the real textarea, on any device.
+  const lineHighlightCacheRef = useRef(new Map());
+  const highlightedSource = useMemo(
+    () => highlightMarkdownSource(content, lineHighlightCacheRef.current),
+    [content]
+  );
 
   // Keeps .editor-highlight pixel-aligned with the real textarea — see the
   // long comment on .editor-highlight in App.css for why this mirrors
