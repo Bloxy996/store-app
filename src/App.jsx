@@ -3787,18 +3787,19 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
   const autocomplete = useLinkAutocomplete(textareaRef, wrappedOnChange, linkIndex, phantomRecords);
 
   // Keeps .editor-highlight pixel-aligned with the real textarea — see the
-  // long comment on .editor-highlight in App.css for why this can't just be
-  // "give both the same overflow-y and mirror scrollTop" (that was the
-  // previous approach, and the actual bug the user hit). This is the single
-  // place that alignment is computed, called from every event that can
-  // change either the textarea's scroll position or its content-box width.
+  // long comment on .editor-highlight in App.css for why this mirrors
+  // scrollTop directly onto a real scrolling element rather than using a
+  // transform on a fixed-size layer (the previous approach, and the actual
+  // bug the user hit on long notes). This is the single place that
+  // alignment is computed, called from every event that can change either
+  // the textarea's scroll position or its content-box width.
   const syncEditorOverlay = useCallback(() => {
     const ta = textareaRef.current;
     const hl = highlightRef.current;
     if (!ta || !hl) return;
     const scrollbarWidth = ta.offsetWidth - ta.clientWidth;
     hl.style.right = `${scrollbarWidth}px`;
-    hl.style.transform = `translateY(${-ta.scrollTop}px)`;
+    if (hl.scrollTop !== ta.scrollTop) hl.scrollTop = ta.scrollTop;
   }, []);
 
   useLayoutEffect(() => {
