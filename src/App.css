@@ -1457,6 +1457,9 @@ button:disabled {
   border-left: 3px solid var(--bg-4);
   color: var(--text-muted);
 }
+.editor-preview blockquote p {
+  margin: 0.35em 0;
+}
 .editor-preview hr {
   border: none;
   border-top: 1px solid var(--border);
@@ -1591,6 +1594,234 @@ button:disabled {
   max-width: 100%;
   border-radius: var(--radius-md);
   display: block;
+}
+
+/* Video / audio embeds + generic file chips inside preview */
+.video-embed {
+  display: block;
+  max-width: 100%;
+  max-height: 480px;
+  margin: 0.6em 0;
+  border-radius: var(--radius-md);
+  background: #000;
+}
+.audio-embed-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0.6em 0;
+  max-width: 420px;
+}
+.audio-embed {
+  width: 100%;
+}
+.audio-embed-name {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+.embed-loading {
+  display: inline-block;
+  padding: 10px 16px;
+  background: var(--bg-2);
+  border-radius: var(--radius-md);
+}
+.file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px 2px 8px;
+  margin: 0 2px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-normal);
+  cursor: pointer;
+  font-size: 0.92em;
+}
+.file-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Asset pane (video/audio/generic-file tab content, reading view) */
+.asset-pane-video {
+  max-width: 100%;
+  max-height: 70vh;
+  border-radius: var(--radius-md);
+  background: #000;
+  display: block;
+}
+.asset-pane-audio {
+  width: 100%;
+  max-width: 480px;
+}
+.asset-pane-file {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--text-faint);
+}
+.asset-download-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: var(--radius-md);
+  text-decoration: none;
+  font-size: 13px;
+}
+.asset-download-btn:hover {
+  filter: brightness(1.08);
+}
+.tree-kind-icon {
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+/* Callouts (Obsidian-style `> [!type] Title`) */
+.callout {
+  margin: 0.9em 0;
+  padding: 10px 14px 12px;
+  border-radius: var(--radius-md);
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-2));
+}
+.callout-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+.callout-icon {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+.callout-body {
+  margin-top: 6px;
+  color: var(--text-normal);
+}
+.callout-body > *:first-child {
+  margin-top: 0;
+}
+.callout-body > *:last-child {
+  margin-bottom: 0;
+}
+.callout-warning,
+.callout-caution,
+.callout-attention {
+  border-left-color: #e0b95f;
+  background: rgba(224, 185, 95, 0.1);
+}
+.callout-warning .callout-icon,
+.callout-caution .callout-icon,
+.callout-attention .callout-icon {
+  color: #e0b95f;
+}
+.callout-danger,
+.callout-error,
+.callout-failure,
+.callout-bug {
+  border-left-color: var(--danger);
+  background: rgba(220, 90, 90, 0.1);
+}
+.callout-danger .callout-icon,
+.callout-error .callout-icon,
+.callout-failure .callout-icon,
+.callout-bug .callout-icon {
+  color: var(--danger);
+}
+.callout-tip,
+.callout-hint,
+.callout-success,
+.callout-check,
+.callout-done {
+  border-left-color: #6fbf73;
+  background: rgba(111, 191, 115, 0.1);
+}
+.callout-tip .callout-icon,
+.callout-hint .callout-icon,
+.callout-success .callout-icon,
+.callout-check .callout-icon,
+.callout-done .callout-icon {
+  color: #6fbf73;
+}
+
+/* Tables */
+.md-table {
+  border-collapse: collapse;
+  margin: 0.9em 0;
+  width: 100%;
+  font-size: 0.94em;
+}
+.md-table th,
+.md-table td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.md-table th {
+  background: var(--bg-2);
+  color: var(--text-normal);
+  font-weight: 600;
+}
+.md-table tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--bg-2) 40%, transparent);
+}
+
+/* Toggle blocks (`+++ Title` ... `+++`) */
+.toggle-block {
+  margin: 0.6em 0;
+}
+.toggle-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  padding: 3px 4px;
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  color: var(--text-normal);
+}
+.toggle-header:hover {
+  background: var(--bg-2);
+}
+.toggle-caret {
+  display: inline-flex;
+  color: var(--text-faint);
+  transition: transform 0.12s ease;
+}
+.toggle-block:not(.collapsed) .toggle-caret {
+  transform: rotate(90deg);
+}
+.toggle-body {
+  margin: 4px 0 4px 20px;
+  padding-left: 8px;
+  border-left: 2px solid var(--bg-4);
+}
+.toggle-body > *:first-child {
+  margin-top: 0;
+}
+
+/* Multi-column layout (`:::columns-2/3/4` ... `:::column` ... `:::`) */
+.md-columns {
+  display: grid;
+  grid-template-columns: repeat(var(--col-count, 2), 1fr);
+  gap: 20px;
+  margin: 0.9em 0;
+  align-items: start;
+}
+.md-column > *:first-child {
+  margin-top: 0;
+}
+@media (max-width: 720px) {
+  .md-columns {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ---------------------------------------------------------------------------

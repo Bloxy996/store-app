@@ -75,6 +75,16 @@ const IMAGE_MIME_TYPES = [
   'image/bmp'
 ];
 
+// Video/audio get their own kinds (dedicated <video>/<audio> embeds), and
+// everything else with a real extension falls back to a generic 'file' kind
+// (download/open chip). Anything left over — no extension, or a known text
+// extension — is treated as a note, same as before this was generalized.
+const VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'ogv', 'mov', 'm4v']);
+const VIDEO_MIME_TYPES = ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime'];
+const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'ogg', 'oga', 'm4a', 'flac', 'aac']);
+const AUDIO_MIME_TYPES = ['audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/mp4', 'audio/flac', 'audio/aac', 'audio/x-m4a'];
+const NOTE_EXTENSIONS = new Set(['md', 'markdown', 'txt', '']);
+
 function fileExtension(name) {
   const m = /\.([a-z0-9]+)$/i.exec(name || '');
   return m ? m[1].toLowerCase() : '';
@@ -82,6 +92,34 @@ function fileExtension(name) {
 
 function isImageName(name) {
   return IMAGE_EXTENSIONS.has(fileExtension(name));
+}
+
+function isVideoName(name) {
+  return VIDEO_EXTENSIONS.has(fileExtension(name));
+}
+
+function isAudioName(name) {
+  return AUDIO_EXTENSIONS.has(fileExtension(name));
+}
+
+// True for any filename whose extension marks it as a non-note asset (i.e.
+// it should keep its extension for [[link]] matching/display, the way image
+// links always have). Notes (.md/.markdown/.txt/no extension) are the only
+// names this returns false for.
+function isAssetName(name) {
+  return !NOTE_EXTENSIONS.has(fileExtension(name));
+}
+
+// Single source of truth for what a synced Drive file "is". Order matters:
+// image/video/audio are checked first by extension+mimeType, then anything
+// with a note-like extension (or no extension) is a note, and everything
+// else is a generic file (pdf, zip, docx, whatever the user drops in).
+function classifyKind(name, mimeType) {
+  if (isImageName(name) || IMAGE_MIME_TYPES.includes(mimeType)) return 'image';
+  if (isVideoName(name) || VIDEO_MIME_TYPES.includes(mimeType)) return 'video';
+  if (isAudioName(name) || AUDIO_MIME_TYPES.includes(mimeType)) return 'audio';
+  if (NOTE_EXTENSIONS.has(fileExtension(name)) || mimeType === 'text/markdown' || mimeType === 'text/plain') return 'note';
+  return 'file';
 }
 
 // ---------------------------------------------------------------------------
@@ -312,16 +350,18 @@ function buildLinkIndex(files, folders, rootId) {
   const records = files.map((f) => {
     const parentId = (f.parents && f.parents[0]) || rootId;
     const dir = folderPath(parentId);
-    const isImage = f.kind === 'image' || isImageName(f.name);
-    const baseName = isImage ? f.name : f.name.replace(/\.md$/i, '');
+    const kind = f.kind || 'note';
+    const isAsset = kind !== 'note';
+    const isImage = kind === 'image';
+    const baseName = isAsset ? f.name : f.name.replace(/\.md$/i, '');
     const relativePath = dir ? `${dir}/${baseName}` : baseName;
-    return { ...f, isImage, baseName, relativePath, dir };
+    return { ...f, kind, isAsset, isImage, baseName, relativePath, dir };
   });
 
   const byBasenameKey = new Map();
   const byRelativePath = new Map();
   records.forEach((r) => {
-    const key = `${r.isImage ? 'img' : 'note'}:${r.baseName.toLowerCase()}`;
+    const key = `${r.isAsset ? 'asset' : 'note'}:${r.baseName.toLowerCase()}`;
     if (!byBasenameKey.has(key)) byBasenameKey.set(key, []);
     byBasenameKey.get(key).push(r);
     byRelativePath.set(r.relativePath.toLowerCase(), r);
@@ -333,24 +373,29 @@ function buildLinkIndex(files, folders, rootId) {
 // Resolves the text inside a [[...]] (already stripped of any |alias or
 // #heading) against the current vault. One of:
 //   { status: 'resolved', file }
-//   { status: 'missing', isImage }                  -- no such file (yet)
-//   { status: 'ambiguous', isImage, candidates }      -- name matches 2+ files
+//   { status: 'missing', isAsset }                  -- no such file (yet)
+//   { status: 'ambiguous', isAsset, candidates }      -- name matches 2+ files
+// `isAsset` (any non-note file: image/video/audio/other) is kept alongside
+// the old `isImage` name so existing callers that only cared about images
+// still work unchanged for that subset.
 function resolveLinkTarget(rawTarget, linkIndex) {
   const target = String(rawTarget || '').trim();
+  const isAsset = isAssetName(target);
   const isImage = isImageName(target);
-  const cleaned = isImage ? target : target.replace(/\.md$/i, '');
+  const cleaned = isAsset ? target : target.replace(/\.md$/i, '');
 
   if (cleaned.includes('/')) {
     const hit = linkIndex.byRelativePath.get(cleaned.toLowerCase());
-    return hit ? { status: 'resolved', file: hit } : { status: 'missing', isImage };
+    return hit ? { status: 'resolved', file: hit } : { status: 'missing', isAsset, isImage };
   }
 
-  const key = `${isImage ? 'img' : 'note'}:${cleaned.toLowerCase()}`;
+  const key = `${isAsset ? 'asset' : 'note'}:${cleaned.toLowerCase()}`;
   const matches = linkIndex.byBasenameKey.get(key) || [];
   if (matches.length === 1) return { status: 'resolved', file: matches[0] };
-  if (matches.length === 0) return { status: 'missing', isImage };
+  if (matches.length === 0) return { status: 'missing', isAsset, isImage };
   return {
     status: 'ambiguous',
+    isAsset,
     isImage,
     candidates: matches.slice().sort((a, b) => a.relativePath.localeCompare(b.relativePath))
   };
@@ -361,7 +406,7 @@ function resolveLinkTarget(rawTarget, linkIndex) {
 // the full path from the vault root. This is the other half of the smart
 // linking behavior: it's what keeps typed links short by default.
 function bestLinkTextFor(file, linkIndex) {
-  const key = `${file.isImage ? 'img' : 'note'}:${file.baseName.toLowerCase()}`;
+  const key = `${file.isAsset ? 'asset' : 'note'}:${file.baseName.toLowerCase()}`;
   const matches = linkIndex.byBasenameKey.get(key) || [];
   return matches.length <= 1 ? file.baseName : file.relativePath;
 }
@@ -550,18 +595,17 @@ async function driveListVaultContentInFolders(token, folderIds) {
     const res = await proxyGet(token, { action: 'listVaultFiles', folders: folderIds.join(',') });
     return (await res.json()).files || [];
   }
-  const mimeClauses = [
-    "mimeType = 'text/markdown'",
-    "mimeType = 'text/plain'",
-    "fileExtension = 'md'",
-    ...IMAGE_MIME_TYPES.map((m) => `mimeType = '${m}'`)
-  ].join(' or ');
-
+  // Any real file (notes, images, video, audio, PDFs, zips, whatever) syncs
+  // now — only Google's native app types (Docs/Sheets/Slides/etc, which
+  // have no downloadable bytes via alt=media in the format this app wants)
+  // and folders (handled by the separate folder-tree listing) are excluded.
   const chunks = chunkArray(folderIds, 10);
   const chunkResults = await Promise.all(
     chunks.map(async (chunk) => {
       const parentClauses = chunk.map((id) => `'${id}' in parents`).join(' or ');
-      const q = encodeURIComponent(`(${parentClauses}) and trashed = false and (${mimeClauses})`);
+      const q = encodeURIComponent(
+        `(${parentClauses}) and trashed = false and not mimeType contains 'vnd.google-apps'`
+      );
       const fields = encodeURIComponent('files(id,name,modifiedTime,parents,mimeType,size),nextPageToken');
       let pageToken = '';
       const found = [];
@@ -581,7 +625,7 @@ async function driveListVaultContentInFolders(token, folderIds) {
 
   return chunkResults.flat().map((f) => ({
     ...f,
-    kind: isImageName(f.name) || IMAGE_MIME_TYPES.includes(f.mimeType) ? 'image' : 'note'
+    kind: classifyKind(f.name, f.mimeType)
   }));
 }
 
@@ -1218,7 +1262,7 @@ function buildVaultTree(rootId, folders, files) {
   files.forEach((f) =>
     addChild((f.parents && f.parents[0]) || rootId, {
       type: 'file',
-      kind: f.kind === 'image' ? 'image' : 'note',
+      kind: f.kind || 'note',
       id: f.id,
       name: f.name,
       modifiedTime: f.modifiedTime
@@ -1965,6 +2009,36 @@ const IconCheck = (p) => (
     <polyline points="20 6 9 17 4 12" />
   </Svg>
 );
+const IconVideo = (p) => (
+  <Svg {...p}>
+    <rect x="2" y="5" width="14" height="14" rx="2" />
+    <path d="m16 9 6-3v12l-6-3" />
+  </Svg>
+);
+const IconAudio = (p) => (
+  <Svg {...p}>
+    <path d="M9 18V5l12-2v13" />
+    <circle cx="6" cy="18" r="3" />
+    <circle cx="18" cy="16" r="3" />
+  </Svg>
+);
+const IconFile = (p) => (
+  <Svg {...p}>
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+    <polyline points="14 2 14 8 20 8" />
+  </Svg>
+);
+const IconDownload = (p) => (
+  <Svg {...p}>
+    <path d="M12 3v12" />
+    <polyline points="7 11 12 16 17 11" />
+    <path d="M5 20h14" />
+  </Svg>
+);
+// Small kind -> icon lookup for non-note tree rows. Images get no override
+// (they already read clearly from the filename/thumbnail elsewhere), so
+// only video/audio/generic-file get a distinguishing glyph in the sidebar.
+const ASSET_KIND_ICONS = { video: IconVideo, audio: IconAudio, file: IconFile };
 const IconLoader = (p) => (
   <Svg {...p} className={`spin ${p.className || ''}`}>
     <line x1="12" y1="2" x2="12" y2="6" />
@@ -2027,7 +2101,7 @@ function renderInline(text, keyPrefix, handlers, linkIndex) {
       const label = (rawAlias || rawTargetAndHeading).trim();
       const resolution = resolveLinkTarget(rawTarget, linkIndex);
 
-      if (resolution.status === 'resolved' && resolution.file.isImage) {
+      if (resolution.status === 'resolved' && resolution.file.kind === 'image') {
         nodes.push(
           <ImageEmbed
             key={key}
@@ -2035,7 +2109,24 @@ function renderInline(text, keyPrefix, handlers, linkIndex) {
             fileId={resolution.file.id}
             name={resolution.file.name}
             caption={rawAlias ? label : null}
-            onOpen={() => handlers.onOpenImage(resolution.file)}
+            onOpen={() => handlers.onOpenAsset(resolution.file)}
+          />
+        );
+      } else if (resolution.status === 'resolved' && resolution.file.kind === 'video') {
+        nodes.push(
+          <VideoEmbed key={key} token={handlers.token} fileId={resolution.file.id} name={resolution.file.name} />
+        );
+      } else if (resolution.status === 'resolved' && resolution.file.kind === 'audio') {
+        nodes.push(
+          <AudioEmbed key={key} token={handlers.token} fileId={resolution.file.id} name={resolution.file.name} />
+        );
+      } else if (resolution.status === 'resolved' && resolution.file.kind === 'file') {
+        nodes.push(
+          <FileChip
+            key={key}
+            name={resolution.file.name}
+            label={rawAlias ? label : null}
+            onOpen={() => handlers.onOpenAsset(resolution.file)}
           />
         );
       } else if (resolution.status === 'resolved') {
@@ -2055,12 +2146,12 @@ function renderInline(text, keyPrefix, handlers, linkIndex) {
             key={key}
             label={label}
             candidates={resolution.candidates}
-            onPick={(file) => (file.isImage ? handlers.onOpenImage(file) : handlers.onOpenById(file.id))}
+            onPick={(file) => (file.kind !== 'note' ? handlers.onOpenAsset(file) : handlers.onOpenById(file.id))}
           />
         );
-      } else if (resolution.isImage) {
+      } else if (resolution.isAsset) {
         nodes.push(
-          <span key={key} className="wikilink wikilink-missing-image" title={`Image not found: ${rawTarget}`}>
+          <span key={key} className="wikilink wikilink-missing-image" title={`File not found: ${rawTarget}`}>
             {rawTarget}
           </span>
         );
@@ -2108,23 +2199,94 @@ function renderInline(text, keyPrefix, handlers, linkIndex) {
   return nodes;
 }
 
+// Cell splitter/detector for GFM-style pipe tables: `| a | b |` rows plus a
+// `| --- | :--: |` alignment row directly under the header.
+function splitTableRow(line) {
+  let l = line.trim();
+  if (l.startsWith('|')) l = l.slice(1);
+  if (l.endsWith('|')) l = l.slice(0, -1);
+  return l.split('|').map((c) => c.trim());
+}
+function isTableSeparatorRow(line) {
+  const cells = splitTableRow(line);
+  return cells.length > 0 && cells.every((c) => /^:?-{1,}:?$/.test(c));
+}
+function tableColAlign(cell) {
+  if (!cell) return null;
+  const left = cell.startsWith(':');
+  const right = cell.endsWith(':');
+  if (left && right) return 'center';
+  if (right) return 'right';
+  if (left) return 'left';
+  return null;
+}
+
+// Obsidian-style callout icon per `[!type]`. Unrecognized types still
+// render fine — they just fall back to the plain info glyph.
+const CALLOUT_ICONS = {
+  note: IconInfo,
+  info: IconInfo,
+  abstract: IconInfo,
+  summary: IconInfo,
+  tip: IconCheck,
+  hint: IconCheck,
+  success: IconCheck,
+  check: IconCheck,
+  done: IconCheck,
+  question: IconHelp,
+  help: IconHelp,
+  faq: IconHelp,
+  warning: IconAlertTriangle,
+  caution: IconAlertTriangle,
+  attention: IconAlertTriangle,
+  danger: IconAlertTriangle,
+  error: IconAlertTriangle,
+  failure: IconAlertTriangle,
+  bug: IconAlertTriangle,
+  quote: IconInfo,
+  example: IconInfo
+};
+
+// A `> [!type] Title` blockquote — Obsidian's callout syntax. `lines` are
+// the remaining (already `>`-stripped) lines of the same blockquote, which
+// render as nested markdown so lists/links/etc still work inside a callout.
+function Callout({ type, title, lines, handlers, linkIndex, keyBase }) {
+  const Icon = CALLOUT_ICONS[type] || IconInfo;
+  return (
+    <div className={`callout callout-${type}`}>
+      <div className="callout-title">
+        <Icon size={15} className="callout-icon" />
+        <span>{renderInline(title, `${keyBase}t`, handlers, linkIndex)}</span>
+      </div>
+      {lines.length > 0 && <div className="callout-body">{renderMarkdownBlocks(lines.join('\n'), handlers, linkIndex, keyBase)}</div>}
+    </div>
+  );
+}
+
 // `foldState` (optional) enables Obsidian-style heading fold/collapse in
-// reading view: { collapsed: Set<headingId>, onToggle: (headingId) => void }.
+// reading view: { collapsed: Set<headingId>, onToggle: (headingId) => void,
+// collapsedToggles: Set<toggleId>, onToggleToggle: (toggleId) => void }.
 // Headings whose id is in `collapsed` render with their content (down to the
 // next heading of equal-or-shallower level) hidden. Purely a reading-view
 // affordance — the underlying markdown/content is never mutated, so it's
 // safe to leave out entirely (edit mode, or any caller that omits
-// foldState) and get the old unfolded behavior.
+// foldState) and get the old unfolded behavior (toggle blocks default open
+// when there's no state to remember a collapse).
 function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldState = null) {
   const lines = content.split('\n');
   const blocks = [];
   let listBuffer = [];
   let listType = null;
   let codeBuffer = null;
+  let quoteBuffer = [];
   // While set, we're inside a collapsed heading's section: everything is
   // parsed (to keep fence/list state consistent) but nothing is pushed to
   // `blocks`, until a heading at this level or shallower closes it.
   let hiddenUntilLevel = null;
+  // Index of the last line already consumed by a multi-line block (table,
+  // toggle, columns) that scanned ahead — lines up to and including this
+  // index are skipped by the main loop.
+  let skipUntil = -1;
 
   const flushList = () => {
     if (!listBuffer.length) return;
@@ -2140,7 +2302,38 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldSt
     listType = null;
   };
 
+  const flushQuote = () => {
+    if (!quoteBuffer.length) return;
+    const calloutMatch = quoteBuffer[0].match(/^\[!([a-zA-Z]+)\]([+-]?)\s*(.*)$/);
+    if (calloutMatch) {
+      const type = calloutMatch[1].toLowerCase();
+      const titleText = calloutMatch[3].trim() || type.charAt(0).toUpperCase() + type.slice(1);
+      const key = `${keyBase}callout-${blocks.length}-`;
+      blocks.push(
+        <Callout
+          key={key}
+          type={type}
+          title={titleText}
+          lines={quoteBuffer.slice(1)}
+          handlers={handlers}
+          linkIndex={linkIndex}
+          keyBase={key}
+        />
+      );
+    } else {
+      blocks.push(
+        <blockquote key={`${keyBase}q-${blocks.length}`}>
+          {quoteBuffer.map((l, i) => (
+            <p key={i}>{renderInline(l, `${keyBase}q-${blocks.length}-${i}`, handlers, linkIndex)}</p>
+          ))}
+        </blockquote>
+      );
+    }
+    quoteBuffer = [];
+  };
+
   lines.forEach((line, idx) => {
+    if (idx <= skipUntil) return;
     if (codeBuffer !== null) {
       if (/^```/.test(line.trim())) {
         if (hiddenUntilLevel === null) {
@@ -2163,6 +2356,16 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldSt
     const ol = line.match(/^\s*\d+\.\s+(.*)$/);
     const hr = /^(-{3,}|\*{3,})$/.test(line.trim());
     const taskUl = line.match(/^\s*[-*]\s+\[( |x|X)\]\s+(.*)$/);
+    const toggleOpen = line.match(/^\+\+\+\s?(.*)$/);
+    const columnsOpen = line.trim().match(/^:::columns-([234])\s*$/);
+    const isTableStart =
+      !fence &&
+      !heading &&
+      !hr &&
+      line.includes('|') &&
+      line.trim() !== '' &&
+      idx + 1 < lines.length &&
+      isTableSeparatorRow(lines[idx + 1]);
 
     if (heading) {
       const level = Math.min(heading[1].length, 6);
@@ -2175,6 +2378,7 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldSt
         }
       }
       flushList();
+      flushQuote();
       const headingId = heading[2].trim().toLowerCase().replace(/[^a-z0-9]+/g, '-');
       const fullId = `${keyBase}${headingId}`;
       const isCollapsed = !!foldState?.collapsed?.has(fullId);
@@ -2210,11 +2414,117 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldSt
       return;
     }
 
+    if (toggleOpen) {
+      flushList();
+      flushQuote();
+      let j = idx + 1;
+      while (j < lines.length && lines[j].trim() !== '+++') j++;
+      const innerLines = lines.slice(idx + 1, j);
+      const toggleId = `${keyBase}toggle-${idx}`;
+      const isCollapsed = !!foldState?.collapsedToggles?.has(toggleId);
+      blocks.push(
+        <div className={`toggle-block ${isCollapsed ? 'collapsed' : ''}`} key={toggleId}>
+          <div
+            className="toggle-header"
+            onClick={() => foldState?.onToggleToggle?.(toggleId)}
+            role="button"
+            aria-label={isCollapsed ? 'Expand toggle' : 'Collapse toggle'}
+          >
+            <span className="toggle-caret">
+              <IconChevronRight size={12} />
+            </span>
+            <span className="toggle-title">
+              {renderInline(toggleOpen[1] || 'Toggle', `${toggleId}-t`, handlers, linkIndex)}
+            </span>
+          </div>
+          {!isCollapsed && (
+            <div className="toggle-body">{renderMarkdownBlocks(innerLines.join('\n'), handlers, linkIndex, `${toggleId}-`, foldState)}</div>
+          )}
+        </div>
+      );
+      skipUntil = j;
+      return;
+    }
+
+    if (columnsOpen) {
+      flushList();
+      flushQuote();
+      const colCount = parseInt(columnsOpen[1], 10);
+      let j = idx + 1;
+      while (j < lines.length && lines[j].trim() !== ':::') j++;
+      const innerLines = lines.slice(idx + 1, j);
+      const chunks = [];
+      let current = [];
+      innerLines.forEach((l) => {
+        if (l.trim() === ':::column') {
+          chunks.push(current);
+          current = [];
+        } else {
+          current.push(l);
+        }
+      });
+      chunks.push(current);
+      const colsKey = `${keyBase}cols-${idx}`;
+      blocks.push(
+        <div className="md-columns" style={{ '--col-count': colCount }} key={colsKey}>
+          {chunks.map((chunkLines, ci) => (
+            <div className="md-column" key={`${colsKey}-${ci}`}>
+              {renderMarkdownBlocks(chunkLines.join('\n'), handlers, linkIndex, `${colsKey}-${ci}-`, foldState)}
+            </div>
+          ))}
+        </div>
+      );
+      skipUntil = j;
+      return;
+    }
+
+    if (isTableStart) {
+      flushList();
+      flushQuote();
+      const headerCells = splitTableRow(line);
+      const aligns = splitTableRow(lines[idx + 1]).map(tableColAlign);
+      let j = idx + 2;
+      const bodyRows = [];
+      while (j < lines.length && lines[j].includes('|') && lines[j].trim() !== '') {
+        bodyRows.push(splitTableRow(lines[j]));
+        j++;
+      }
+      const tKey = `${keyBase}table-${idx}`;
+      blocks.push(
+        <table className="md-table" key={tKey}>
+          <thead>
+            <tr>
+              {headerCells.map((c, ci) => (
+                <th key={ci} style={aligns[ci] ? { textAlign: aligns[ci] } : undefined}>
+                  {renderInline(c, `${tKey}-h-${ci}`, handlers, linkIndex)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {bodyRows.map((row, ri) => (
+              <tr key={ri}>
+                {row.map((c, ci) => (
+                  <td key={ci} style={aligns[ci] ? { textAlign: aligns[ci] } : undefined}>
+                    {renderInline(c, `${tKey}-${ri}-${ci}`, handlers, linkIndex)}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      );
+      skipUntil = j - 1;
+      return;
+    }
+
     if (fence) {
       flushList();
+      flushQuote();
       codeBuffer = [];
     } else if (taskUl) {
       flushList();
+      flushQuote();
       const checked = taskUl[1].toLowerCase() === 'x';
       blocks.push(
         <div className="task-line" key={`${keyBase}task-${idx}`}>
@@ -2224,24 +2534,30 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldSt
       );
     } else if (hr) {
       flushList();
+      flushQuote();
       blocks.push(<hr key={`${keyBase}hr-${idx}`} />);
     } else if (quote) {
       flushList();
-      blocks.push(<blockquote key={`${keyBase}q-${idx}`}>{renderInline(quote[1], `${keyBase}q-${idx}`, handlers, linkIndex)}</blockquote>);
+      quoteBuffer.push(quote[1]);
     } else if (ul) {
+      flushQuote();
       listType = 'ul';
       listBuffer.push(ul[1]);
     } else if (ol) {
+      flushQuote();
       listType = 'ol';
       listBuffer.push(ol[1]);
     } else if (line.trim() === '') {
       flushList();
+      flushQuote();
     } else {
       flushList();
+      flushQuote();
       blocks.push(<p key={`${keyBase}p-${idx}`}>{renderInline(line, `${keyBase}p-${idx}`, handlers, linkIndex)}</p>);
     }
   });
   flushList();
+  flushQuote();
   if (codeBuffer !== null && hiddenUntilLevel === null) {
     blocks.push(
       <pre key={`${keyBase}code-end`}>
@@ -2898,8 +3214,9 @@ function TreeNode({
   const handleDragEnd = () => setDragState({ draggingId: null, overId: null });
 
   if (node.type === 'file') {
-    const isImage = node.kind === 'image';
+    const isAsset = node.kind !== 'note';
     const isBookmarked = bookmarks.has(node.id);
+    const AssetIcon = ASSET_KIND_ICONS[node.kind] || null;
     return (
       <div className={`tree-row ${isDragOver ? 'drag-over' : ''}`}>
         <button
@@ -2908,10 +3225,11 @@ function TreeNode({
           draggable
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
-          onClick={(e) => (isImage ? onOpenImage(node) : onOpenFile(node.id, e))}
+          onClick={(e) => (isAsset ? onOpenImage(node) : onOpenFile(node.id, e))}
         >
           {isBookmarked && <IconStarFilled className="bookmark-dot" size={11} />}
-          <span className="tree-label">{isImage ? node.name : node.name.replace(/\.md$/i, '')}</span>
+          {AssetIcon && <AssetIcon className="tree-kind-icon" size={13} />}
+          <span className="tree-label">{isAsset ? node.name : node.name.replace(/\.md$/i, '')}</span>
         </button>
         <TreeItemMenu
           isFolder={false}
@@ -3303,15 +3621,15 @@ const BookmarksPanel = React.memo(function BookmarksPanel({ bookmarks, filesMeta
       <div className="side-panel-body">
         {items.length === 0 && <p className="muted small empty-hint">Star a note or image to bookmark it.</p>}
         {items.map((f) => {
-          const isImage = f.kind === 'image';
+          const isAsset = f.kind !== 'note';
           return (
             <div className="tree-row" key={f.id}>
               <button
                 className="tree-item tree-file"
-                onClick={() => (isImage ? onOpenImage(f) : onOpenFile(f.id))}
+                onClick={() => (isAsset ? onOpenImage(f) : onOpenFile(f.id))}
               >
                 <IconStarFilled size={12} className="bookmark-dot" />
-                <span className="tree-label">{isImage ? f.name : f.name.replace(/\.md$/i, '')}</span>
+                <span className="tree-label">{isAsset ? f.name : f.name.replace(/\.md$/i, '')}</span>
               </button>
               <button className="tree-menu-btn" title="Remove bookmark" onClick={() => onToggleBookmark(f.id)}>
                 <IconX size={13} />
@@ -3549,7 +3867,7 @@ function Breadcrumb({ file, linkIndex }) {
   if (!file) return <span className="breadcrumb-empty">No file open</span>;
   const rec = linkIndex.records.find((r) => r.id === file.id);
   const dir = rec ? rec.dir : '';
-  const label = file.kind === 'image' || isImageName(file.name) ? file.name : file.name.replace(/\.md$/i, '');
+  const label = file.kind !== 'note' ? file.name : file.name.replace(/\.md$/i, '');
   return (
     <span className="pane-breadcrumb">
       {dir && <span className="breadcrumb-dir">{dir.replace(/\//g, ' / ')} / </span>}
@@ -3591,12 +3909,12 @@ function PaneHeader({
         <Breadcrumb file={file} linkIndex={linkIndex} />
       </div>
       <div className="pane-header-actions">
-        {file && file.kind !== 'image' && (
+        {file && file.kind === 'note' && (
           <button className="icon-btn" onClick={onToggleBookmark} title={isBookmarked ? 'Remove bookmark' : 'Bookmark note'}>
             {isBookmarked ? <IconStarFilled size={15} /> : <IconStar size={15} />}
           </button>
         )}
-        {file && file.kind !== 'image' && (
+        {file && file.kind === 'note' && (
           <button className="icon-btn" onClick={onToggleMode} title={mode === 'edit' ? 'Switch to reading view' : 'Switch to editing view'}>
             {mode === 'edit' ? <IconEye size={15} /> : <IconEdit size={15} />}
           </button>
@@ -3935,6 +4253,14 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
     // Reset synchronously on file change (avoids a stale-collapse flash).
     if (collapsedHeadings.size) setCollapsedHeadings(new Set());
   }
+  // Toggle-block collapse state (`+++ Title` ... `+++`), same per-note reset
+  // rule and same "absent = expanded" convention as heading folds above.
+  const [collapsedToggles, setCollapsedToggles] = useState(() => new Set());
+  const collapsedTogglesFileRef = useRef(file?.id);
+  if (collapsedTogglesFileRef.current !== file?.id) {
+    collapsedTogglesFileRef.current = file?.id;
+    if (collapsedToggles.size) setCollapsedToggles(new Set());
+  }
   const foldState = useMemo(
     () => ({
       collapsed: collapsedHeadings,
@@ -3944,9 +4270,17 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
           if (next.has(headingId)) next.delete(headingId);
           else next.add(headingId);
           return next;
+        }),
+      collapsedToggles,
+      onToggleToggle: (toggleId) =>
+        setCollapsedToggles((prev) => {
+          const next = new Set(prev);
+          if (next.has(toggleId)) next.delete(toggleId);
+          else next.add(toggleId);
+          return next;
         })
     }),
-    [collapsedHeadings]
+    [collapsedHeadings, collapsedToggles]
   );
   const undoCtl = useEditorUndo(content);
   const wrappedOnChange = useCallback(
@@ -4127,8 +4461,8 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
     );
   }
 
-  if (file.kind === 'image') {
-    return <EmbeddedImagePane token={handlers.token} file={file} />;
+  if (file.kind !== 'note') {
+    return <AssetPane token={handlers.token} file={file} />;
   }
 
   const { properties, body } = parseFrontmatter(content);
@@ -4212,7 +4546,7 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
                 handlers.onEditorSelectionChange?.(null);
               }}
               spellCheck={false}
-              placeholder="Start writing… use [[Note Name]] to link, #tag to tag, or [[image.png]] for images."
+              placeholder="Start writing… [[Note Name]] to link, #tag to tag, [[file.png]]/[[clip.mp4]]/[[song.mp3]] to embed, > [!tip] for callouts, | tables |, +++ toggles +++, :::columns-2 for columns."
             />
             {autocomplete.suggestion && (
               <ul className="autocomplete-menu" style={{ top: autocomplete.suggestion.top, left: autocomplete.suggestion.left }}>
@@ -4268,6 +4602,80 @@ function EmbeddedImagePane({ token, file }) {
   );
 }
 
+function formatFileSize(bytes) {
+  const n = Number(bytes);
+  if (!n || Number.isNaN(n)) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+// Reading-view / tab-content pane for any non-note file, dispatching on
+// kind. Video and audio get a real <video>/<audio> player; anything else
+// (pdf, zip, docx, ...) gets a download prompt — Drive bytes are only ever
+// pulled on demand here, same rule as images.
+function AssetPane({ token, file }) {
+  if (file.kind === 'image') return <EmbeddedImagePane token={token} file={file} />;
+  const { url, error } = useDriveImageUrl(token, file.id);
+  return (
+    <div className="editor-preview image-pane">
+      <h1 className="preview-title">{file.name}</h1>
+      {error && <p className="muted small">{error}</p>}
+      {!error && !url && <p className="muted small">Loading…</p>}
+      {url && file.kind === 'video' && (
+        <video src={url} controls className="asset-pane-video" />
+      )}
+      {url && file.kind === 'audio' && (
+        <audio src={url} controls className="asset-pane-audio" />
+      )}
+      {url && file.kind === 'file' && (
+        <div className="asset-pane-file">
+          <IconFile size={40} />
+          <p className="muted small">{formatFileSize(file.size)}</p>
+          <a className="asset-download-btn" href={url} download={file.name}>
+            <IconDownload size={14} /> Download
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Inline `![[video.mp4]]` embed within note content — fetches the blob only
+// once the note containing it is actually being read (same on-demand rule
+// as ImageEmbed below).
+function VideoEmbed({ token, fileId, name }) {
+  const { url, error } = useDriveImageUrl(token, fileId);
+  if (error) return <span className="wikilink wikilink-missing-image">{name}</span>;
+  if (!url) return <span className="muted small embed-loading">Loading {name}…</span>;
+  return <video src={url} controls className="video-embed" />;
+}
+
+// Inline `![[audio.mp3]]` embed.
+function AudioEmbed({ token, fileId, name }) {
+  const { url, error } = useDriveImageUrl(token, fileId);
+  if (error) return <span className="wikilink wikilink-missing-image">{name}</span>;
+  if (!url) return <span className="muted small embed-loading">Loading {name}…</span>;
+  return (
+    <span className="audio-embed-wrap">
+      <audio src={url} controls className="audio-embed" />
+      <span className="audio-embed-name">{name}</span>
+    </span>
+  );
+}
+
+// Inline chip for any other linked file (pdf, zip, docx, ...) — click opens
+// it in a new tab / downloads it, same as the sidebar's file rows.
+function FileChip({ name, label, onOpen }) {
+  return (
+    <span className="file-chip" onClick={onOpen} title={`Open ${name}`}>
+      <IconFile size={13} />
+      {label || name}
+    </span>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Status bar — global footer reflecting the currently focused pane's file:
 // word count, character count, backlink count, property count, plus a
@@ -4289,7 +4697,7 @@ function StatusBar({ file, content, backlinkCount, syncing, syncError, dirty, sa
             <span>{properties.length} propert{properties.length === 1 ? 'y' : 'ies'}</span>
             <span>{hasSelection ? 'Selected: ' : ''}{words} word{words === 1 ? '' : 's'}</span>
             <span>{chars} character{chars === 1 ? '' : 's'}</span>
-            {file.kind !== 'image' && (
+            {file.kind === 'note' && (
               <span className="status-save-state" title={saving ? 'Saving…' : dirty ? 'Unsaved changes' : 'Saved'}>
                 {saving ? <IconLoader size={12} /> : dirty ? null : <IconCheck size={12} />}
               </span>
@@ -4913,7 +5321,7 @@ export default function App() {
       if (!fileId || !token) return;
       if (buffers[fileId] || loadingFileIds.current.has(fileId)) return;
       const meta = sync.filesMeta.find((f) => f.id === fileId);
-      if (!meta || meta.kind === 'image') return;
+      if (!meta || meta.kind !== 'note') return;
       loadingFileIds.current.add(fileId);
       setBuffers((prev) => ({ ...prev, [fileId]: { content: '', dirty: false, saving: false, loading: true } }));
       driveGetFileContent(token, fileId)
@@ -5251,7 +5659,7 @@ export default function App() {
       results.forEach((r, i) => {
         if (r.ok) {
           const created = r.value;
-          const kind = isImageName(created.name) || IMAGE_MIME_TYPES.includes(created.mimeType) ? 'image' : 'note';
+          const kind = classifyKind(created.name, created.mimeType);
           sync.registerNewFile({
             id: created.id,
             name: created.name,
@@ -5290,17 +5698,17 @@ export default function App() {
 
   const handleRenameNode = useCallback(
     async (node) => {
-      const isImage = node.type === 'file' && node.kind === 'image';
-      const currentDisplayName = node.type === 'file' && !isImage ? node.name.replace(/\.md$/i, '') : node.name;
+      const isAsset = node.type === 'file' && node.kind !== 'note';
+      const currentDisplayName = node.type === 'file' && !isAsset ? node.name.replace(/\.md$/i, '') : node.name;
       const input = window.prompt('Rename to:', currentDisplayName);
       if (!input || !input.trim() || input.trim() === currentDisplayName) return;
 
       let newName;
       if (node.type !== 'file') {
         newName = input.trim();
-      } else if (isImage) {
+      } else if (isAsset) {
         const typed = input.trim();
-        newName = fileExtension(typed) ? typed : `${typed}.${fileExtension(node.name) || 'png'}`;
+        newName = fileExtension(typed) ? typed : `${typed}.${fileExtension(node.name) || 'bin'}`;
       } else {
         newName = input.trim().toLowerCase().endsWith('.md') ? input.trim() : `${input.trim()}.md`;
       }
@@ -5319,13 +5727,13 @@ export default function App() {
       if (!file) return;
       const trimmed = (newDisplayTitle || '').trim();
       if (!trimmed) return;
-      const isImage = file.kind === 'image';
-      const currentDisplayName = isImage ? file.name : file.name.replace(/\.md$/i, '');
+      const isAsset = file.kind !== 'note';
+      const currentDisplayName = isAsset ? file.name : file.name.replace(/\.md$/i, '');
       if (trimmed === currentDisplayName) return;
-      const newName = isImage
+      const newName = isAsset
         ? fileExtension(trimmed)
           ? trimmed
-          : `${trimmed}.${fileExtension(file.name) || 'png'}`
+          : `${trimmed}.${fileExtension(file.name) || 'bin'}`
         : trimmed.toLowerCase().endsWith('.md')
           ? trimmed
           : `${trimmed}.md`;
@@ -5336,8 +5744,8 @@ export default function App() {
 
   const handleDeleteNode = useCallback(
     async (node) => {
-      const isImage = node.type === 'file' && node.kind === 'image';
-      const label = node.type === 'file' && !isImage ? node.name.replace(/\.md$/i, '') : node.name;
+      const isAsset = node.type === 'file' && node.kind !== 'note';
+      const label = node.type === 'file' && !isAsset ? node.name.replace(/\.md$/i, '') : node.name;
       const warning =
         node.type === 'folder'
           ? `Delete folder "${label}" and everything inside it? This moves it to Drive's trash.`
@@ -5412,6 +5820,7 @@ export default function App() {
       onOpenById: (id) => openFileInPane(activePaneId, id),
       onCreateOrOpenByName: (name) => openNoteByName(name),
       onOpenImage: (file) => openImageInNewTab(token, file),
+      onOpenAsset: (file) => openImageInNewTab(token, file),
       onRenameFile: (fileId, newDisplayName) => handleInlineRenameFile(fileId, newDisplayName),
       onOpenTag: (tag) => {
         setActiveSideView('search');
@@ -5433,7 +5842,7 @@ export default function App() {
   const handlePaletteFilePick = useCallback(
     (file, opts) => {
       setPaletteMode(null);
-      if (file.kind === 'image') {
+      if (file.kind !== 'note') {
         openImageInNewTab(token, file);
         return;
       }
