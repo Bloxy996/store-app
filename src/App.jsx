@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 /* ============================================================================
@@ -3786,6 +3786,27 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
   );
   const autocomplete = useLinkAutocomplete(textareaRef, wrappedOnChange, linkIndex, phantomRecords);
 
+  // highlightMarkdownSource re-parses and re-renders the syntax highlighting
+  // for the ENTIRE note on every call, and it was being called directly in
+  // JSX with the live `content` — meaning every single keystroke, on a note
+  // of any real length, forced a synchronous full-note re-highlight before
+  // the browser could paint that keystroke. On a fast desktop that's just
+  // some jank; on a phone it's slow enough to block the main thread past
+  // the point where the OS's own IME/autocorrect expects a response, which
+  // is what turns into dropped or garbled characters — "typing is broken",
+  // not just "typing is slow", even though they share one cause.
+  //
+  // `useDeferredValue` decouples the two: the real (invisible) textarea
+  // above is uncontrolled-in-spirit here — its value comes from the
+  // browser's own input handling via onChange, so it updates instantly no
+  // matter what — while this deferred copy tells React it's fine for the
+  // highlight overlay underneath to catch up a moment later, at low
+  // priority, once the browser has room to breathe. `useMemo` on top makes
+  // sure the highlight itself isn't redone on renders where the deferred
+  // value hasn't actually changed yet (e.g. a pure scroll).
+  const deferredContent = useDeferredValue(content);
+  const highlightedSource = useMemo(() => highlightMarkdownSource(deferredContent), [deferredContent]);
+
   // Keeps .editor-highlight pixel-aligned with the real textarea — see the
   // long comment on .editor-highlight in App.css for why this mirrors
   // scrollTop directly onto a real scrolling element rather than using a
@@ -3840,7 +3861,7 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
           <NoteTitleField file={file} onRename={handlers.onRenameFile} />
           <div className="editor-textarea-source">
             <div ref={highlightRef} className="editor-highlight" aria-hidden="true">
-              {highlightMarkdownSource(content)}
+              {highlightedSource}
             </div>
             <textarea
               ref={textareaRef}
@@ -4116,23 +4137,21 @@ function LeafPane({
         onCloseOthers={(tabId) => onCloseOthers(leaf.id, tabId)}
         onCloseAll={() => onCloseAll(leaf.id)}
       />
-      {activeTab && (
-        <PaneHeader
-          leaf={leaf}
-          activeTab={activeTab}
-          file={file}
-          linkIndex={linkIndex}
-          onBack={() => onBack(leaf.id)}
-          onForward={() => onForward(leaf.id)}
-          onToggleMode={() => onToggleMode(leaf.id, activeTab.id)}
-          onSplit={(direction) => onSplit(leaf.id, direction)}
-          onClosePane={() => onClosePane(leaf.id)}
-          canClosePane={canClosePane}
-          isBookmarked={file ? bookmarks.has(file.id) : false}
-          onToggleBookmark={() => file && onToggleBookmark(file.id)}
-          onToggleDock={onToggleDock}
-        />
-      )}
+      <PaneHeader
+        leaf={leaf}
+        activeTab={activeTab}
+        file={file}
+        linkIndex={linkIndex}
+        onBack={() => onBack(leaf.id)}
+        onForward={() => onForward(leaf.id)}
+        onToggleMode={() => activeTab && onToggleMode(leaf.id, activeTab.id)}
+        onSplit={(direction) => onSplit(leaf.id, direction)}
+        onClosePane={() => onClosePane(leaf.id)}
+        canClosePane={canClosePane}
+        isBookmarked={file ? bookmarks.has(file.id) : false}
+        onToggleBookmark={() => file && onToggleBookmark(file.id)}
+        onToggleDock={onToggleDock}
+      />
       <div className="pane-content">
         <EditorContent
           key={file ? file.id : 'empty'}
