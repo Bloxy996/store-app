@@ -1104,24 +1104,34 @@ button:disabled {
 .syn-h {
   font-weight: 700;
   color: var(--text-normal);
-  /* Pinned to the plain-text line height (not scaled with the bigger
-     font-size below) so this row doesn't grow taller than the same row in
-     the real textarea — see --editor-line-px above. */
+  /* Deliberately does NOT change font-size (see syn-h1..h6 below) or
+     line-height here. The overlay must wrap at the exact same character
+     position as the real (invisible) textarea underneath it for every
+     single line, not just match its total height — a bigger font-size
+     fits fewer characters per line, so a heading long enough to soft-wrap
+     at that bigger size can still fit on one line in the textarea's plain
+     15px text. From that line down, the overlay and the real caret
+     position permanently diverge by however many extra wrapped lines the
+     heading introduced — invisible at first, compounding with every such
+     heading, and only obvious once you've scrolled past a few of them in
+     a longer note (what you're typing shows up higher than the actual
+     caret). Keeping every line, headings included, at the same font-size
+     as the real textarea is what guarantees they can never wrap
+     differently. Hierarchy is conveyed with weight/color only.
+     line-height stays pinned to --editor-line-px for the same reason. */
   line-height: var(--editor-line-px);
 }
 .syn-h1 {
-  font-size: 1.55em;
+  letter-spacing: 0.01em;
 }
 .syn-h2 {
-  font-size: 1.35em;
+  color: var(--text-normal);
 }
-.syn-h3 {
-  font-size: 1.2em;
-}
+.syn-h3,
 .syn-h4,
 .syn-h5,
 .syn-h6 {
-  font-size: 1.08em;
+  color: var(--text-muted);
 }
 .syn-quote {
   color: var(--text-muted);
