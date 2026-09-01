@@ -3786,6 +3786,37 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
   );
   const autocomplete = useLinkAutocomplete(textareaRef, wrappedOnChange, linkIndex, phantomRecords);
 
+  // Keeps .editor-highlight pixel-aligned with the real textarea — see the
+  // long comment on .editor-highlight in App.css for why this can't just be
+  // "give both the same overflow-y and mirror scrollTop" (that was the
+  // previous approach, and the actual bug the user hit). This is the single
+  // place that alignment is computed, called from every event that can
+  // change either the textarea's scroll position or its content-box width.
+  const syncEditorOverlay = useCallback(() => {
+    const ta = textareaRef.current;
+    const hl = highlightRef.current;
+    if (!ta || !hl) return;
+    const scrollbarWidth = ta.offsetWidth - ta.clientWidth;
+    hl.style.right = `${scrollbarWidth}px`;
+    hl.style.transform = `translateY(${-ta.scrollTop}px)`;
+  }, []);
+
+  useLayoutEffect(() => {
+    syncEditorOverlay();
+  }, [content, mode, syncEditorOverlay]);
+
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta || typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(syncEditorOverlay);
+    ro.observe(ta);
+    window.addEventListener('resize', syncEditorOverlay);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', syncEditorOverlay);
+    };
+  }, [syncEditorOverlay]);
+
   if (!file) {
     return (
       <div className="editor-empty">
@@ -3818,12 +3849,7 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
                 wrappedOnChange(e.target.value);
                 autocomplete.updateFromCaret();
               }}
-              onScroll={(e) => {
-                if (highlightRef.current) {
-                  highlightRef.current.scrollTop = e.target.scrollTop;
-                  highlightRef.current.scrollLeft = e.target.scrollLeft;
-                }
-              }}
+              onScroll={syncEditorOverlay}
               onKeyUp={(e) => {
                 if (!['ArrowUp', 'ArrowDown', 'Enter', 'Tab', 'Escape'].includes(e.key)) autocomplete.updateFromCaret();
               }}
