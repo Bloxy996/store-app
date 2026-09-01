@@ -1998,6 +1998,7 @@ button:disabled {
   }
 
   .editor-textarea,
+  .editor-highlight,
   .editor-preview {
     padding-left: 18px;
     padding-right: 18px;
