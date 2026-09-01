@@ -50,6 +50,24 @@ body,
 #root {
   height: 100%;
   margin: 0;
+  /* Mobile Safari and Chrome/Android silently boost the *rendered*
+     font-size of text past its declared CSS value on narrow viewports
+     ("text autosizing" / font boosting), to make small text more
+     readable — and critically, the heuristic that decides how much to
+     boost can land differently on a <textarea> than on a plain <div>
+     even with byte-identical font-size/width/padding, because form
+     controls aren't always sized by the same pass as block content. The
+     editor's syntax-highlight overlay only stays character-aligned with
+     the real (invisible) textarea underneath it if both render text at
+     literally the same size — this is the same category of wrap-
+     divergence bug as the heading font-size one fixed earlier, just
+     triggered by the browser itself rather than by our own CSS, which is
+     why it only ever showed up on mobile. Setting this to 100% turns the
+     boosting off entirely, so every element renders at exactly the
+     font-size it's declared — desktop browsers ignore the property, so
+     this is a no-op there. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 body {
