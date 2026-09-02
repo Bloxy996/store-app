@@ -24,7 +24,7 @@ export default defineConfig({
       injectRegister: 'auto',
       includeAssets: ['icon-192.png', 'icon-512.png', 'icon-512-maskable.png', 'apple-touch-icon.png'],
       manifest: {
-        name: 'Vault — Notes on Drive',
+        name: 'Vault',
         short_name: 'Vault',
         description: 'A minimalist markdown notebook that reads and writes directly to your Google Drive. No local note storage.',
         theme_color: '#1a1a1e',
