@@ -4877,23 +4877,42 @@ function PaneHeader({
 // Tab / Shift-Tab: indent-outdent whole lines touched by the selection.
 // Ported 1:1 from the old textarea implementation's line-based indent so
 // list nesting behaves identically.
+function cmLeadingWhitespaceLen(text) {
+  const m = /^[ \t]*/.exec(text);
+  return m[0].length;
+}
+
 function cmIndentSelection(view, outdent) {
   const { state } = view;
-  const changes = [];
   const seenLines = new Set();
   for (const range of state.selection.ranges) {
     const startLine = state.doc.lineAt(range.from).number;
     const endLine = state.doc.lineAt(range.to).number;
-    for (let ln = startLine; ln <= endLine; ln++) {
-      if (seenLines.has(ln)) continue;
-      seenLines.add(ln);
+    for (let ln = startLine; ln <= endLine; ln++) seenLines.add(ln);
+
+    // Carry along any lines "wrapped" under the first touched line — a
+    // list item's nested children or a paragraph's continuation lines —
+    // so indenting/outdenting a parent line moves its whole subtree with
+    // it instead of leaving deeper lines behind at their old indent.
+    // These are the subsequent lines whose leading whitespace is deeper
+    // than the anchor line's, stopping at the first blank line or the
+    // first line back at (or above) the anchor's own indent.
+    const anchorIndent = cmLeadingWhitespaceLen(state.doc.line(startLine).text);
+    for (let ln = endLine + 1; ln <= state.doc.lines; ln++) {
       const line = state.doc.line(ln);
-      if (outdent) {
-        const m = /^( {1,2}|\t)/.exec(line.text);
-        if (m) changes.push({ from: line.from, to: line.from + m[0].length, insert: '' });
-      } else {
-        changes.push({ from: line.from, to: line.from, insert: '  ' });
-      }
+      if (!line.text.trim()) break;
+      if (cmLeadingWhitespaceLen(line.text) <= anchorIndent) break;
+      seenLines.add(ln);
+    }
+  }
+  const changes = [];
+  for (const ln of Array.from(seenLines).sort((a, b) => a - b)) {
+    const line = state.doc.line(ln);
+    if (outdent) {
+      const m = /^( {1,2}|\t)/.exec(line.text);
+      if (m) changes.push({ from: line.from, to: line.from + m[0].length, insert: '' });
+    } else {
+      changes.push({ from: line.from, to: line.from, insert: '  ' });
     }
   }
   if (changes.length) view.dispatch({ changes, scrollIntoView: true });
@@ -4967,11 +4986,38 @@ function buildInlinePreviewPlugin() {
       out.push({ from: line.from, to: line.from + quote[0].length, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
     }
 
+    // Thematic break (---, ***, ___) — dim the whole rule line, same
+    // treatment as a heading's leading '#' markers.
+    const hr = /^ {0,3}([-*_])(?: *\1){2,} *$/.exec(text);
+    if (hr) {
+      out.push({ from: line.from, to: line.from + text.length, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+    }
+
+    // Code fence delimiter (``` or ~~~) — dim just the backticks/tildes,
+    // same as heading '#'s, leaving any language tag its normal color.
+    const fence = /^( {0,3})(`{3,}|~{3,})/.exec(text);
+    if (fence) {
+      const markerFrom = line.from + fence[1].length;
+      const markerTo = markerFrom + fence[2].length;
+      out.push({ from: markerFrom, to: markerTo, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+    }
+
     // Task checkbox — always live, regardless of cursor line.
     const task = /^(\s*(?:[-*+]\s+))\[( |x|X)\]/.exec(text);
     if (task) {
       const boxFrom = line.from + task[1].length;
       out.push({ from: boxFrom, to: boxFrom + 3, deco: Decoration.replace({ widget: new TaskCheckboxWidget(/[xX]/.test(task[2])) }) });
+    }
+
+    // Unordered list marker (-, *, +) — dim it like other syntax markers.
+    // Skipped for thematic-break lines, which already matched the rule
+    // above and aren't really list items.
+    if (!hr) {
+      const listMarker = /^(\s*)([-*+])(\s+)/.exec(text);
+      if (listMarker) {
+        const markerFrom = line.from + listMarker[1].length;
+        out.push({ from: markerFrom, to: markerFrom + 1, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+      }
     }
 
     // Wikilinks / tags / md-links / bold / italic / etc. Hide marker chars
@@ -8607,10 +8653,22 @@ const HELP_MARKDOWN = [
   { syntax: ':::columns-2\\n…\\n:::column\\n…\\n:::', desc: 'Side-by-side columns. Use columns-2, columns-3, or columns-4, and separate columns with a line containing only :::column.' },
   { syntax: ':::tabs\\n:::tab First\\n…\\n:::tab Second\\n…\\n:::', desc: 'A paginated tab block, like a Notion tab widget. Click a tab to switch pages, double-click a tab to rename it, use the × to delete it, and the + to add a new one — all directly from reading view.' },
   { syntax: '- [ ] / - [x]', desc: 'Task checkboxes.' },
-  { syntax: '---\\nkey: value\\n---', desc: 'Frontmatter at the top of a note — shown as a Properties panel, and matched by [key] / [key:value] in search.' }
+  { syntax: '---\\nkey: value\\n---', desc: 'Frontmatter at the top of a note — shown as a Properties panel, and matched by [key] / [key:value] in search.' },
+  { syntax: '```query\\nTABLE ...\\n```', desc: 'A live query block. See "Query engine" under Features for the query language.' }
 ];
 
 const HELP_FEATURES = [
+  {
+    title: 'Query engine',
+    desc:
+      'A ```query (or ```dataview) fenced code block runs a small Dataview-style query over the vault and renders live, in both reading view and the editor. ' +
+      'Every note is a "page": its frontmatter properties, any inline `key:: value` fields in its body, plus a reserved file.* namespace (file.name, file.path, file.folder, file.link, file.tags, file.ctime, file.mtime). ' +
+      'Start the block with TABLE [field, field2, …], LIST, or TASK, then add optional FROM/WHERE/SORT/LIMIT lines. ' +
+      'FROM filters which notes to consider by #tag or "folder", combined with AND / OR / - (negation). ' +
+      'WHERE filters by field comparisons: =, !=, <, <=, >, >=, contains(), exists(). ' +
+      'SORT takes one or more "field ASC|DESC" comparisons, and LIMIT caps the number of rows. ' +
+      'Example:\n```query\nTABLE status, due\nFROM #project\nWHERE status != "done"\nSORT due ASC\nLIMIT 10\n```'
+  },
   { title: 'Tabs & panes', desc: 'Every note, database, or file opens in a tab. Split a pane right or down from the pane header to view two things side by side; drag the divider to resize.' },
   { title: 'Reading vs. editing view', desc: 'Toggle with the eye icon in a note\'s pane header. Editing view keeps the raw markdown fully editable while still styling it — same fonts and sizes as reading view, just with the syntax characters dimmed instead of hidden.' },
   { title: 'Backlinks', desc: 'Every note tracks what links to it. Linked/unlinked mentions show at the bottom of reading view.' },
