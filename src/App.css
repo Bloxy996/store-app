@@ -1159,6 +1159,7 @@ button:disabled {
   padding: 14px clamp(20px, 8vw, 120px) 28px;
   color: var(--text-normal);
   caret-color: var(--text-muted);
+  font-family: var(--font-mono);
 }
 .cm-editor-host .cm-content {
   padding: 0;
@@ -1211,7 +1212,7 @@ button:disabled {
   font-style: italic;
 }
 .cm-inline-code {
-  color: #e3b8ac;
+  color: var(--accent);
   background: var(--bg-2);
   border-radius: 3px;
   font-family: var(--font-mono);
@@ -1482,6 +1483,7 @@ button:disabled {
 }
 .help-row-desc {
   color: var(--text-muted);
+  white-space: pre-line;
 }
 
 /* ---------------------------------------------------------------------------
@@ -1689,11 +1691,11 @@ button:disabled {
   vertical-align: middle;
   cursor: pointer;
   color: var(--text-faint);
-  transform: rotate(90deg);
+  transform: rotate(0deg);
   transition: transform 0.1s ease;
 }
 .heading-fold-toggle.collapsed {
-  transform: rotate(0deg);
+  transform: rotate(-90deg);
 }
 .heading-fold-toggle:hover {
   color: var(--text-muted);
