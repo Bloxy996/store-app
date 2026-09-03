@@ -1,5 +1,10 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { createRoot } from 'react-dom/client';
+import { EditorState, RangeSetBuilder } from '@codemirror/state';
+import { EditorView, Decoration, WidgetType, keymap, drawSelection, ViewPlugin, placeholder as cmPlaceholder } from '@codemirror/view';
+import { defaultKeymap, history, historyKeymap, undo as cmUndo, redo as cmRedo } from '@codemirror/commands';
+import { autocompletion, completionKeymap } from '@codemirror/autocomplete';
 
 /* ============================================================================
  * VAULT — a markdown notebook that reads/writes .md files directly to and
@@ -84,6 +89,17 @@ const VIDEO_MIME_TYPES = ['video/mp4', 'video/webm', 'video/ogg', 'video/quickti
 const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'ogg', 'oga', 'm4a', 'flac', 'aac']);
 const AUDIO_MIME_TYPES = ['audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/mp4', 'audio/flac', 'audio/aac', 'audio/x-m4a'];
 const NOTE_EXTENSIONS = new Set(['md', 'markdown', 'txt', '']);
+// Databases (Notion-style tables) are stored as JSON, one object per file,
+// under their own extension so classifyKind can tell them apart from a
+// plain note at a glance. Content still round-trips through the exact same
+// "text file on Drive, debounced-save" pipeline notes use — only the shape
+// of the JSON and the pane that renders it differ.
+const DATABASE_EXTENSIONS = new Set(['base']);
+// Canvas boards (Obsidian-style infinite canvas) are stored the same way
+// databases are — JSON, one object per file — under their own extension so
+// classifyKind can tell them apart. See the Canvas section below (search
+// "CANVAS BOARD") for the node/edge schema and the CanvasView renderer.
+const CANVAS_EXTENSIONS = new Set(['canvas']);
 
 function fileExtension(name) {
   const m = /\.([a-z0-9]+)$/i.exec(name || '');
@@ -118,8 +134,24 @@ function classifyKind(name, mimeType) {
   if (isImageName(name) || IMAGE_MIME_TYPES.includes(mimeType)) return 'image';
   if (isVideoName(name) || VIDEO_MIME_TYPES.includes(mimeType)) return 'video';
   if (isAudioName(name) || AUDIO_MIME_TYPES.includes(mimeType)) return 'audio';
+  if (DATABASE_EXTENSIONS.has(fileExtension(name))) return 'database';
+  if (CANVAS_EXTENSIONS.has(fileExtension(name))) return 'canvas';
   if (NOTE_EXTENSIONS.has(fileExtension(name)) || mimeType === 'text/markdown' || mimeType === 'text/plain') return 'note';
   return 'file';
+}
+
+// Kinds that open in the normal tabbed editor pane (vs. the standalone
+// image/asset viewer). Notes, databases, and canvases are all "pages" —
+// they get a tab, a title field, and live in the pane tree like any note.
+function opensInEditorPane(kind) {
+  return kind === 'note' || kind === 'database' || kind === 'canvas';
+}
+// File extension to use when a "page" kind is created or renamed without
+// one — mirrors how notes always end up ".md".
+function extensionForKind(kind) {
+  if (kind === 'database') return 'base';
+  if (kind === 'canvas') return 'canvas';
+  return 'md';
 }
 
 // ---------------------------------------------------------------------------
@@ -319,6 +351,596 @@ function extractTags(content) {
   return Array.from(tags);
 }
 
+// ===========================================================================
+// Frontmatter query engine — a small Dataview-style layer over the vault.
+//
+// Every note becomes a "page" object: its YAML frontmatter properties, plus
+// any `key:: value` inline fields found in the body (the other real Dataview
+// convention — this is what actually makes frontmatter *queryable* the way
+// the person asked for, since most notes put ad hoc facts inline rather
+// than in the frontmatter block), plus a reserved `file.*` namespace
+// (name/path/folder/link/tags/ctime/mtime). A ```query fenced code block
+// (```query or ```dataview, either works) is parsed as a small query
+// language — TABLE / LIST / TASK, with FROM / WHERE / SORT / LIMIT — and
+// rendered live wherever it appears, in both reading view and the
+// CodeMirror live-preview block widgets.
+// ===========================================================================
+
+// Dataview's other core convention: a bare `key:: value` line anywhere in
+// a note's body (optionally as a list item, `- key:: value`) is a field on
+// that page, same as a frontmatter property. Skips fenced code so a code
+// sample containing "foo:: bar" doesn't leak into the index.
+function extractInlineFields(body) {
+  if (!body) return [];
+  const withoutFences = body.replace(/```[\s\S]*?```/g, (m) => m.replace(/[^\n]/g, ' '));
+  const out = [];
+  const re = /^\s*(?:[-*]\s+)?\[?([A-Za-z_][\w \-]*?)\]?::\s*(.+)$/gm;
+  let m2;
+  while ((m2 = re.exec(withoutFences))) {
+    out.push({ key: m2[1].trim(), value: m2[2].trim() });
+  }
+  return out;
+}
+
+// Turns a raw frontmatter/inline-field string into a typed JS value so
+// queries can compare numbers as numbers, dates as dates, etc., rather
+// than doing string comparison on everything. `[[Link]]` values become a
+// small `{ type: 'link', target, display }` record that both the renderer
+// and the query comparators know how to unwrap.
+function coercePropertyValue(raw) {
+  const value = typeof raw === 'string' ? raw.trim() : raw;
+  if (value === '' || value == null) return null;
+  if (typeof value !== 'string') return value;
+  const wikilink = value.match(/^\[\[([^\]|]+)(\|([^\]]+))?\]\]$/);
+  if (wikilink) return { type: 'link', target: wikilink[1].trim(), display: (wikilink[3] || wikilink[1]).trim() };
+  if (/^\[.*\]$/.test(value)) {
+    const items = splitListValue(value);
+    if (items.length) return items.map((i) => coercePropertyValue(i));
+  }
+  if (/^(true|false)$/i.test(value)) return /^true$/i.test(value);
+  if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value);
+  if (/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$/.test(value)) {
+    const d = new Date(value);
+    if (!isNaN(d.getTime())) return { type: 'date', value: d, raw: value };
+  }
+  if (/^["'].*["']$/.test(value)) return value.slice(1, -1);
+  return value;
+}
+
+// One "page" per note: reserved `file.*` metadata plus every frontmatter
+// property and inline field, lowercased for case-insensitive lookup
+// (frontmatter wins on a key collision with an inline field — the more
+// deliberate, structured source). Rebuilt whenever the vault's indexed
+// note bodies change (`getBody`'s backing cache version), same dependency
+// pattern the existing tag index already uses.
+function buildPagesIndex(filesMeta, linkIndex, getBody) {
+  const pages = [];
+  const byId = new Map();
+  const recordById = new Map(linkIndex.records.map((r) => [r.id, r]));
+  for (const f of filesMeta) {
+    if (f.kind !== 'note') continue;
+    const record = recordById.get(f.id) || f;
+    const raw = getBody(f.id) || '';
+    const { properties, body } = parseFrontmatter(raw);
+    const props = {};
+    const setProp = (key, rawVal) => {
+      const k = String(key || '').trim().toLowerCase();
+      if (!k || k === 'file' || k in props) return;
+      if (/^(tags?|aliases?)$/.test(k)) props[k] = splitListValue(rawVal).map((v) => v.replace(/^#/, ''));
+      else props[k] = coercePropertyValue(rawVal);
+    };
+    properties.forEach((p) => setProp(p.key, p.value));
+    extractInlineFields(body).forEach((p) => setProp(p.key, p.value));
+    const page = {
+      ...props,
+      file: {
+        id: f.id,
+        name: record.baseName || f.name,
+        path: record.relativePath || f.name,
+        folder: record.dir || '',
+        link: { type: 'link', target: record.relativePath || record.baseName || f.name, display: record.baseName || f.name },
+        tags: extractTags(raw),
+        ctime: f.createdTime ? { type: 'date', value: new Date(f.createdTime), raw: f.createdTime } : null,
+        mtime: f.modifiedTime ? { type: 'date', value: new Date(f.modifiedTime), raw: f.modifiedTime } : null
+      }
+    };
+    pages.push(page);
+    byId.set(f.id, page);
+  }
+  return { pages, byId };
+}
+
+// ---------------------------------------------------------------------------
+// Query expression parser — a small recursive-descent boolean expression
+// grammar shared by both FROM (source selection: #tags, "folders", AND/OR/-)
+// and WHERE (field comparisons: =, !=, <, <=, >, >=, contains(), exists()).
+// Same AST either way; FROM and WHERE differ only in how a bare string/
+// field atom is *evaluated* (folder-prefix match vs. truthiness) — see
+// evalSourceNode vs evalNode below.
+// ---------------------------------------------------------------------------
+function tokenizeQueryExpr(src) {
+  const tokens = [];
+  let i = 0;
+  const n = src.length;
+  while (i < n) {
+    const c = src[i];
+    if (/\s/.test(c)) { i++; continue; }
+    if (c === '(' || c === ')' || c === ',') { tokens.push({ type: c }); i++; continue; }
+    if (c === '-') { tokens.push({ type: 'NOT' }); i++; continue; }
+    if (c === '"' || c === "'") {
+      const quote = c;
+      let j = i + 1;
+      let s = '';
+      while (j < n && src[j] !== quote) { s += src[j]; j++; }
+      tokens.push({ type: 'string', value: s });
+      i = j + 1;
+      continue;
+    }
+    if (c === '#') {
+      let j = i + 1;
+      while (j < n && /[\w/-]/.test(src[j])) j++;
+      tokens.push({ type: 'tag', value: src.slice(i + 1, j) });
+      i = j;
+      continue;
+    }
+    if (src.startsWith('[[', i)) {
+      let j = src.indexOf(']]', i + 2);
+      if (j === -1) j = n;
+      tokens.push({ type: 'link', value: src.slice(i + 2, j) });
+      i = j + 2;
+      continue;
+    }
+    if (/[<>=!]/.test(c)) {
+      let op = c;
+      if (src[i + 1] === '=') { op += '='; i += 2; } else { i += 1; }
+      tokens.push({ type: 'op', value: op });
+      continue;
+    }
+    if (/[0-9]/.test(c)) {
+      let j = i + 1;
+      while (j < n && /[0-9.]/.test(src[j])) j++;
+      tokens.push({ type: 'number', value: Number(src.slice(i, j)) });
+      i = j;
+      continue;
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      let j = i + 1;
+      while (j < n && /[\w./-]/.test(src[j])) j++;
+      const word = src.slice(i, j);
+      const upper = word.toUpperCase();
+      if (upper === 'AND' || upper === 'OR' || upper === 'NOT') tokens.push({ type: upper });
+      else if (upper === 'TRUE') tokens.push({ type: 'bool', value: true });
+      else if (upper === 'FALSE') tokens.push({ type: 'bool', value: false });
+      else if (['CONTAINS', 'ICONTAINS', 'EXISTS'].includes(upper)) tokens.push({ type: 'func', value: upper.toLowerCase() });
+      else tokens.push({ type: 'field', value: word });
+      i = j;
+      continue;
+    }
+    i++;
+  }
+  return tokens;
+}
+
+function parseQueryExprTokens(tokens) {
+  let pos = 0;
+  const peek = () => tokens[pos];
+  const next = () => tokens[pos++];
+  function parseOr() {
+    let left = parseAnd();
+    while (peek() && peek().type === 'OR') { next(); left = { type: 'or', left, right: parseAnd() }; }
+    return left;
+  }
+  function parseAnd() {
+    let left = parseNot();
+    while (peek() && peek().type === 'AND') { next(); left = { type: 'and', left, right: parseNot() }; }
+    return left;
+  }
+  function parseNot() {
+    if (peek() && peek().type === 'NOT') { next(); return { type: 'not', expr: parseNot() }; }
+    return parseComparison();
+  }
+  function parseComparison() {
+    const left = parseAtomOrCall();
+    if (peek() && peek().type === 'op') {
+      const op = next().value;
+      return { type: 'cmp', op, left, right: parseAtomOrCall() };
+    }
+    return left;
+  }
+  function parseAtomOrCall() {
+    const t = peek();
+    if (!t) return { type: 'lit', value: null };
+    if (t.type === '(') {
+      next();
+      const inner = parseOr();
+      if (peek() && peek().type === ')') next();
+      return inner;
+    }
+    if (t.type === 'func') {
+      next();
+      const args = [];
+      if (peek() && peek().type === '(') {
+        next();
+        while (peek() && peek().type !== ')') {
+          args.push(parseAtomOrCall());
+          if (peek() && peek().type === ',') next();
+        }
+        if (peek() && peek().type === ')') next();
+      }
+      return { type: 'call', fn: t.value, args };
+    }
+    if (t.type === 'string') { next(); return { type: 'lit', value: t.value }; }
+    if (t.type === 'number') { next(); return { type: 'lit', value: t.value }; }
+    if (t.type === 'bool') { next(); return { type: 'lit', value: t.value }; }
+    if (t.type === 'tag') { next(); return { type: 'tag', value: t.value }; }
+    if (t.type === 'link') { next(); return { type: 'link', value: t.value }; }
+    if (t.type === 'field') { next(); return { type: 'field', path: t.value }; }
+    next();
+    return { type: 'lit', value: null };
+  }
+  return parseOr();
+}
+
+function parseQueryExpr(src) {
+  if (!src || !src.trim()) return null;
+  return parseQueryExprTokens(tokenizeQueryExpr(src));
+}
+
+function getFieldValue(page, path) {
+  const parts = String(path || '').split('.');
+  let cur = page;
+  for (const part of parts) {
+    if (cur == null) return undefined;
+    const key = part.toLowerCase();
+    cur = cur[key] !== undefined ? cur[key] : cur[part];
+  }
+  return cur;
+}
+
+function coerceForCompare(v) {
+  if (v && typeof v === 'object' && v.type === 'date') return v.value.getTime();
+  if (v && typeof v === 'object' && v.type === 'link') return v.display || v.target;
+  return v;
+}
+
+function valuesEqual(a, b) {
+  const ca = coerceForCompare(a);
+  const cb = coerceForCompare(b);
+  if (typeof ca === 'string' && typeof cb === 'string') return ca.toLowerCase() === cb.toLowerCase();
+  return ca === cb;
+}
+
+function compareValues(a, b) {
+  const ca = coerceForCompare(a);
+  const cb = coerceForCompare(b);
+  if (ca == null || cb == null) return null;
+  if (typeof ca === 'number' && typeof cb === 'number') return ca < cb ? -1 : ca > cb ? 1 : 0;
+  const sa = String(ca).toLowerCase();
+  const sb = String(cb).toLowerCase();
+  return sa < sb ? -1 : sa > sb ? 1 : 0;
+}
+
+function resolveOperand(node, page) {
+  if (!node) return undefined;
+  if (node.type === 'field') return getFieldValue(page, node.path);
+  if (node.type === 'lit' || node.type === 'tag' || node.type === 'link') return node.value;
+  return evalNode(node, page);
+}
+
+// WHERE evaluation: a bare field is truthy-checked, everything else is a
+// normal boolean-expression tree.
+function evalNode(node, page) {
+  if (!node) return true;
+  switch (node.type) {
+    case 'and': return !!(evalNode(node.left, page) && evalNode(node.right, page));
+    case 'or': return !!(evalNode(node.left, page) || evalNode(node.right, page));
+    case 'not': return !evalNode(node.expr, page);
+    case 'cmp': {
+      const left = resolveOperand(node.left, page);
+      const right = resolveOperand(node.right, page);
+      if (node.op === '=') return valuesEqual(left, right);
+      if (node.op === '!=') return !valuesEqual(left, right);
+      const c = compareValues(left, right);
+      if (c === null) return false;
+      if (node.op === '<') return c < 0;
+      if (node.op === '<=') return c <= 0;
+      if (node.op === '>') return c > 0;
+      if (node.op === '>=') return c >= 0;
+      return false;
+    }
+    case 'call': {
+      if (node.fn === 'exists') {
+        const v = resolveOperand(node.args[0], page);
+        return v !== undefined && v !== null && v !== '';
+      }
+      if (node.fn === 'contains' || node.fn === 'icontains') {
+        const hay = resolveOperand(node.args[0], page);
+        const needle = resolveOperand(node.args[1], page);
+        if (Array.isArray(hay)) return hay.some((h) => valuesEqual(h, needle));
+        if (hay == null) return false;
+        return String(coerceForCompare(hay)).toLowerCase().includes(String(coerceForCompare(needle)).toLowerCase());
+      }
+      return false;
+    }
+    case 'tag': {
+      const q = node.value.toLowerCase();
+      return (page.file?.tags || []).some((t) => t.toLowerCase() === q || t.toLowerCase().startsWith(`${q}/`));
+    }
+    case 'link': return (page.file?.path || '').toLowerCase() === node.value.toLowerCase();
+    case 'field': {
+      const v = getFieldValue(page, node.path);
+      return v !== undefined && v !== null && v !== false && v !== '';
+    }
+    case 'lit': return !!node.value;
+    default: return true;
+  }
+}
+
+// FROM evaluation: a bare string/field atom means "this page's path is
+// under this folder" (Dataview's `FROM "Projects"` convention) rather than
+// a truthiness check — the one place FROM and WHERE actually diverge.
+function evalSourceNode(node, page) {
+  if (!node) return true;
+  const path = (page.file?.path || '').toLowerCase();
+  switch (node.type) {
+    case 'and': return evalSourceNode(node.left, page) && evalSourceNode(node.right, page);
+    case 'or': return evalSourceNode(node.left, page) || evalSourceNode(node.right, page);
+    case 'not': return !evalSourceNode(node.expr, page);
+    case 'tag': {
+      const q = node.value.toLowerCase();
+      return (page.file?.tags || []).some((t) => t.toLowerCase() === q || t.toLowerCase().startsWith(`${q}/`));
+    }
+    case 'link':
+      return path === node.value.toLowerCase() || (page.file?.name || '').toLowerCase() === node.value.toLowerCase();
+    case 'lit': {
+      const folder = String(node.value || '').replace(/\/$/, '').toLowerCase();
+      return path === folder || path.startsWith(`${folder}/`);
+    }
+    case 'field': {
+      const folder = String(node.path || '').replace(/\/$/, '').toLowerCase();
+      return path === folder || path.startsWith(`${folder}/`);
+    }
+    default: return true;
+  }
+}
+
+// Splits a TABLE column spec ("file.name AS \"Note\", status, due") on
+// top-level commas (respecting quotes) and pulls out any "AS <label>".
+function parseQueryColumnList(text) {
+  const parts = [];
+  let cur = '';
+  let inQuote = null;
+  for (const ch of text) {
+    if (inQuote) {
+      cur += ch;
+      if (ch === inQuote) inQuote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { inQuote = ch; cur += ch; continue; }
+    if (ch === ',') { parts.push(cur); cur = ''; continue; }
+    cur += ch;
+  }
+  if (cur.trim()) parts.push(cur);
+  return parts.map((p) => {
+    const m = p.trim().match(/^(.+?)\s+AS\s+(.+)$/i);
+    if (m) return { field: m[1].trim(), label: m[2].trim().replace(/^["']|["']$/g, '') };
+    return { field: p.trim(), label: p.trim() };
+  });
+}
+
+// Parses the whole fenced block's text: line 1 is `TABLE <cols>` / `LIST` /
+// `TASK`; every following line is its own `FROM` / `WHERE` / `SORT` /
+// `LIMIT` clause. One clause per line, matching how these queries are
+// written in practice (and in every Dataview example the person is likely
+// to already know).
+function parseQueryBlock(raw) {
+  const lines = (raw || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) return { error: 'Empty query.' };
+  const typeMatch = lines[0].match(/^(TABLE|LIST|TASK)\b(.*)$/i);
+  if (!typeMatch) return { error: 'Query must start with TABLE, LIST, or TASK.' };
+  const type = typeMatch[1].toUpperCase();
+  const columns = type === 'TABLE' && typeMatch[2].trim() ? parseQueryColumnList(typeMatch[2].trim()) : [];
+  let from = null;
+  let where = null;
+  let sort = [];
+  let limit = null;
+  for (const line of lines.slice(1)) {
+    const m = line.match(/^(FROM|WHERE|SORT|LIMIT)\b(.*)$/i);
+    if (!m) continue;
+    const kw = m[1].toUpperCase();
+    const val = m[2].trim();
+    if (kw === 'FROM') from = val;
+    else if (kw === 'WHERE') where = val;
+    else if (kw === 'LIMIT') limit = parseInt(val, 10) || null;
+    else if (kw === 'SORT') {
+      sort = val
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((s) => {
+          const sm = s.match(/^(.+?)\s+(ASC|DESC)$/i);
+          return sm ? { field: sm[1].trim(), dir: sm[2].toUpperCase() } : { field: s, dir: 'ASC' };
+        });
+    }
+  }
+  return { type, columns, from, where, sort, limit, error: null };
+}
+
+function runVaultQuery(queryText, pagesIndex) {
+  const q = parseQueryBlock(queryText);
+  if (q.error) return { error: q.error };
+  let fromNode;
+  let whereNode;
+  try {
+    fromNode = q.from ? parseQueryExpr(q.from) : null;
+    whereNode = q.where ? parseQueryExpr(q.where) : null;
+  } catch {
+    return { error: 'Could not parse FROM/WHERE.' };
+  }
+  let rows = pagesIndex.pages.filter((p) => (fromNode ? evalSourceNode(fromNode, p) : true));
+  if (whereNode) rows = rows.filter((p) => evalNode(whereNode, p));
+  if (q.sort.length) {
+    rows = rows.slice().sort((a, b) => {
+      for (const s of q.sort) {
+        const c = compareValues(getFieldValue(a, s.field), getFieldValue(b, s.field)) ?? 0;
+        if (c !== 0) return s.dir === 'DESC' ? -c : c;
+      }
+      return 0;
+    });
+  } else {
+    rows = rows.slice().sort((a, b) => (a.file.name || '').localeCompare(b.file.name || ''));
+  }
+  if (q.limit) rows = rows.slice(0, q.limit);
+  return { query: q, rows };
+}
+
+// Renders one resolved field value — links become clickable (and reuse the
+// same "missing → dashed, click to create" affordance as inline [[links]]
+// elsewhere), arrays join with commas, dates show their original text.
+function QueryValue({ value, linkIndex, onOpenById, onCreateOrOpenByName }) {
+  if (value == null) return null;
+  if (Array.isArray(value)) {
+    return (
+      <>
+        {value.map((v, i) => (
+          <React.Fragment key={i}>
+            {i > 0 && ', '}
+            <QueryValue value={v} linkIndex={linkIndex} onOpenById={onOpenById} onCreateOrOpenByName={onCreateOrOpenByName} />
+          </React.Fragment>
+        ))}
+      </>
+    );
+  }
+  if (typeof value === 'object' && value.type === 'link') {
+    const res = resolveLinkTarget(value.target, linkIndex);
+    if (res.status === 'resolved') {
+      return (
+        <span className="wikilink" onClick={() => onOpenById?.(res.file.id)} title={`Open ${res.file.baseName}`}>
+          {value.display}
+        </span>
+      );
+    }
+    return (
+      <span
+        className="wikilink wikilink-new"
+        onClick={() => onCreateOrOpenByName?.(value.target)}
+        title={`Create "${value.target}"`}
+      >
+        {value.display}
+      </span>
+    );
+  }
+  if (typeof value === 'object' && value.type === 'date') return <>{value.raw}</>;
+  if (typeof value === 'boolean') return <>{value ? 'true' : 'false'}</>;
+  return <>{String(value)}</>;
+}
+
+// A rendered ```query / ```dataview block. `handlers.pagesIndex` is built
+// once at the app root (see the `pagesIndex` useMemo near the top-level
+// `handlers` object) and only needs a background full-vault index — the
+// same one Search/Tags already trigger — so a query works even the very
+// first time it's added to a note, not just after every note happens to
+// have already been opened once.
+function QueryBlock({ raw, handlers, linkIndex }) {
+  const ensureVaultIndexed = handlers?.ensureVaultIndexed;
+  useEffect(() => {
+    ensureVaultIndexed?.();
+  }, [ensureVaultIndexed]);
+
+  const pagesIndex = handlers?.pagesIndex;
+  const result = useMemo(() => (pagesIndex ? runVaultQuery(raw, pagesIndex) : null), [raw, pagesIndex]);
+
+  if (!pagesIndex || !handlers?.vaultIndexReady) {
+    const progress = handlers?.vaultIndexProgress;
+    return (
+      <div className="query-block query-block-loading muted">
+        Indexing vault for queries{progress?.total ? ` — ${progress.loaded}/${progress.total}` : '…'}
+      </div>
+    );
+  }
+  if (result.error) {
+    return <div className="query-block query-block-error">Query error: {result.error}</div>;
+  }
+  const { query, rows } = result;
+  if (!rows.length) {
+    return <div className="query-block query-block-empty muted">No results.</div>;
+  }
+
+  if (query.type === 'TABLE') {
+    const cols = query.columns.length ? query.columns : [{ field: 'file.name', label: 'File' }];
+    return (
+      <table className="md-table query-table">
+        <thead>
+          <tr>
+            {cols.map((c, i) => (
+              <th key={i}>{c.label}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((page) => (
+            <tr key={page.file.id}>
+              {cols.map((c, i) => (
+                <td key={i}>
+                  <QueryValue
+                    value={getFieldValue(page, c.field)}
+                    linkIndex={linkIndex}
+                    onOpenById={handlers?.onOpenById}
+                    onCreateOrOpenByName={handlers?.onCreateOrOpenByName}
+                  />
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    );
+  }
+
+  if (query.type === 'TASK') {
+    const taskLineRe = /^\s*[-*]\s+\[( |x|X)\]\s+(.*)$/;
+    const groups = rows
+      .map((page) => {
+        const body = handlers?.getBody ? handlers.getBody(page.file.id) : '';
+        const tasks = (body || '')
+          .split('\n')
+          .map((l) => l.match(taskLineRe))
+          .filter(Boolean)
+          .map((m) => ({ checked: /[xX]/.test(m[1]), text: m[2] }));
+        return { page, tasks };
+      })
+      .filter((g) => g.tasks.length);
+    if (!groups.length) return <div className="query-block query-block-empty muted">No results.</div>;
+    return (
+      <div className="query-tasklist">
+        {groups.map(({ page, tasks }) => (
+          <div key={page.file.id} className="query-task-group">
+            <div className="query-task-source">
+              <QueryValue value={page.file.link} linkIndex={linkIndex} onOpenById={handlers?.onOpenById} />
+            </div>
+            {tasks.map((t, i) => (
+              <div className="task-line" key={i}>
+                <input type="checkbox" checked={t.checked} readOnly />
+                <span className={t.checked ? 'task-done' : ''}>{t.text}</span>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <ul className="query-list">
+      {rows.map((page) => (
+        <li key={page.file.id}>
+          <QueryValue value={page.file.link} linkIndex={linkIndex} onOpenById={handlers?.onOpenById} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Smart link resolution — mirrors how Obsidian resolves [[wikilinks]]:
 //   - A link that's just a name ("Notes") matches by filename anywhere in
@@ -351,9 +973,9 @@ function buildLinkIndex(files, folders, rootId) {
     const parentId = (f.parents && f.parents[0]) || rootId;
     const dir = folderPath(parentId);
     const kind = f.kind || 'note';
-    const isAsset = kind !== 'note';
+    const isAsset = !opensInEditorPane(kind);
     const isImage = kind === 'image';
-    const baseName = isAsset ? f.name : f.name.replace(/\.md$/i, '');
+    const baseName = isAsset ? f.name : f.name.replace(/\.[^.]+$/i, '');
     const relativePath = dir ? `${dir}/${baseName}` : baseName;
     return { ...f, kind, isAsset, isImage, baseName, relativePath, dir };
   });
@@ -681,19 +1303,23 @@ async function driveUpdateFileContent(token, fileId, content) {
   return res.json();
 }
 
-async function driveCreateFile(token, folderId, rawName, content = '') {
+// `ext`/`mimeType` default to plain markdown notes; database creation passes
+// ext='base', mimeType='application/json' so the same multipart-upload
+// plumbing (and the same proxy action) can create either page kind.
+async function driveCreateFile(token, folderId, rawName, content = '', ext = 'md', mimeType = 'text/markdown') {
+  const suffix = `.${ext}`;
+  const name = rawName.toLowerCase().endsWith(suffix) ? rawName : `${rawName}${suffix}`;
   if (isProxy(token)) {
-    return proxyPost(token, { action: 'createFile', folderId, name: rawName, content });
+    return proxyPost(token, { action: 'createFile', folderId, name, content });
   }
-  const name = rawName.toLowerCase().endsWith('.md') ? rawName : `${rawName}.md`;
-  const metadata = { name, parents: [folderId], mimeType: 'text/markdown' };
+  const metadata = { name, parents: [folderId], mimeType };
   const boundary = `vault-${Date.now()}`;
   const body =
     `--${boundary}\r\n` +
     `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
     `${JSON.stringify(metadata)}\r\n` +
     `--${boundary}\r\n` +
-    `Content-Type: text/markdown\r\n\r\n` +
+    `Content-Type: ${mimeType}\r\n\r\n` +
     `${content}\r\n` +
     `--${boundary}--`;
   const res = await fetch(`${DRIVE_UPLOAD_URL}?uploadType=multipart&fields=id,name,modifiedTime,parents&${DRIVE_ALL_DRIVES}`, {
@@ -1304,36 +1930,6 @@ function releaseImageUrlCache() {
   imageUrlPromises.clear();
 }
 
-// Opens an image file in a real new browser tab (rather than an in-app
-// viewer). The blank tab is opened synchronously, in direct response to the
-// user gesture, so popup blockers don't swallow it — its location is filled
-// in once the Drive blob has been fetched/decoded.
-async function openImageInNewTab(token, file) {
-  if (!file) return;
-  const win = window.open('', '_blank');
-  try {
-    let url = imageUrlCache.get(file.id);
-    if (!url) {
-      let promise = imageUrlPromises.get(file.id);
-      if (!promise) {
-        promise = driveGetFileBlob(token, file.id).then((blob) => {
-          const objectUrl = URL.createObjectURL(blob);
-          imageUrlCache.set(file.id, objectUrl);
-          return objectUrl;
-        });
-        imageUrlPromises.set(file.id, promise);
-        promise.finally(() => imageUrlPromises.delete(file.id));
-      }
-      url = await promise;
-    }
-    if (win) win.location.href = url;
-    else window.open(url, '_blank');
-  } catch (err) {
-    if (win) win.close();
-    window.alert(`Couldn't open image: ${err.message || err}`);
-  }
-}
-
 function useDriveImageUrl(token, fileId) {
   const [url, setUrl] = useState(() => (fileId ? imageUrlCache.get(fileId) || null : null));
   const [error, setError] = useState('');
@@ -1479,6 +2075,31 @@ function buildTagIndex(filesMeta, getBody) {
     });
   });
   return Array.from(byTag.values()).sort((a, b) => a.tag.localeCompare(b.tag));
+}
+
+// Turns the flat tag list above into a nested-tag tree for display: every
+// prefix of a nested tag ("project" and "project/alpha" for a note tagged
+// #project/alpha) becomes its own row, with `depth` for indentation and
+// `count` aggregating every distinct note tagged with it or any descendant.
+// Clicking a parent row still works with search's existing `tag:` semantics
+// (a tag search already matches descendants of the given prefix).
+function buildTagTree(tagRows) {
+  const filesByPath = new Map(); // full path -> Set(fileId)
+  tagRows.forEach(({ tag, files }) => {
+    const parts = tag.split('/');
+    let path = '';
+    parts.forEach((part) => {
+      path = path ? `${path}/${part}` : part;
+      if (!filesByPath.has(path)) filesByPath.set(path, new Set());
+      files.forEach((f) => filesByPath.get(path).add(f.id));
+    });
+  });
+  return Array.from(filesByPath.keys())
+    .sort((a, b) => a.localeCompare(b))
+    .map((path) => {
+      const parts = path.split('/');
+      return { path, name: parts[parts.length - 1], depth: parts.length - 1, count: filesByPath.get(path).size };
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1627,140 +2248,6 @@ function runVaultSearch(query, filesMeta, linkIndex, getBody, tagsByFileId) {
   return results;
 }
 
-// ---------------------------------------------------------------------------
-// Caret-position helper for the link-typing autocomplete — a <textarea> has
-// no built-in way to ask "where on screen is character N", so this mirrors
-// the textarea's text into an off-screen div with identical font/box
-// styling and reads back the position of a marker placed at that character.
-// ---------------------------------------------------------------------------
-function getCaretCoordinates(textarea, position) {
-  const div = document.createElement('div');
-  const style = getComputedStyle(textarea);
-  const properties = [
-    'boxSizing',
-    'width',
-    'fontFamily',
-    'fontSize',
-    'fontWeight',
-    'lineHeight',
-    'letterSpacing',
-    'paddingTop',
-    'paddingRight',
-    'paddingBottom',
-    'paddingLeft',
-    'borderTopWidth',
-    'borderRightWidth',
-    'borderBottomWidth',
-    'borderLeftWidth'
-  ];
-  properties.forEach((p) => {
-    div.style[p] = style[p];
-  });
-  div.style.position = 'absolute';
-  div.style.visibility = 'hidden';
-  div.style.whiteSpace = 'pre-wrap';
-  div.style.overflowWrap = 'break-word';
-  div.style.top = '0';
-  div.style.left = '-9999px';
-  div.style.height = 'auto';
-
-  div.textContent = textarea.value.slice(0, position);
-  const marker = document.createElement('span');
-  marker.textContent = '\u200b';
-  div.appendChild(marker);
-  document.body.appendChild(div);
-
-  const lineHeight = parseFloat(style.lineHeight) || 20;
-  const top = marker.offsetTop - textarea.scrollTop + lineHeight;
-  const left = marker.offsetLeft - textarea.scrollLeft;
-
-  document.body.removeChild(div);
-  return { top, left };
-}
-
-// Powers the [[link autocomplete dropdown. Reads/writes the textarea's DOM
-// value directly (rather than through the React `content` prop) so it never
-// races a stale closure against the just-typed keystroke.
-function useLinkAutocomplete(textareaRef, onChange, linkIndex, phantomRecords) {
-  const [state, setState] = useState(null); // { start, items, activeIndex, top, left }
-
-  const computeSuggestions = useCallback(
-    (query) => {
-      const q = query.toLowerCase();
-      const scoreOf = (hay) => (q ? hay.indexOf(q) : 0);
-      const pool = linkIndex.records.concat(phantomRecords || []);
-      const byBase = pool.map((r) => ({ r, score: scoreOf(r.baseName.toLowerCase()) })).filter((s) => s.score !== -1);
-      const finalPool = byBase.length
-        ? byBase
-        : pool.map((r) => ({ r, score: scoreOf(r.relativePath.toLowerCase()) })).filter((s) => s.score !== -1);
-      return finalPool
-        .sort((a, b) => a.score - b.score || a.r.baseName.localeCompare(b.r.baseName))
-        .slice(0, 8)
-        .map((s) => s.r);
-    },
-    [linkIndex, phantomRecords]
-  );
-
-  const updateFromCaret = useCallback(() => {
-    const ta = textareaRef.current;
-    if (!ta) {
-      setState(null);
-      return;
-    }
-    const value = ta.value;
-    const pos = ta.selectionStart;
-    const windowStart = Math.max(0, pos - 200);
-    const before = value.slice(windowStart, pos);
-    const openIdx = before.lastIndexOf('[[');
-    if (openIdx === -1) {
-      setState(null);
-      return;
-    }
-    const between = before.slice(openIdx + 2);
-    // Don't trigger across a line break, once an alias "|" has been typed,
-    // or once the link's already been closed.
-    if (between.includes(']]') || between.includes('|') || between.includes('\n')) {
-      setState(null);
-      return;
-    }
-
-    const items = computeSuggestions(between);
-    if (!items.length) {
-      setState(null);
-      return;
-    }
-
-    const coords = getCaretCoordinates(ta, pos);
-    setState({ start: windowStart + openIdx, items, activeIndex: 0, top: coords.top, left: coords.left });
-  }, [computeSuggestions, textareaRef]);
-
-  const accept = useCallback(
-    (file) => {
-      const ta = textareaRef.current;
-      if (!ta || !state) return;
-      const pos = ta.selectionStart;
-      const value = ta.value;
-      const insertText = bestLinkTextFor(file, linkIndex);
-      const alreadyClosed = value.slice(pos, pos + 2) === ']]';
-      const next = value.slice(0, state.start) + '[[' + insertText + ']]' + value.slice(pos + (alreadyClosed ? 2 : 0));
-      const caretPos = state.start + 2 + insertText.length + 2;
-      setState(null);
-      onChange(next);
-      requestAnimationFrame(() => {
-        ta.focus();
-        ta.setSelectionRange(caretPos, caretPos);
-      });
-    },
-    [state, onChange, linkIndex, textareaRef]
-  );
-
-  const dismiss = useCallback(() => setState(null), []);
-  const move = useCallback((delta) => {
-    setState((s) => (s ? { ...s, activeIndex: (s.activeIndex + delta + s.items.length) % s.items.length } : s));
-  }, []);
-
-  return { suggestion: state, updateFromCaret, accept, dismiss, move };
-}
 
 // ---------------------------------------------------------------------------
 // Icon library — small hand-drawn line icons in the same monoline style
@@ -1829,6 +2316,27 @@ const IconPlus = (p) => (
   <Svg {...p}>
     <line x1="12" y1="5" x2="12" y2="19" />
     <line x1="5" y1="12" x2="19" y2="12" />
+  </Svg>
+);
+const IconGraph = (p) => (
+  <Svg {...p}>
+    <line x1="7" y1="7.2" x2="10.2" y2="10.6" />
+    <line x1="16.8" y1="7.2" x2="13.6" y2="10.6" />
+    <line x1="10.8" y1="13.8" x2="7.4" y2="17.4" />
+    <line x1="13.4" y1="13.8" x2="16.6" y2="16.8" />
+    <circle cx="5" cy="6" r="2.2" />
+    <circle cx="19" cy="6" r="2.2" />
+    <circle cx="12" cy="12" r="2.2" />
+    <circle cx="6" cy="19" r="2.2" />
+    <circle cx="18" cy="18" r="2.2" />
+  </Svg>
+);
+const IconMaximize = (p) => (
+  <Svg {...p}>
+    <polyline points="8 3 3 3 3 8" />
+    <polyline points="16 3 21 3 21 8" />
+    <polyline points="3 16 3 21 8 21" />
+    <polyline points="21 16 21 21 16 21" />
   </Svg>
 );
 const IconFilePlus = (p) => (
@@ -2035,10 +2543,113 @@ const IconDownload = (p) => (
     <path d="M5 20h14" />
   </Svg>
 );
+const IconDatabase = (p) => (
+  <Svg {...p}>
+    <ellipse cx="12" cy="5" rx="8" ry="3" />
+    <path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5" />
+    <path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" />
+  </Svg>
+);
+const IconTable = (p) => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <line x1="3" y1="10" x2="21" y2="10" />
+    <line x1="9" y1="4" x2="9" y2="20" />
+  </Svg>
+);
+const IconKanban = (p) => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <line x1="9" y1="4" x2="9" y2="20" />
+    <line x1="15" y1="4" x2="15" y2="20" />
+    <line x1="5.5" y1="8" x2="6.5" y2="8" />
+    <line x1="11.5" y1="8" x2="12.5" y2="8" />
+    <line x1="17.5" y1="8" x2="18.5" y2="8" />
+  </Svg>
+);
+const IconLayoutGrid = (p) => (
+  <Svg {...p}>
+    <rect x="3" y="3" width="7" height="7" rx="1.3" />
+    <rect x="14" y="3" width="7" height="7" rx="1.3" />
+    <rect x="3" y="14" width="7" height="7" rx="1.3" />
+    <rect x="14" y="14" width="7" height="7" rx="1.3" />
+  </Svg>
+);
+const IconCalendar = (p) => (
+  <Svg {...p}>
+    <rect x="3" y="4.5" width="18" height="16" rx="2" />
+    <line x1="3" y1="9.5" x2="21" y2="9.5" />
+    <line x1="8" y1="2.5" x2="8" y2="6.5" />
+    <line x1="16" y1="2.5" x2="16" y2="6.5" />
+  </Svg>
+);
+const IconHash = (p) => (
+  <Svg {...p}>
+    <line x1="5" y1="9" x2="19" y2="9" />
+    <line x1="5" y1="15" x2="19" y2="15" />
+    <line x1="9.5" y1="4" x2="7" y2="20" />
+    <line x1="16" y1="4" x2="13.5" y2="20" />
+  </Svg>
+);
+const IconType = (p) => (
+  <Svg {...p}>
+    <polyline points="4 6 4 4 20 4 20 6" />
+    <line x1="12" y1="4" x2="12" y2="20" />
+    <line x1="9" y1="20" x2="15" y2="20" />
+  </Svg>
+);
+const IconAlignLeft = (p) => (
+  <Svg {...p}>
+    <line x1="4" y1="6" x2="20" y2="6" />
+    <line x1="4" y1="12" x2="15" y2="12" />
+    <line x1="4" y1="18" x2="18" y2="18" />
+  </Svg>
+);
+const IconCheckSquare = (p) => (
+  <Svg {...p}>
+    <rect x="3" y="3" width="18" height="18" rx="3" />
+    <polyline points="7.5 12 10.5 15 16.5 9" />
+  </Svg>
+);
+const IconChevronsUpDown = (p) => (
+  <Svg {...p}>
+    <polyline points="7 15 12 20 17 15" />
+    <polyline points="7 9 12 4 17 9" />
+  </Svg>
+);
+const IconGripVertical = (p) => (
+  <Svg {...p} fill="currentColor" stroke="none">
+    <circle cx="9" cy="5" r="1.4" />
+    <circle cx="9" cy="12" r="1.4" />
+    <circle cx="9" cy="19" r="1.4" />
+    <circle cx="15" cy="5" r="1.4" />
+    <circle cx="15" cy="12" r="1.4" />
+    <circle cx="15" cy="19" r="1.4" />
+  </Svg>
+);
+const IconPaperclip = (p) => (
+  <Svg {...p}>
+    <path d="M21 12.5 12.5 21a5 5 0 0 1-7-7L14 5.5a3.5 3.5 0 0 1 5 5L10.5 19a2 2 0 0 1-3-3L15 8.5" />
+  </Svg>
+);
+const IconLink2 = (p) => (
+  <Svg {...p}>
+    <path d="M9 17H7A5 5 0 0 1 7 7h2" />
+    <path d="M15 7h2a5 5 0 1 1 0 10h-2" />
+    <line x1="8" y1="12" x2="16" y2="12" />
+  </Svg>
+);
+const IconTags = (p) => (
+  <Svg {...p}>
+    <path d="M17.6 12.6 9.4 20.8a2 2 0 0 1-2.8 0l-4.4-4.4a2 2 0 0 1 0-2.8L10.4 5.4A2 2 0 0 1 11.8 5H18a2 2 0 0 1 2 2v6.2a2 2 0 0 1-.4 1.4Z" />
+    <circle cx="14.5" cy="9.5" r="1.2" fill="currentColor" stroke="none" />
+  </Svg>
+);
 // Small kind -> icon lookup for non-note tree rows. Images get no override
 // (they already read clearly from the filename/thumbnail elsewhere), so
-// only video/audio/generic-file get a distinguishing glyph in the sidebar.
-const ASSET_KIND_ICONS = { video: IconVideo, audio: IconAudio, file: IconFile };
+// only video/audio/generic-file/database/canvas get a distinguishing glyph
+// in the sidebar. Defined after the icon consts below it (ASSET_KIND_ICONS
+// references IconCanvasKind, so it must come after that const is declared).
 const IconLoader = (p) => (
   <Svg {...p} className={`spin ${p.className || ''}`}>
     <line x1="12" y1="2" x2="12" y2="6" />
@@ -2063,6 +2674,49 @@ const IconAlertTriangle = (p) => (
     <line x1="12" y1="17" x2="12" y2="17.01" />
   </Svg>
 );
+// Canvas icons — used for the sidebar/kind icon, the toolbar, and the
+// per-node context menu. Kept near the rest of the icon set.
+const IconCanvasKind = (p) => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="8" height="6" rx="1" />
+    <rect x="13" y="3" width="8" height="5" rx="1" />
+    <rect x="13" y="12" width="8" height="9" rx="1" />
+    <rect x="3" y="14" width="8" height="7" rx="1" />
+    <line x1="11" y1="7" x2="13" y2="6" />
+    <line x1="17" y1="8" x2="17" y2="12" />
+    <line x1="11" y1="17" x2="13" y2="17" />
+  </Svg>
+);
+const IconZoomIn = (p) => (
+  <Svg {...p}>
+    <circle cx="10.5" cy="10.5" r="6.5" />
+    <line x1="10.5" y1="7.5" x2="10.5" y2="13.5" />
+    <line x1="7.5" y1="10.5" x2="13.5" y2="10.5" />
+    <line x1="20" y1="20" x2="15.5" y2="15.5" />
+  </Svg>
+);
+const IconZoomOut = (p) => (
+  <Svg {...p}>
+    <circle cx="10.5" cy="10.5" r="6.5" />
+    <line x1="7.5" y1="10.5" x2="13.5" y2="10.5" />
+    <line x1="20" y1="20" x2="15.5" y2="15.5" />
+  </Svg>
+);
+const IconFrame = (p) => (
+  <Svg {...p}>
+    <line x1="4" y1="2" x2="4" y2="22" />
+    <line x1="20" y1="2" x2="20" y2="22" />
+    <line x1="2" y1="4" x2="22" y2="4" />
+    <line x1="2" y1="20" x2="22" y2="20" />
+  </Svg>
+);
+const IconStickyNote = (p) => (
+  <Svg {...p}>
+    <path d="M4 4h13l3 3v13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z" />
+    <path d="M16 4v4h4" />
+  </Svg>
+);
+const ASSET_KIND_ICONS = { video: IconVideo, audio: IconAudio, file: IconFile, database: IconDatabase, canvas: IconCanvasKind };
 
 // ---------------------------------------------------------------------------
 // Minimal markdown + wikilink + tag renderer (no external markdown dependency)
@@ -2146,7 +2800,7 @@ function renderInline(text, keyPrefix, handlers, linkIndex) {
             key={key}
             label={label}
             candidates={resolution.candidates}
-            onPick={(file) => (file.kind !== 'note' ? handlers.onOpenAsset(file) : handlers.onOpenById(file.id))}
+            onPick={(file) => (opensInEditorPane(file.kind) ? handlers.onOpenById(file.id) : handlers.onOpenAsset(file))}
           />
         );
       } else if (resolution.isAsset) {
@@ -2263,6 +2917,127 @@ function Callout({ type, title, lines, handlers, linkIndex, keyBase }) {
   );
 }
 
+// A Notion-style in-note tab block: `:::tabs` ... one or more `:::tab Name`
+// sections ... `:::`. Unlike columns/toggles this block is mutable from
+// reading view (add/rename/delete tabs), so it round-trips through a
+// parse/serialize pair rather than only ever being read.
+function parseTabsBlock(innerLines) {
+  const tabs = [];
+  let current = null;
+  innerLines.forEach((l) => {
+    const m = l.match(/^:::tab\s+(.*)$/);
+    if (m) {
+      current = { name: m[1].trim() || `Tab ${tabs.length + 1}`, lines: [] };
+      tabs.push(current);
+    } else if (current) {
+      current.lines.push(l);
+    }
+    // Any lines before the first `:::tab` marker are stray/preamble and
+    // dropped, same as columns silently drops content before the first
+    // `:::column` marker.
+  });
+  if (!tabs.length) tabs.push({ name: 'Tab 1', lines: innerLines.slice() });
+  return tabs;
+}
+function serializeTabsBlock(tabs) {
+  const body = tabs.map((t) => `:::tab ${t.name}\n${t.lines.join('\n')}`).join('\n');
+  return `:::tabs\n${body}\n:::`;
+}
+
+// Renders a parsed tabs block plus its own tab bar. `rawBlockText` is this
+// block's exact source text (from the opening `:::tabs` line to the closing
+// `:::` line, inclusive) — edits are applied by asking `handlers.onMutateBlock`
+// to swap that exact substring for a freshly-serialized one, so this
+// component never needs to know its own position in the wider document.
+function TabsBlockView({ tabs, rawBlockText, handlers, linkIndex, foldState, keyBase }) {
+  const [active, setActive] = useState(0);
+  const safeActive = Math.min(active, tabs.length - 1);
+  const [renamingIdx, setRenamingIdx] = useState(null);
+  const [draft, setDraft] = useState('');
+
+  const commit = (newTabs, newActive) => {
+    handlers.onMutateBlock?.(rawBlockText, serializeTabsBlock(newTabs));
+    if (newActive !== undefined) setActive(newActive);
+  };
+
+  const addTab = () => {
+    const newTabs = [...tabs, { name: `Tab ${tabs.length + 1}`, lines: [''] }];
+    commit(newTabs, newTabs.length - 1);
+  };
+
+  const deleteTab = (i) => {
+    if (tabs.length <= 1) return;
+    const newTabs = tabs.filter((_, idx) => idx !== i);
+    let newActive = safeActive;
+    if (i === safeActive) newActive = Math.max(0, i - 1);
+    else if (i < safeActive) newActive = safeActive - 1;
+    commit(newTabs, newActive);
+  };
+
+  const renameTab = (i, name) => {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === tabs[i].name) return;
+    commit(tabs.map((t, idx) => (idx === i ? { ...t, name: trimmed } : t)));
+  };
+
+  return (
+    <div className="tabs-block">
+      <div className="tabs-block-bar">
+        {tabs.map((t, i) => (
+          <div
+            key={i}
+            className={`tabs-block-tab ${i === safeActive ? 'active' : ''}`}
+            onClick={() => setActive(i)}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              setRenamingIdx(i);
+              setDraft(t.name);
+            }}
+          >
+            {renamingIdx === i ? (
+              <input
+                className="tabs-block-rename-input"
+                autoFocus
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+                onBlur={() => {
+                  setRenamingIdx(null);
+                  renameTab(i, draft);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') e.currentTarget.blur();
+                  if (e.key === 'Escape') setRenamingIdx(null);
+                }}
+              />
+            ) : (
+              <span className="tabs-block-tab-label">{t.name}</span>
+            )}
+            {tabs.length > 1 && (
+              <button
+                className="tabs-block-tab-close"
+                title="Delete tab"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  deleteTab(i);
+                }}
+              >
+                <IconX size={11} />
+              </button>
+            )}
+          </div>
+        ))}
+        <button className="tabs-block-add" title="Add tab" onClick={addTab}>
+          <IconPlus size={13} />
+        </button>
+      </div>
+      <div className="tabs-block-body">
+        {renderMarkdownBlocks((tabs[safeActive]?.lines || []).join('\n'), handlers, linkIndex, `${keyBase}-${safeActive}-`, foldState)}
+      </div>
+    </div>
+  );
+}
+
 // `foldState` (optional) enables Obsidian-style heading fold/collapse in
 // reading view: { collapsed: Set<headingId>, onToggle: (headingId) => void,
 // collapsedToggles: Set<toggleId>, onToggleToggle: (toggleId) => void }.
@@ -2278,6 +3053,7 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldSt
   let listBuffer = [];
   let listType = null;
   let codeBuffer = null;
+  let codeLang = null;
   let quoteBuffer = [];
   // While set, we're inside a collapsed heading's section: everything is
   // parsed (to keep fence/list state consistent) but nothing is pushed to
@@ -2337,13 +3113,20 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldSt
     if (codeBuffer !== null) {
       if (/^```/.test(line.trim())) {
         if (hiddenUntilLevel === null) {
-          blocks.push(
-            <pre key={`${keyBase}code-${idx}`}>
-              <code>{codeBuffer.join('\n')}</code>
-            </pre>
-          );
+          if (codeLang === 'query' || codeLang === 'dataview') {
+            blocks.push(
+              <QueryBlock key={`${keyBase}query-${idx}`} raw={codeBuffer.join('\n')} handlers={handlers} linkIndex={linkIndex} />
+            );
+          } else {
+            blocks.push(
+              <pre key={`${keyBase}code-${idx}`}>
+                <code>{codeBuffer.join('\n')}</code>
+              </pre>
+            );
+          }
         }
         codeBuffer = null;
+        codeLang = null;
       } else {
         codeBuffer.push(line);
       }
@@ -2358,6 +3141,7 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldSt
     const taskUl = line.match(/^\s*[-*]\s+\[( |x|X)\]\s+(.*)$/);
     const toggleOpen = line.match(/^\+\+\+\s?(.*)$/);
     const columnsOpen = line.trim().match(/^:::columns-([234])\s*$/);
+    const tabsOpen = line.trim().match(/^:::tabs\s*$/);
     const isTableStart =
       !fence &&
       !heading &&
@@ -2410,7 +3194,10 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldSt
       // Inside a collapsed section: still track fence-open so line
       // interpretation downstream (once we exit) stays correct, but don't
       // render anything.
-      if (fence) codeBuffer = [];
+      if (fence) {
+        codeBuffer = [];
+        codeLang = line.trim().slice(3).trim().toLowerCase();
+      }
       return;
     }
 
@@ -2478,6 +3265,29 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldSt
       return;
     }
 
+    if (tabsOpen) {
+      flushList();
+      flushQuote();
+      let j = idx + 1;
+      while (j < lines.length && lines[j].trim() !== ':::') j++;
+      const innerLines = lines.slice(idx + 1, j);
+      const rawBlockText = lines.slice(idx, Math.min(j + 1, lines.length)).join('\n');
+      const tabsKey = `${keyBase}tabs-${idx}`;
+      blocks.push(
+        <TabsBlockView
+          key={tabsKey}
+          keyBase={tabsKey}
+          tabs={parseTabsBlock(innerLines)}
+          rawBlockText={rawBlockText}
+          handlers={handlers}
+          linkIndex={linkIndex}
+          foldState={foldState}
+        />
+      );
+      skipUntil = j;
+      return;
+    }
+
     if (isTableStart) {
       flushList();
       flushQuote();
@@ -2522,6 +3332,7 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldSt
       flushList();
       flushQuote();
       codeBuffer = [];
+      codeLang = line.trim().slice(3).trim().toLowerCase();
     } else if (taskUl) {
       flushList();
       flushQuote();
@@ -2559,11 +3370,15 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldSt
   flushList();
   flushQuote();
   if (codeBuffer !== null && hiddenUntilLevel === null) {
-    blocks.push(
-      <pre key={`${keyBase}code-end`}>
-        <code>{codeBuffer.join('\n')}</code>
-      </pre>
-    );
+    if (codeLang === 'query' || codeLang === 'dataview') {
+      blocks.push(<QueryBlock key={`${keyBase}query-end`} raw={codeBuffer.join('\n')} handlers={handlers} linkIndex={linkIndex} />);
+    } else {
+      blocks.push(
+        <pre key={`${keyBase}code-end`}>
+          <code>{codeBuffer.join('\n')}</code>
+        </pre>
+      );
+    }
   }
   return blocks;
 }
@@ -2739,79 +3554,23 @@ function InlineMentions({ file, linkIndex, getBody, backlinkFileIds, allFiles, o
 }
 
 // ---------------------------------------------------------------------------
-// UI: login / folder-select / loading screens
+// UI: onboarding — sign in, pick a vault folder, wait for the first sync.
+//
+// This used to be four separate components (LoginScreen / FolderPrompt /
+// ProxyFolderPicker-as-modal / VaultLoadingScreen), each swapping in as a
+// full "page" with its own icon, and the proxy folder browser popping up as
+// a dark modal on top of FolderPrompt. It's now one shell (OnboardingFlow)
+// that stays mounted across steps and just swaps its inner content, so
+// picking a folder over the Apps Script proxy reads as the next step of the
+// same page rather than a dialog stacked on another page.
 // ---------------------------------------------------------------------------
-function LoginScreen({ onSignIn, ready, onSignInProxy }) {
-  const [showProxyForm, setShowProxyForm] = useState(false);
-  const [proxyUrl, setProxyUrl] = useState(() => localStorage.getItem('vault_proxy_url_draft') || '');
-  const [proxySecret, setProxySecret] = useState('');
 
-  const submitProxy = (e) => {
-    e.preventDefault();
-    if (!proxyUrl.trim() || !proxySecret.trim()) return;
-    localStorage.setItem('vault_proxy_url_draft', proxyUrl.trim());
-    onSignInProxy(proxyUrl.trim(), proxySecret.trim());
-  };
-
-  return (
-    <div className="center-screen">
-      <div className="brand-mark" aria-hidden="true">
-        <IconFolder size={22} />
-      </div>
-      <h1>Vault</h1>
-      <p className="muted">Your notes, in your Google Drive. Nothing stored on this device.</p>
-      <button className="btn btn-primary" disabled={!ready} onClick={onSignIn}>
-        {ready ? 'Sign in with Google' : 'Loading…'}
-      </button>
-
-      {!showProxyForm ? (
-        <button className="btn btn-secondary" onClick={() => setShowProxyForm(true)}>
-          Use Apps Script proxy instead
-        </button>
-      ) : (
-        <form className="proxy-form" onSubmit={submitProxy}>
-          <input
-            type="url"
-            placeholder="Apps Script Web App URL"
-            value={proxyUrl}
-            onChange={(e) => setProxyUrl(e.target.value)}
-            required
-          />
-          <input
-            type="password"
-            placeholder="Shared secret"
-            value={proxySecret}
-            onChange={(e) => setProxySecret(e.target.value)}
-            required
-          />
-          <button type="submit" className="btn btn-primary">
-            Connect
-          </button>
-        </form>
-      )}
-    </div>
-  );
-}
-
-function FolderPrompt({ onPick }) {
-  return (
-    <div className="center-screen">
-      <div className="brand-mark" aria-hidden="true">
-        <IconFolder size={22} />
-      </div>
-      <h1>Choose your vault</h1>
-      <p className="muted">Pick the Google Drive folder that holds (or will hold) your notes.</p>
-      <button className="btn btn-primary" onClick={onPick}>
-        Select Drive folder
-      </button>
-    </div>
-  );
-}
-
-// Picker needs an OAuth token, which proxy mode doesn't have — this
-// replaces it for that mode only, browsing folders via the Apps Script
-// proxy's "browse" action instead.
-function ProxyFolderPicker({ token, onPick, onCancel }) {
+// The folder-browsing UI for proxy mode (no OAuth token to hand the native
+// Google Picker, so this browses via the Apps Script proxy's "browse"
+// action instead). Used two places: inline as an onboarding step here, and
+// as a modal later for "change vault folder" from within an open vault —
+// `variant` controls which chrome wraps it.
+function ProxyFolderBrowser({ token, onPick, onCancel, variant = 'inline' }) {
   const [stack, setStack] = useState([{ id: 'root', name: 'Drives' }]);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -2848,70 +3607,78 @@ function ProxyFolderPicker({ token, onPick, onCancel }) {
     }
   };
 
-  return (
-    <div className="modal-overlay">
-      <div className="modal">
-        <h3>Select vault folder</h3>
-        <div className="breadcrumb">
-          {stack.map((s, i) => (
-            <span key={s.id}>
-              <button className="link-btn" onClick={() => setStack(stack.slice(0, i + 1))}>
-                {s.name}
-              </button>
-              {i < stack.length - 1 ? ' / ' : ''}
-            </span>
-          ))}
-        </div>
-        {loading ? (
-          <p className="muted">Loading…</p>
-        ) : (
-          <ul className="folder-list">
-            {items.length === 0 && <li className="muted">No subfolders here</li>}
-            {items.map((f) => (
-              <li key={f.id}>
-                <button className="link-btn" onClick={() => setStack([...stack, f])}>
-                  {f.isDrive ? <IconDrive size={14} /> : <IconFolder size={14} />}
-                  {f.name}
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-        <div className="manual-folder-entry">
-          <p className="muted small">
-            Folder not showing up (e.g. under "Computers")? Paste its link or ID instead:
-          </p>
-          <div className="manual-folder-row">
-            <input
-              type="text"
-              placeholder="Drive folder link or ID"
-              value={manualInput}
-              onChange={(e) => setManualInput(e.target.value)}
-            />
-            <button className="btn" disabled={!manualInput.trim() || resolving} onClick={handleUseManualId}>
-              {resolving ? 'Checking…' : 'Use'}
+  const content = (
+    <>
+      {variant === 'modal' && <h3>Select vault folder</h3>}
+      <div className="breadcrumb">
+        {stack.map((s, i) => (
+          <span key={s.id}>
+            <button className="link-btn" onClick={() => setStack(stack.slice(0, i + 1))}>
+              {s.name}
             </button>
-          </div>
-          {resolveError && <p className="error-text">{resolveError}</p>}
+            {i < stack.length - 1 ? ' / ' : ''}
+          </span>
+        ))}
+      </div>
+      {loading ? (
+        <p className="muted">Loading…</p>
+      ) : (
+        <ul className="folder-list">
+          {items.length === 0 && <li className="muted">No subfolders here</li>}
+          {items.map((f) => (
+            <li key={f.id}>
+              <button className="link-btn" onClick={() => setStack([...stack, f])}>
+                {f.isDrive ? <IconDrive size={14} /> : <IconFolder size={14} />}
+                {f.name}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="manual-folder-entry">
+        <p className="muted small">
+          Folder not showing up (e.g. under "Computers")? Paste its link or ID instead:
+        </p>
+        <div className="manual-folder-row">
+          <input
+            type="text"
+            placeholder="Drive folder link or ID"
+            value={manualInput}
+            onChange={(e) => setManualInput(e.target.value)}
+          />
+          <button className="btn btn-neutral" disabled={!manualInput.trim() || resolving} onClick={handleUseManualId}>
+            {resolving ? 'Checking…' : 'Use'}
+          </button>
         </div>
-        <div className="modal-actions">
+        {resolveError && <p className="error-text">{resolveError}</p>}
+      </div>
+      <div className="modal-actions">
+        {onCancel && (
           <button className="btn" onClick={onCancel}>
             Cancel
           </button>
-          <button className="btn btn-primary" onClick={() => onPick(current)}>
-            Use "{current.name}"
-          </button>
-        </div>
+        )}
+        <button className="btn btn-neutral" onClick={() => onPick(current)}>
+          Use "{current.name}"
+        </button>
       </div>
-    </div>
+    </>
   );
+
+  if (variant === 'modal') {
+    return (
+      <div className="modal-overlay">
+        <div className="modal">{content}</div>
+      </div>
+    );
+  }
+  return <div className="inline-folder-browser">{content}</div>;
 }
 
-// Full-screen, blocking loader shown only when there's nothing cached yet
-// to show — i.e. the very first time a vault is opened on this device (or
-// a genuinely empty vault). Repeat visits skip straight past this because
-// useVaultSync seeds state from IndexedDB before this would ever render.
-function VaultLoadingScreen({ progress }) {
+// Derives the human label + percent for the loading step from a sync
+// progress object — shared between the "opening" and "fetching content"
+// moments so both go through the same OnboardingFlow step.
+function loadingStepProps(progress) {
   const { phase, loaded, total } = progress;
   const pct = total > 0 ? Math.round((loaded / total) * 100) : null;
   const label =
@@ -2926,20 +3693,95 @@ function VaultLoadingScreen({ progress }) {
         ? `Loading ${loaded} of ${total} notes…`
         : 'Loading notes…'
       : 'Loading your vault…';
+  return { label, pct };
+}
+
+// The single onboarding shell. `step` selects which content renders inside
+// it; the shell itself (background, heading) never unmounts between steps.
+function OnboardingFlow({
+  step,
+  onSignIn,
+  ready,
+  onSignInProxy,
+  onPickFolder,
+  proxyToken,
+  onProxyFolderPick,
+  loadingLabel,
+  loadingPct
+}) {
+  const [showProxyForm, setShowProxyForm] = useState(false);
+  const [proxyUrl, setProxyUrl] = useState(() => localStorage.getItem('vault_proxy_url_draft') || '');
+  const [proxySecret, setProxySecret] = useState('');
+
+  const submitProxy = (e) => {
+    e.preventDefault();
+    if (!proxyUrl.trim() || !proxySecret.trim()) return;
+    localStorage.setItem('vault_proxy_url_draft', proxyUrl.trim());
+    onSignInProxy(proxyUrl.trim(), proxySecret.trim());
+  };
+
   return (
     <div className="center-screen">
-      <div className="brand-mark" aria-hidden="true">
-        <IconFolder size={22} />
-      </div>
       <h1>Vault</h1>
-      <p className="muted">{label}</p>
-      <div className="progress-bar">
-        <div
-          className={`progress-bar-fill ${pct === null ? 'indeterminate' : ''}`}
-          style={pct !== null ? { width: `${pct}%` } : undefined}
-        />
-      </div>
-      {pct !== null && <p className="muted small">{pct}%</p>}
+
+      {step === 'signin' && (
+        <>
+          <button className="btn btn-neutral" disabled={!ready} onClick={onSignIn}>
+            {ready ? 'Sign in with Google' : 'Loading…'}
+          </button>
+          {!showProxyForm ? (
+            <button className="btn-secondary" onClick={() => setShowProxyForm(true)}>
+              Use Apps Script proxy instead
+            </button>
+          ) : (
+            <form className="proxy-form" onSubmit={submitProxy}>
+              <input
+                type="url"
+                placeholder="Apps Script Web App URL"
+                value={proxyUrl}
+                onChange={(e) => setProxyUrl(e.target.value)}
+                required
+              />
+              <input
+                type="password"
+                placeholder="Shared secret"
+                value={proxySecret}
+                onChange={(e) => setProxySecret(e.target.value)}
+                required
+              />
+              <button type="submit" className="btn btn-neutral">
+                Connect
+              </button>
+            </form>
+          )}
+        </>
+      )}
+
+      {step === 'folder' && (
+        <>
+          <p className="muted">Pick the Google Drive folder that holds (or will hold) your notes.</p>
+          <button className="btn btn-neutral" onClick={onPickFolder}>
+            Select Drive folder
+          </button>
+        </>
+      )}
+
+      {step === 'proxy-folder' && (
+        <ProxyFolderBrowser token={proxyToken} onPick={onProxyFolderPick} variant="inline" />
+      )}
+
+      {step === 'loading' && (
+        <>
+          <p className="muted">{loadingLabel}</p>
+          <div className="progress-bar">
+            <div
+              className={`progress-bar-fill neutral ${loadingPct === null ? 'indeterminate' : ''}`}
+              style={loadingPct !== null ? { width: `${loadingPct}%` } : undefined}
+            />
+          </div>
+          {loadingPct !== null && <p className="muted small">{loadingPct}%</p>}
+        </>
+      )}
     </div>
   );
 }
@@ -3040,7 +3882,7 @@ function MenuDivider() {
 // Activity bar — the thin left-most icon ribbon, mirroring Obsidian's icon
 // strip. Switches which panel the side dock shows.
 // ---------------------------------------------------------------------------
-const ActivityBar = React.memo(function ActivityBar({ activeView, onSetView, onOpenCommandPalette, onSync, syncing, onChangeFolder, onSignOut, folderName }) {
+const ActivityBar = React.memo(function ActivityBar({ activeView, onSetView, onOpenGraph, onOpenCommandPalette, onSync, syncing, onChangeFolder, onSignOut, folderName }) {
   const item = (view, Icon, label, extra) => (
     <button
       className={`activity-btn ${activeView === view ? 'active' : ''}`}
@@ -3060,6 +3902,9 @@ const ActivityBar = React.memo(function ActivityBar({ activeView, onSetView, onO
         {item('toc', IconListTree, 'Outline')}
         {item('tags', IconTag, 'Tags')}
         {item('bookmarks', IconStar, 'Bookmarks')}
+        <button className="activity-btn" onClick={onOpenGraph} title="Graph view" aria-label="Graph view">
+          <IconGraph size={19} />
+        </button>
       </div>
       <div className="activity-bar-bottom">
         <button className="activity-btn" onClick={onOpenCommandPalette} title="Command palette (⌘K)">
@@ -3086,19 +3931,25 @@ const ActivityBar = React.memo(function ActivityBar({ activeView, onSetView, onO
 // ---------------------------------------------------------------------------
 const DND_MIME = 'application/x-vault-node';
 
-function AddMenu({ onNewNote, onNewFolder, onUploadFiles, canUpload, align = 'left' }) {
+function AddMenu({ onNewNote, onNewDatabase, onNewCanvas, onNewFolder, onUploadFiles, canUpload, align = 'left' }) {
   const fileInputRef = useRef(null);
   return (
     <DropdownMenu
       align={align}
       trigger={(toggle) => (
-        <button className="icon-btn" onClick={toggle} title="New note, folder, or upload" aria-label="Add">
+        <button className="icon-btn" onClick={toggle} title="New note, canvas, database, folder, or upload" aria-label="Add">
           <IconPlus size={16} />
         </button>
       )}
     >
       <MenuItem icon={<IconFilePlus size={15} />} onClick={onNewNote}>
         New note
+      </MenuItem>
+      <MenuItem icon={<IconCanvasKind size={15} />} onClick={onNewCanvas}>
+        New canvas
+      </MenuItem>
+      <MenuItem icon={<IconDatabase size={15} />} onClick={onNewDatabase}>
+        New database
       </MenuItem>
       <MenuItem icon={<IconFolderPlus size={15} />} onClick={onNewFolder}>
         New folder
@@ -3124,7 +3975,7 @@ function AddMenu({ onNewNote, onNewFolder, onUploadFiles, canUpload, align = 'le
   );
 }
 
-function TreeItemMenu({ isFolder, canUpload, onNewNote, onNewFolder, onUploadFiles, onRename, onToggleBookmark, isBookmarked, onDelete }) {
+function TreeItemMenu({ isFolder, canUpload, onNewNote, onNewDatabase, onNewCanvas, onNewFolder, onUploadFiles, onRename, onToggleBookmark, isBookmarked, onDelete }) {
   const fileInputRef = useRef(null);
   return (
     <DropdownMenu
@@ -3138,6 +3989,16 @@ function TreeItemMenu({ isFolder, canUpload, onNewNote, onNewFolder, onUploadFil
       {isFolder && (
         <MenuItem icon={<IconFilePlus size={15} />} onClick={onNewNote}>
           New note
+        </MenuItem>
+      )}
+      {isFolder && (
+        <MenuItem icon={<IconCanvasKind size={15} />} onClick={onNewCanvas}>
+          New canvas
+        </MenuItem>
+      )}
+      {isFolder && (
+        <MenuItem icon={<IconDatabase size={15} />} onClick={onNewDatabase}>
+          New database
         </MenuItem>
       )}
       {isFolder && (
@@ -3182,7 +4043,13 @@ function TreeItemMenu({ isFolder, canUpload, onNewNote, onNewFolder, onUploadFil
   );
 }
 
-function TreeNode({
+// Memoized so that expanding/collapsing one folder, or a state change
+// elsewhere in the app, doesn't re-render every row in a large vault's tree.
+// The recursive self-reference below uses the outer `TreeNode` (the memoized
+// wrapper) rather than the inner `TreeNodeImpl` name, so nested rows get the
+// same memoization benefit as top-level ones — a named function expression
+// would otherwise shadow itself and let recursive calls skip the memo.
+const TreeNode = React.memo(function TreeNodeImpl({
   node,
   depth,
   currentIds,
@@ -3191,6 +4058,8 @@ function TreeNode({
   onOpenFile,
   onOpenImage,
   onCreateNote,
+  onCreateDatabase,
+  onCreateCanvas,
   onCreateFolder,
   onUploadFiles,
   onRename,
@@ -3214,7 +4083,7 @@ function TreeNode({
   const handleDragEnd = () => setDragState({ draggingId: null, overId: null });
 
   if (node.type === 'file') {
-    const isAsset = node.kind !== 'note';
+    const isAsset = !opensInEditorPane(node.kind);
     const isBookmarked = bookmarks.has(node.id);
     const AssetIcon = ASSET_KIND_ICONS[node.kind] || null;
     return (
@@ -3225,11 +4094,11 @@ function TreeNode({
           draggable
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
-          onClick={(e) => (isAsset ? onOpenImage(node) : onOpenFile(node.id, e))}
+          onClick={(e) => (isAsset ? onOpenImage(node, e) : onOpenFile(node.id, e))}
         >
           {isBookmarked && <IconStarFilled className="bookmark-dot" size={11} />}
           {AssetIcon && <AssetIcon className="tree-kind-icon" size={13} />}
-          <span className="tree-label">{isAsset ? node.name : node.name.replace(/\.md$/i, '')}</span>
+          <span className="tree-label">{isAsset ? node.name : node.name.replace(/\.[^.]+$/i, '')}</span>
         </button>
         <TreeItemMenu
           isFolder={false}
@@ -3277,6 +4146,8 @@ function TreeNode({
           isFolder
           canUpload={canUpload}
           onNewNote={() => onCreateNote(node.id)}
+          onNewDatabase={() => onCreateDatabase(node.id)}
+          onNewCanvas={() => onCreateCanvas(node.id)}
           onNewFolder={() => onCreateFolder(node.id)}
           onUploadFiles={(files) => onUploadFiles(node.id, files)}
           onRename={() => onRename(node)}
@@ -3295,6 +4166,8 @@ function TreeNode({
             onOpenFile={onOpenFile}
             onOpenImage={onOpenImage}
             onCreateNote={onCreateNote}
+            onCreateDatabase={onCreateDatabase}
+            onCreateCanvas={onCreateCanvas}
             onCreateFolder={onCreateFolder}
             onUploadFiles={onUploadFiles}
             onRename={onRename}
@@ -3309,7 +4182,7 @@ function TreeNode({
         ))}
     </div>
   );
-}
+});
 
 function collectAllFolderIds(tree) {
   const ids = [];
@@ -3331,6 +4204,8 @@ const ExplorerPanel = React.memo(function ExplorerPanel({
   onOpenFile,
   onOpenImage,
   onCreateNote,
+  onCreateDatabase,
+  onCreateCanvas,
   onCreateFolder,
   onUploadFiles,
   onRename,
@@ -3358,6 +4233,8 @@ const ExplorerPanel = React.memo(function ExplorerPanel({
         <div className="side-panel-actions">
           <AddMenu
             onNewNote={() => onCreateNote(vaultRootId)}
+            onNewDatabase={() => onCreateDatabase(vaultRootId)}
+            onNewCanvas={() => onCreateCanvas(vaultRootId)}
             onNewFolder={() => onCreateFolder(vaultRootId)}
             onUploadFiles={(files) => onUploadFiles(vaultRootId, files)}
             canUpload={canUpload}
@@ -3397,6 +4274,8 @@ const ExplorerPanel = React.memo(function ExplorerPanel({
             onOpenFile={onOpenFile}
             onOpenImage={onOpenImage}
             onCreateNote={onCreateNote}
+            onCreateDatabase={onCreateDatabase}
+            onCreateCanvas={onCreateCanvas}
             onCreateFolder={onCreateFolder}
             onUploadFiles={onUploadFiles}
             onRename={onRename}
@@ -3437,18 +4316,31 @@ const SearchPanel = React.memo(function SearchPanel({ query, setQuery, filesMeta
   const [sortDesc, setSortDesc] = useState(false);
   const inputRef = useRef(null);
 
+  // The heavy work here is runVaultSearch scanning every note body in the
+  // vault — expensive enough on a large vault that running it on every
+  // single keystroke causes visible input lag on mobile. The input itself
+  // stays fully responsive (it's bound to `query`, updated synchronously by
+  // the parent on every keystroke); only the actual search execution lags
+  // ~150ms behind typing, which is imperceptible as "lag" but cuts the
+  // number of full-vault scans for a fast typist by an order of magnitude.
+  const [debouncedQuery, setDebouncedQuery] = useState(query);
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(query), 150);
+    return () => clearTimeout(t);
+  }, [query]);
+
   useEffect(() => {
     ensureIndexed();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const results = useMemo(() => {
-    if (!query.trim()) return [];
+    if (!debouncedQuery.trim()) return [];
     const effectiveGetBody = caseSensitive ? getBody : (id) => getBody(id);
-    const r = runVaultSearch(query, filesMeta, linkIndex, effectiveGetBody, tagsByFileId);
+    const r = runVaultSearch(debouncedQuery, filesMeta, linkIndex, effectiveGetBody, tagsByFileId);
     return sortDesc ? r.slice().reverse() : r;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, filesMeta, linkIndex, getBody, tagsByFileId, sortDesc, caseSensitive, indexVersion]);
+  }, [debouncedQuery, filesMeta, linkIndex, getBody, tagsByFileId, sortDesc, caseSensitive, indexVersion]);
 
   const toggleCollapsed = (id) =>
     setCollapsed((prev) => {
@@ -3579,6 +4471,7 @@ const TagsPanel = React.memo(function TagsPanel({ filesMeta, getBody, onOpenTag,
   }, []);
 
   const tags = useMemo(() => buildTagIndex(filesMeta, getBody), [filesMeta, getBody, indexVersion]);
+  const tagTree = useMemo(() => buildTagTree(tags), [tags]);
 
   return (
     <div className="side-panel">
@@ -3593,12 +4486,20 @@ const TagsPanel = React.memo(function TagsPanel({ filesMeta, getBody, onOpenTag,
         </div>
       )}
       <div className="side-panel-body tag-list">
-        {tags.length === 0 && <p className="muted small empty-hint">No tags yet. Use #tag anywhere in a note.</p>}
-        {tags.map(({ tag, files }) => (
-          <button key={tag} className="tag-row" onClick={() => onOpenTag(tag)}>
+        {tagTree.length === 0 && (
+          <p className="muted small empty-hint">No tags yet. Use #tag (or #parent/child for nested tags) anywhere in a note.</p>
+        )}
+        {tagTree.map(({ path, name, depth, count }) => (
+          <button
+            key={path}
+            className="tag-row"
+            style={{ paddingLeft: 10 + depth * 16 }}
+            title={path}
+            onClick={() => onOpenTag(path)}
+          >
             <IconTag size={13} className="tag-row-icon" />
-            <span className="tag-row-name">{tag}</span>
-            <span className="tag-row-count">{files.length}</span>
+            <span className="tag-row-name">{name}</span>
+            <span className="tag-row-count">{count}</span>
           </button>
         ))}
       </div>
@@ -3621,7 +4522,8 @@ const BookmarksPanel = React.memo(function BookmarksPanel({ bookmarks, filesMeta
       <div className="side-panel-body">
         {items.length === 0 && <p className="muted small empty-hint">Star a note or image to bookmark it.</p>}
         {items.map((f) => {
-          const isAsset = f.kind !== 'note';
+          const isAsset = !opensInEditorPane(f.kind);
+          const AssetIcon = ASSET_KIND_ICONS[f.kind] || null;
           return (
             <div className="tree-row" key={f.id}>
               <button
@@ -3629,7 +4531,8 @@ const BookmarksPanel = React.memo(function BookmarksPanel({ bookmarks, filesMeta
                 onClick={() => (isAsset ? onOpenImage(f) : onOpenFile(f.id))}
               >
                 <IconStarFilled size={12} className="bookmark-dot" />
-                <span className="tree-label">{isAsset ? f.name : f.name.replace(/\.md$/i, '')}</span>
+                {AssetIcon && <AssetIcon className="tree-kind-icon" size={13} />}
+                <span className="tree-label">{isAsset ? f.name : f.name.replace(/\.[^.]+$/i, '')}</span>
               </button>
               <button className="tree-menu-btn" title="Remove bookmark" onClick={() => onToggleBookmark(f.id)}>
                 <IconX size={13} />
@@ -3798,7 +4701,7 @@ function TabBar({ leaf, filesById, buffers, isActivePane, onSelectTab, onCloseTa
         {leaf.tabs.map((tab) => {
           const file = filesById.get(tab.fileId);
           const buf = buffers[tab.fileId];
-          const label = file ? file.name.replace(/\.md$/i, '') : 'Untitled';
+          const label = file ? file.name.replace(/\.[^.]+$/i, '') : 'Untitled';
           return (
             <div
               key={tab.id}
@@ -3867,7 +4770,7 @@ function Breadcrumb({ file, linkIndex }) {
   if (!file) return <span className="breadcrumb-empty">No file open</span>;
   const rec = linkIndex.records.find((r) => r.id === file.id);
   const dir = rec ? rec.dir : '';
-  const label = file.kind !== 'note' ? file.name : file.name.replace(/\.md$/i, '');
+  const label = opensInEditorPane(file.kind) ? file.name.replace(/\.[^.]+$/i, '') : file.name;
   return (
     <span className="pane-breadcrumb">
       {dir && <span className="breadcrumb-dir">{dir.replace(/\//g, ' / ')} / </span>}
@@ -3936,264 +4839,727 @@ function PaneHeader({
 }
 
 // ---------------------------------------------------------------------------
-// Editor content — the textarea (source) or rendered preview for a single
-// open tab. Mode is a per-tab property now, toggled from PaneHeader.
+// Editor content — the CodeMirror 6 live-preview editor (source) or rendered
+// preview for a single open tab. Mode is a per-tab property now, toggled
+// from PaneHeader.
+//
+// ===========================================================================
+// CodeMirror 6 live-preview editor
+// ===========================================================================
+// Replaces the old hand-rolled <textarea> + syntax-highlight overlay. Two
+// layers of "WYSIWYG" live here:
+//
+//  1. Inline marks (**bold**, *italic*, [[wikilinks]], #tags, ==highlight==,
+//     `code`) are decorated in place by `buildInlinePreviewPlugin`. Marker
+//     characters are hidden on every line except the one the cursor is
+//     currently on, so a token always drops back to raw, editable markdown
+//     the moment you touch it — the same "line reveals its own source"
+//     model Obsidian's Live Preview uses. Only `view.visibleRanges` are
+//     scanned per update (not the whole note), so cost no longer scales
+//     with note length the way the old full-note overlay did.
+//
+//  2. Block constructs that already have a full React renderer — callouts,
+//     +++ toggles +++, :::columns-N:::, :::tabs:::, and pipe tables — are
+//     swapped for an actual rendered block via `buildBlockWidgetPlugin`
+//     whenever the cursor is outside them, reusing `renderMarkdownBlocks`
+//     (same component reading view uses) rather than a second parser.
+//     Tables get real inline-editable cells (`EditableMarkdownTable`);
+//     everything else keeps its existing interactive bits (tab-switching,
+//     toggle expand/collapse) because it's the *same* component tree
+//     reading view already uses, just mounted as a widget. Clicking any
+//     non-interactive part of a rendered block drops it back to raw
+//     markdown for editing.
+//
+// Requires: codemirror, @codemirror/state, @codemirror/view,
+// @codemirror/commands, @codemirror/autocomplete (all pulled in by the
+// `codemirror` meta-package) — see the install note at the end of this file.
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// Source-mode syntax highlighting — mirrors Obsidian's "source mode": the
-// raw markdown stays fully intact and editable (nothing is hidden or
-// stripped), but the marker characters (#, *, _, `, [[ ]]) are dimmed and
-// the content they wrap is styled (headings sized up, links colored, etc).
-// Rendered as a layer positioned exactly behind a transparent-text textarea
-// (see the `.editor-textarea-source` styles) — this function only ever
-// changes color/weight/size, never the text content or its layout width, so
-// the overlay's line-wrapping stays pixel-identical to the real textarea.
-// ---------------------------------------------------------------------------
-const INLINE_SYNTAX_RE =
-  /(\[\[[^\]|]+(?:\|[^\]]+)?\]\])|(\[[^\]]+\]\([^)]+\))|(\*\*[^*]+\*\*)|(__[^_]+__)|(`[^`]+`)|(#[\w/-]+)|(\*[^*\s][^*]*?\*)|(_[^_\s][^_]*?_)/g;
-
-function highlightInlineSyntax(text, keyPrefix) {
-  if (!text) return null;
-  const nodes = [];
-  let lastIndex = 0;
-  let i = 0;
-  let m;
-  INLINE_SYNTAX_RE.lastIndex = 0;
-  while ((m = INLINE_SYNTAX_RE.exec(text)) !== null) {
-    const token = m[0];
-    if (m.index > lastIndex) nodes.push(text.slice(lastIndex, m.index));
-    const key = `${keyPrefix}-i${i++}`;
-    if (token.startsWith('[[')) {
-      const inner = token.slice(2, -2);
-      const pipe = inner.indexOf('|');
-      const target = pipe === -1 ? inner : inner.slice(0, pipe);
-      const alias = pipe === -1 ? null : inner.slice(pipe + 1);
-      nodes.push(
-        <span key={key}>
-          <span className="syn-mark">[[</span>
-          <span className="syn-link">{target}</span>
-          {alias !== null && (
-            <span>
-              <span className="syn-mark">|</span>
-              <span className="syn-link">{alias}</span>
-            </span>
-          )}
-          <span className="syn-mark">]]</span>
-        </span>
-      );
-    } else if (token[0] === '[') {
-      const mm = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token);
-      nodes.push(
-        <span key={key}>
-          <span className="syn-mark">[</span>
-          <span className="syn-link">{mm ? mm[1] : token}</span>
-          <span className="syn-mark">{`](${mm ? mm[2] : ''})`}</span>
-        </span>
-      );
-    } else if (token.startsWith('**')) {
-      nodes.push(
-        <span key={key}>
-          <span className="syn-mark">**</span>
-          <span className="syn-bold">{token.slice(2, -2)}</span>
-          <span className="syn-mark">**</span>
-        </span>
-      );
-    } else if (token.startsWith('__')) {
-      nodes.push(
-        <span key={key}>
-          <span className="syn-mark">__</span>
-          <span className="syn-bold">{token.slice(2, -2)}</span>
-          <span className="syn-mark">__</span>
-        </span>
-      );
-    } else if (token[0] === '`') {
-      nodes.push(
-        <span key={key}>
-          <span className="syn-mark">`</span>
-          <span className="syn-code">{token.slice(1, -1)}</span>
-          <span className="syn-mark">`</span>
-        </span>
-      );
-    } else if (token[0] === '#') {
-      nodes.push(
-        <span key={key} className="syn-tag">
-          {token}
-        </span>
-      );
-    } else if (token[0] === '*') {
-      nodes.push(
-        <span key={key}>
-          <span className="syn-mark">*</span>
-          <span className="syn-italic">{token.slice(1, -1)}</span>
-          <span className="syn-mark">*</span>
-        </span>
-      );
-    } else {
-      nodes.push(
-        <span key={key}>
-          <span className="syn-mark">_</span>
-          <span className="syn-italic">{token.slice(1, -1)}</span>
-          <span className="syn-mark">_</span>
-        </span>
-      );
+// Tab / Shift-Tab: indent-outdent whole lines touched by the selection.
+// Ported 1:1 from the old textarea implementation's line-based indent so
+// list nesting behaves identically.
+function cmIndentSelection(view, outdent) {
+  const { state } = view;
+  const changes = [];
+  const seenLines = new Set();
+  for (const range of state.selection.ranges) {
+    const startLine = state.doc.lineAt(range.from).number;
+    const endLine = state.doc.lineAt(range.to).number;
+    for (let ln = startLine; ln <= endLine; ln++) {
+      if (seenLines.has(ln)) continue;
+      seenLines.add(ln);
+      const line = state.doc.line(ln);
+      if (outdent) {
+        const m = /^( {1,2}|\t)/.exec(line.text);
+        if (m) changes.push({ from: line.from, to: line.from + m[0].length, insert: '' });
+      } else {
+        changes.push({ from: line.from, to: line.from, insert: '  ' });
+      }
     }
-    lastIndex = m.index + token.length;
   }
-  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
-  return nodes;
+  if (changes.length) view.dispatch({ changes, scrollIntoView: true });
+  return true;
 }
 
-// A list item's text can start with a "[ ]" / "[x]" task checkbox before any
-// other inline syntax — handled as its own leading token, then the rest goes
-// through the normal inline pass.
-function highlightListBody(text, keyPrefix) {
-  const m = /^(\[[ xX]\])(.*)$/.exec(text);
-  if (!m) return highlightInlineSyntax(text, keyPrefix);
-  return (
-    <span key={`${keyPrefix}-task`}>
-      <span className="syn-mark syn-task">{m[1]}</span>
-      {highlightInlineSyntax(m[2], `${keyPrefix}-t`)}
-    </span>
+// `- [ ]` / `- [x]` task checkboxes render as a real, always-clickable
+// checkbox (not just on the cursor's line — Obsidian keeps these live at
+// all times), toggling the underlying text directly.
+class TaskCheckboxWidget extends WidgetType {
+  constructor(checked) {
+    super();
+    this.checked = checked;
+  }
+  eq(other) {
+    return other.checked === this.checked;
+  }
+  toDOM(view) {
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = this.checked;
+    box.className = 'cm-task-checkbox';
+    box.setAttribute('data-cm-interactive', 'true');
+    box.onmousedown = (e) => {
+      e.preventDefault();
+      const pos = view.posAtDOM(box);
+      view.dispatch({ changes: { from: pos, to: pos + 1, insert: this.checked ? ' ' : 'x' } });
+    };
+    return box;
+  }
+  ignoreEvent() {
+    return false;
+  }
+}
+
+// Per-line inline decorations: heading sizing, marker-hiding for bold /
+// italic / strike / highlight / code / wikilinks / tags / md-links, and the
+// live checkbox widget above. Runs only over visible lines.
+function buildInlinePreviewPlugin() {
+  const MARK_RULES = [
+    { re: /\*\*([^*\n]+)\*\*/g, markLen: 2, cls: 'cm-bold' },
+    { re: /__([^_\n]+)__/g, markLen: 2, cls: 'cm-bold' },
+    { re: /~~([^~\n]+)~~/g, markLen: 2, cls: 'cm-strike' },
+    { re: /==([^=\n]+)==/g, markLen: 2, cls: 'cm-highlight' },
+    { re: /`([^`\n]+)`/g, markLen: 1, cls: 'cm-inline-code' },
+    { re: /(?<![*_\w])\*([^*\s][^*\n]*?)\*(?!\*)/g, markLen: 1, cls: 'cm-italic' },
+    { re: /(?<![\w_])_([^_\s][^_\n]*?)_(?![\w_])/g, markLen: 1, cls: 'cm-italic' }
+  ];
+
+  // Every call pushes {from, to, deco, lineDeco} entries into `out` rather
+  // than adding to the RangeSetBuilder directly — the builder requires
+  // strictly ascending `from` across the *whole* document, but the several
+  // regex passes below (wikilinks, md-links, tags, bold/italic/...) each
+  // produce their own ascending-within-themselves sequence that isn't
+  // ascending relative to each other. Collecting into a flat array and
+  // sorting once before adding (see build(), below) satisfies the
+  // builder's ordering requirement regardless of which rule fires where.
+  function decorateLine(out, line, isActiveLine) {
+    const text = line.text;
+
+    // Heading: size the whole line, dim the leading hashes.
+    const heading = /^(#{1,6})\s+/.exec(text);
+    if (heading) {
+      out.push({ from: line.from, to: line.from, deco: Decoration.line({ class: `cm-heading cm-heading-${heading[1].length}` }) });
+      out.push({ from: line.from, to: line.from + heading[1].length + 1, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+    }
+
+    // Blockquote / callout marker.
+    const quote = /^>\s?/.exec(text);
+    if (quote) {
+      out.push({ from: line.from, to: line.from + quote[0].length, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+    }
+
+    // Task checkbox — always live, regardless of cursor line.
+    const task = /^(\s*(?:[-*+]\s+))\[( |x|X)\]/.exec(text);
+    if (task) {
+      const boxFrom = line.from + task[1].length;
+      out.push({ from: boxFrom, to: boxFrom + 3, deco: Decoration.replace({ widget: new TaskCheckboxWidget(/[xX]/.test(task[2])) }) });
+    }
+
+    // Wikilinks / tags / md-links / bold / italic / etc. Hide marker chars
+    // unless this is the active line, in which case just style them.
+    const inlineFrom = task ? line.from + task[0].length : line.from;
+    const inlineText = text.slice(inlineFrom - line.from);
+
+    const wikiRe = /\[\[([^\]|\n]+)(\|([^\]\n]+))?\]\]/g;
+    let m;
+    while ((m = wikiRe.exec(inlineText))) {
+      const from = inlineFrom + m.index;
+      const targetLen = m[1].length;
+      if (!isActiveLine) {
+        out.push({ from, to: from + 2, deco: Decoration.replace({}) });
+        out.push({ from: from + 2 + targetLen, to: from + m[0].length, deco: Decoration.replace({}) });
+      } else {
+        out.push({ from, to: from + 2, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+        out.push({ from: from + m[0].length - 2, to: from + m[0].length, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+      }
+      out.push({ from: from + 2, to: from + 2 + targetLen, deco: Decoration.mark({ class: 'cm-wikilink' }) });
+      if (m[2]) out.push({ from: from + 2 + targetLen + 1, to: from + m[0].length - 2, deco: Decoration.mark({ class: 'cm-wikilink' }) });
+    }
+
+    const mdLinkRe = /(?<!!)\[([^\]\n]+)\]\(([^)\n]+)\)/g;
+    while ((m = mdLinkRe.exec(inlineText))) {
+      const from = inlineFrom + m.index;
+      const labelLen = m[1].length;
+      if (!isActiveLine) {
+        out.push({ from, to: from + 1, deco: Decoration.replace({}) });
+        out.push({ from: from + 1 + labelLen, to: from + m[0].length, deco: Decoration.replace({}) });
+      } else {
+        out.push({ from, to: from + 1, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+        out.push({ from: from + 1 + labelLen, to: from + m[0].length, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+      }
+      out.push({ from: from + 1, to: from + 1 + labelLen, deco: Decoration.mark({ class: 'cm-wikilink' }) });
+    }
+
+    const tagRe = /(^|[\s(])#([\w/-]+)/g;
+    while ((m = tagRe.exec(inlineText))) {
+      const from = inlineFrom + m.index + m[1].length;
+      out.push({ from, to: from + 1 + m[2].length, deco: Decoration.mark({ class: 'cm-tag' }) });
+    }
+
+    for (const rule of MARK_RULES) {
+      rule.re.lastIndex = 0;
+      while ((m = rule.re.exec(inlineText))) {
+        const from = inlineFrom + m.index;
+        const to = from + m[0].length;
+        if (!isActiveLine) {
+          out.push({ from, to: from + rule.markLen, deco: Decoration.replace({}) });
+          out.push({ from: to - rule.markLen, to, deco: Decoration.replace({}) });
+        } else {
+          out.push({ from, to: from + rule.markLen, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+          out.push({ from: to - rule.markLen, to, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+        }
+        out.push({ from: from + rule.markLen, to: to - rule.markLen, deco: Decoration.mark({ class: rule.cls }) });
+      }
+    }
+  }
+
+  return ViewPlugin.fromClass(
+    class {
+      constructor(view) {
+        this.decorations = this.build(view);
+      }
+      update(update) {
+        if (update.docChanged || update.selectionSet || update.viewportChanged) {
+          this.decorations = this.build(update.view);
+        }
+      }
+      build(view) {
+        const cursorLine = view.state.doc.lineAt(view.state.selection.main.head).number;
+        const lines = [];
+        for (const { from, to } of view.visibleRanges) {
+          let pos = from;
+          while (pos <= to) {
+            const line = view.state.doc.lineAt(pos);
+            lines.push(line);
+            pos = line.to + 1;
+          }
+        }
+        lines.sort((a, b) => a.from - b.from);
+        const entries = [];
+        for (const line of lines) {
+          decorateLine(entries, line, line.number === cursorLine);
+        }
+        entries.sort((a, b) => a.from - b.from || a.to - b.to);
+        const builder = new RangeSetBuilder();
+        for (const e of entries) builder.add(e.from, e.to, e.deco);
+        return builder.finish();
+      }
+    },
+    { decorations: (v) => v.decorations }
   );
 }
 
-function highlightSourceLine(line, lineKey) {
-  let m = /^(#{1,6})( +)(.*)$/.exec(line);
-  if (m) {
-    return (
-      <span key={lineKey}>
-        <span className="syn-mark">{m[1] + m[2]}</span>
-        <span className={`syn-h syn-h${m[1].length}`}>{highlightInlineSyntax(m[3], `${lineKey}h`)}</span>
-      </span>
-    );
-  }
+// ---------------------------------------------------------------------------
+// Block-level WYSIWYG: tables, callouts, toggles, columns, tabs.
+// ---------------------------------------------------------------------------
 
-  if (/^ {0,3}(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
-    return (
-      <span key={lineKey} className="syn-mark">
-        {line}
-      </span>
-    );
+// Mirrors the block-detection rules in `renderMarkdownBlocks` (see the
+// heading/quote/toggleOpen/columnsOpen/tabsOpen/isTableStart checks above)
+// so a range found here always self-renders correctly when its raw text is
+// handed to that function standalone.
+function findWysiwygBlockRanges(lines) {
+  const ranges = [];
+  let i = 0;
+  let inFence = false;
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (/^```/.test(trimmed)) {
+      const lang = trimmed.slice(3).trim().toLowerCase();
+      if (!inFence && (lang === 'query' || lang === 'dataview')) {
+        let j = i + 1;
+        while (j < lines.length && !/^```/.test(lines[j].trim())) j++;
+        ranges.push({ startLine: i, endLine: Math.min(j, lines.length - 1), kind: 'query' });
+        i = j + 1;
+        continue;
+      }
+      inFence = !inFence;
+      i++;
+      continue;
+    }
+    if (inFence) {
+      i++;
+      continue;
+    }
+    if (/^>/.test(line)) {
+      let j = i;
+      while (j < lines.length && /^>/.test(lines[j])) j++;
+      const first = lines[i].replace(/^>\s?/, '');
+      if (/^\[![a-zA-Z]+\]/.test(first)) ranges.push({ startLine: i, endLine: j - 1, kind: 'callout' });
+      i = j;
+      continue;
+    }
+    if (/^\+\+\+\s?/.test(line) && trimmed !== '+++') {
+      let j = i + 1;
+      while (j < lines.length && lines[j].trim() !== '+++') j++;
+      if (j < lines.length) {
+        ranges.push({ startLine: i, endLine: j, kind: 'toggle' });
+        i = j + 1;
+        continue;
+      }
+    }
+    const columnsOpen = trimmed.match(/^:::columns-([234])\s*$/);
+    if (columnsOpen) {
+      let j = i + 1;
+      while (j < lines.length && lines[j].trim() !== ':::') j++;
+      ranges.push({ startLine: i, endLine: Math.min(j, lines.length - 1), kind: 'columns' });
+      i = j + 1;
+      continue;
+    }
+    if (trimmed === ':::tabs') {
+      let j = i + 1;
+      while (j < lines.length && lines[j].trim() !== ':::') j++;
+      ranges.push({ startLine: i, endLine: Math.min(j, lines.length - 1), kind: 'tabs' });
+      i = j + 1;
+      continue;
+    }
+    const isTableStart =
+      !/^#{1,6}\s/.test(line) &&
+      line.includes('|') &&
+      trimmed !== '' &&
+      i + 1 < lines.length &&
+      isTableSeparatorRow(lines[i + 1]);
+    if (isTableStart) {
+      let j = i + 2;
+      while (j < lines.length && lines[j].includes('|') && lines[j].trim() !== '') j++;
+      ranges.push({ startLine: i, endLine: j - 1, kind: 'table' });
+      i = j;
+      continue;
+    }
+    i++;
   }
-
-  m = /^(\s{0,3}>+)( ?)(.*)$/.exec(line);
-  if (m) {
-    return (
-      <span key={lineKey}>
-        <span className="syn-mark">{m[1] + m[2]}</span>
-        <span className="syn-quote">{highlightInlineSyntax(m[3], `${lineKey}q`)}</span>
-      </span>
-    );
-  }
-
-  m = /^(\s*)(\d{1,9}[.)])( +)(.*)$/.exec(line);
-  if (m) {
-    return (
-      <span key={lineKey}>
-        {m[1]}
-        <span className="syn-mark">{m[2]}</span>
-        {m[3]}
-        {highlightListBody(m[4], `${lineKey}ol`)}
-      </span>
-    );
-  }
-
-  m = /^(\s*)([-*+])( +)(.*)$/.exec(line);
-  if (m) {
-    return (
-      <span key={lineKey}>
-        {m[1]}
-        <span className="syn-mark">{m[2]}</span>
-        {m[3]}
-        {highlightListBody(m[4], `${lineKey}ul`)}
-      </span>
-    );
-  }
-
-  return <span key={lineKey}>{highlightInlineSyntax(line, lineKey)}</span>;
+  return ranges;
 }
 
-// Per-line cache for highlightMarkdownSource, below. highlightSourceLine is a
-// pure function of a single line's text (it never looks at neighboring
-// lines), so a line whose text hasn't changed always produces an identical
-// result — caching by line content turns a full-note re-highlight into
-// work proportional to the lines that actually changed, typically just the
-// one being typed on. Capped and cleared wholesale rather than LRU-evicted:
-// simplicity over precision here, since hitting the cap just means one
-// full-cost recompute burst before the cache starts paying off again.
-const LINE_HIGHLIGHT_CACHE_LIMIT = 4000;
+function parseMarkdownTableRaw(raw) {
+  const lines = raw.split('\n');
+  const header = splitTableRow(lines[0]);
+  const aligns = splitTableRow(lines[1] || '').map(tableColAlign);
+  const rows = lines.slice(2).filter((l) => l.trim() !== '').map(splitTableRow);
+  return { header, aligns, rows };
+}
 
-function highlightMarkdownSource(text, cache) {
-  const lines = text.split('\n');
-  const out = [];
-  if (cache && cache.size > LINE_HIGHLIGHT_CACHE_LIMIT) cache.clear();
-  lines.forEach((line, idx) => {
-    const lineKey = `l${idx}`;
-    let node = cache?.get(line);
-    if (node) {
-      // Reuse the cached highlighting, just re-keyed for this line's
-      // current position — line content can legitimately repeat (blank
-      // lines, repeated headings), and React needs a key matching this
-      // position for stable reconciliation even though nothing about the
-      // highlighting itself needs recomputing.
-      node = React.cloneElement(node, { key: lineKey });
+function buildMarkdownTableRaw({ header, aligns, rows }) {
+  const alignMark = (a) => (a === 'center' ? ':---:' : a === 'right' ? '---:' : a === 'left' ? ':---' : '---');
+  const escape = (s) => (s || '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+  const headerLine = `| ${header.map(escape).join(' | ')} |`;
+  const sepLine = `| ${header.map((_, i) => alignMark(aligns[i])).join(' | ')} |`;
+  const bodyLines = rows.map((r) => `| ${header.map((_, i) => escape(r[i])).join(' | ')} |`);
+  return [headerLine, sepLine, ...bodyLines].join('\n');
+}
+
+// Real inline-editable table — the flagship "WYSIWYG" ask. Every cell is a
+// contentEditable span; on blur the whole table's markdown is rebuilt from
+// the DOM and swapped into the document via `onCommit`, which the widget
+// wires straight to a CodeMirror transaction (see MarkdownBlockWidget).
+function EditableMarkdownTable({ raw, onCommit }) {
+  const parsed = useMemo(() => parseMarkdownTableRaw(raw), [raw]);
+  const commit = (next) => onCommit(buildMarkdownTableRaw(next));
+  const setCell = (ri, ci, text) => {
+    const rows = parsed.rows.map((r) => r.slice());
+    while (rows[ri].length < parsed.header.length) rows[ri].push('');
+    rows[ri][ci] = text;
+    commit({ ...parsed, rows });
+  };
+  const setHeader = (ci, text) => {
+    const header = parsed.header.slice();
+    header[ci] = text;
+    commit({ ...parsed, header });
+  };
+  const addRow = () => commit({ ...parsed, rows: [...parsed.rows, parsed.header.map(() => '')] });
+  const addCol = () =>
+    commit({
+      header: [...parsed.header, 'Column'],
+      aligns: [...parsed.aligns, null],
+      rows: parsed.rows.map((r) => [...r, ''])
+    });
+  const delRow = (ri) => commit({ ...parsed, rows: parsed.rows.filter((_, i) => i !== ri) });
+  const delCol = (ci) =>
+    commit({
+      header: parsed.header.filter((_, i) => i !== ci),
+      aligns: parsed.aligns.filter((_, i) => i !== ci),
+      rows: parsed.rows.map((r) => r.filter((_, i) => i !== ci))
+    });
+  const cycleAlign = (ci) => {
+    const order = [null, 'center', 'right', 'left'];
+    const next = order[(order.indexOf(parsed.aligns[ci] || null) + 1) % order.length];
+    const aligns = parsed.aligns.slice();
+    aligns[ci] = next;
+    commit({ ...parsed, aligns });
+  };
+  const stopEnter = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      e.currentTarget.blur();
+    }
+  };
+  return (
+    <table className="md-table cm-editable-table" data-cm-interactive="true">
+      <thead>
+        <tr>
+          {parsed.header.map((h, ci) => (
+            <th key={ci} style={parsed.aligns[ci] ? { textAlign: parsed.aligns[ci] } : undefined}>
+              <span
+                contentEditable
+                suppressContentEditableWarning
+                className="cm-table-cell-edit"
+                onBlur={(e) => setHeader(ci, e.currentTarget.textContent)}
+                onKeyDown={stopEnter}
+              >
+                {h}
+              </span>
+              <span className="cm-table-col-btns">
+                <button type="button" title="Cycle alignment" onMouseDown={(e) => { e.preventDefault(); cycleAlign(ci); }}>
+                  ⇔
+                </button>
+                <button type="button" title="Delete column" onMouseDown={(e) => { e.preventDefault(); delCol(ci); }}>
+                  ×
+                </button>
+              </span>
+            </th>
+          ))}
+          <th className="cm-table-add-col">
+            <button type="button" title="Add column" onMouseDown={(e) => { e.preventDefault(); addCol(); }}>
+              +
+            </button>
+          </th>
+        </tr>
+      </thead>
+      <tbody>
+        {parsed.rows.map((row, ri) => (
+          <tr key={ri}>
+            {parsed.header.map((_, ci) => (
+              <td key={ci} style={parsed.aligns[ci] ? { textAlign: parsed.aligns[ci] } : undefined}>
+                <span
+                  contentEditable
+                  suppressContentEditableWarning
+                  className="cm-table-cell-edit"
+                  onBlur={(e) => setCell(ri, ci, e.currentTarget.textContent)}
+                  onKeyDown={stopEnter}
+                >
+                  {row[ci] ?? ''}
+                </span>
+              </td>
+            ))}
+            <td className="cm-table-row-btn">
+              <button type="button" title="Delete row" onMouseDown={(e) => { e.preventDefault(); delRow(ri); }}>
+                ×
+              </button>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td colSpan={parsed.header.length + 1}>
+            <button type="button" className="cm-table-add-row" onMouseDown={(e) => { e.preventDefault(); addRow(); }}>
+              + Add row
+            </button>
+          </td>
+        </tr>
+      </tfoot>
+    </table>
+  );
+}
+
+// A single rendered block, mounted as a CodeMirror block widget. Non-table
+// blocks reuse `renderMarkdownBlocks` verbatim (the reading-view renderer),
+// so toggle expand/collapse and tab-switching already work — their
+// `onMutateBlock` calls are translated from block-relative text offsets
+// into an absolute CodeMirror transaction here. Clicking anywhere that
+// isn't itself interactive (`[data-cm-interactive]`) drops the block back
+// to raw markdown for editing.
+class MarkdownBlockWidget extends WidgetType {
+  constructor(raw, from, to, keyBase, ctx, kind) {
+    super();
+    this.raw = raw;
+    this.from = from;
+    this.to = to;
+    this.keyBase = keyBase;
+    this.ctx = ctx;
+    this.kind = kind;
+  }
+  eq(other) {
+    return other.raw === this.raw && other.from === this.from && other.to === this.to && other.kind === this.kind;
+  }
+  toDOM() {
+    const dom = document.createElement('div');
+    dom.className = `cm-wysiwyg-block cm-wysiwyg-${this.kind}`;
+    const root = createRoot(dom);
+    this._root = root;
+
+    const replaceRange = (from, to, insert) => {
+      const view = this.ctx.getView();
+      if (!view) return;
+      view.dispatch({ changes: { from, to, insert } });
+    };
+    const onMutateBlock = (oldBlockText, newBlockText) => {
+      const at = this.raw.indexOf(oldBlockText);
+      if (at === -1) return;
+      replaceRange(this.from + at, this.from + at + oldBlockText.length, newBlockText);
+    };
+    const revealRaw = (evt) => {
+      if (evt.target.closest && evt.target.closest('[data-cm-interactive]')) return;
+      const view = this.ctx.getView();
+      if (!view) return;
+      evt.preventDefault();
+      view.dispatch({ selection: { anchor: this.from } });
+      view.focus();
+    };
+
+    if (this.kind === 'table') {
+      root.render(<EditableMarkdownTable raw={this.raw} onCommit={(newRaw) => replaceRange(this.from, this.to, newRaw)} />);
     } else {
-      node = highlightSourceLine(line, lineKey);
-      cache?.set(line, node);
+      root.render(
+        <div onMouseDown={revealRaw} className="cm-block-generic">
+          {renderMarkdownBlocks(
+            this.raw,
+            { ...this.ctx.getHandlers(), onMutateBlock },
+            this.ctx.getLinkIndex(),
+            this.keyBase,
+            this.ctx.getFoldState()
+          )}
+        </div>
+      );
     }
-    out.push(node);
-    if (idx < lines.length - 1) out.push('\n');
-  });
-  return out;
+    return dom;
+  }
+  destroy(dom) {
+    const root = this._root;
+    // Unmounting synchronously from inside CodeMirror's own DOM-update pass
+    // triggers a React "cannot update a component while rendering" warning;
+    // deferring one tick sidesteps it without any visible flicker.
+    setTimeout(() => root && root.unmount(), 0);
+  }
+  ignoreEvent() {
+    return true;
+  }
+}
+
+function buildBlockWidgetPlugin(ctx) {
+  return ViewPlugin.fromClass(
+    class {
+      constructor(view) {
+        this.cachedText = null;
+        this.cachedRanges = [];
+        this.decorations = this.build(view);
+      }
+      update(update) {
+        if (update.docChanged || update.selectionSet) {
+          this.decorations = this.build(update.view);
+        }
+      }
+      build(view) {
+        const doc = view.state.doc;
+        const text = doc.toString();
+        if (text !== this.cachedText) {
+          this.cachedText = text;
+          this.cachedRanges = findWysiwygBlockRanges(text.split('\n'));
+        }
+        const sel = view.state.selection.main;
+        const selStartLine = doc.lineAt(sel.from).number - 1;
+        const selEndLine = doc.lineAt(sel.to).number - 1;
+        const builder = new RangeSetBuilder();
+        for (const r of this.cachedRanges) {
+          if (selEndLine >= r.startLine && selStartLine <= r.endLine) continue; // cursor inside: show raw source
+          const fromLine = doc.line(r.startLine + 1);
+          const toLine = doc.line(r.endLine + 1);
+          const raw = doc.sliceString(fromLine.from, toLine.to);
+          const widget = new MarkdownBlockWidget(raw, fromLine.from, toLine.to, `cmblk-${r.startLine}-`, ctx, r.kind);
+          builder.add(fromLine.from, toLine.to, Decoration.replace({ widget, block: true }));
+        }
+        return builder.finish();
+      }
+    },
+    { decorations: (v) => v.decorations }
+  );
 }
 
 // ---------------------------------------------------------------------------
-// Custom undo/redo for the note editor. The textarea is fully React-
-// controlled, so any programmatic value swap (accepting a [[ autocomplete
-// suggestion, etc.) clears the browser's native undo stack — this keeps its
-// own stack instead, coalescing rapid same-size keystrokes (ordinary typing)
-// into a single undo step and treating pastes/deletes/programmatic jumps as
-// their own step, the same grouping heuristic most text editors use.
+// [[wikilink and #tag autocomplete, ported from the old textarea hooks onto
+// CodeMirror's native completion API (handles positioning, keyboard nav,
+// and dismissal for us — no more manual caret-coordinate math).
 // ---------------------------------------------------------------------------
-const UNDO_COALESCE_MS = 700;
-
-function useEditorUndo(initialValue) {
-  const historyRef = useRef({ past: [], future: [], last: initialValue, lastTime: 0 });
-
-  const record = useCallback((newValue) => {
-    const h = historyRef.current;
-    const now = Date.now();
-    const bigJump = Math.abs(newValue.length - h.last.length) > 1;
-    if (now - h.lastTime > UNDO_COALESCE_MS || bigJump) {
-      h.past.push(h.last);
-      if (h.past.length > 200) h.past.shift();
-      h.future = [];
+function wikilinkTagCompletionSource(ctx) {
+  return (context) => {
+    const wiki = context.matchBefore(/\[\[[^\]\n|]*$/);
+    if (wiki) {
+      const query = wiki.text.slice(2).toLowerCase();
+      const pool = ctx.getLinkIndex().records.concat(ctx.getPhantomRecords() || []);
+      const scoreOf = (hay) => (query ? hay.indexOf(query) : 0);
+      let scored = pool.map((r) => ({ r, score: scoreOf(r.baseName.toLowerCase()) })).filter((s) => s.score !== -1);
+      if (!scored.length) scored = pool.map((r) => ({ r, score: scoreOf(r.relativePath.toLowerCase()) })).filter((s) => s.score !== -1);
+      const options = scored
+        .sort((a, b) => a.score - b.score || a.r.baseName.localeCompare(b.r.baseName))
+        .slice(0, 8)
+        .map((s) => ({
+          label: s.r.baseName,
+          detail: s.r.isPhantom ? 'new' : s.r.relativePath !== s.r.baseName ? s.r.dir : undefined,
+          apply: (view, completion, from, to) => {
+            const insertText = bestLinkTextFor(s.r, ctx.getLinkIndex());
+            const after = view.state.sliceDoc(to, to + 2) === ']]' ? to + 2 : to;
+            view.dispatch({
+              changes: { from, to: after, insert: `[[${insertText}]]` },
+              selection: { anchor: from + insertText.length + 4 }
+            });
+          }
+        }));
+      if (!options.length) return null;
+      return { from: wiki.from + 2, options, filter: false };
     }
-    h.last = newValue;
-    h.lastTime = now;
-  }, []);
+    const tag = context.matchBefore(/(^|[\s(])#[\w/-]*$/);
+    if (tag) {
+      const hashIdx = tag.text.lastIndexOf('#');
+      const query = tag.text.slice(hashIdx + 1).toLowerCase();
+      const options = (ctx.getAllTags() || [])
+        .filter((t) => t.toLowerCase().includes(query))
+        .sort((a, b) => {
+          const aStarts = a.toLowerCase().startsWith(query) ? 0 : 1;
+          const bStarts = b.toLowerCase().startsWith(query) ? 0 : 1;
+          return aStarts - bStarts || a.localeCompare(b);
+        })
+        .slice(0, 8)
+        .map((t) => ({ label: `#${t}`, apply: `#${t}` }));
+      if (!options.length) return null;
+      return { from: tag.from + hashIdx, options, filter: false };
+    }
+    return null;
+  };
+}
 
-  const undo = useCallback(() => {
-    const h = historyRef.current;
-    if (!h.past.length) return null;
-    const prev = h.past.pop();
-    h.future.push(h.last);
-    h.last = prev;
-    h.lastTime = 0;
-    return prev;
-  }, []);
+// ---------------------------------------------------------------------------
+// The editor component. Recreates its EditorState (and undo history) only
+// when the open file changes — same page-per-note undo boundary the old
+// custom undo hook had — and treats `content` as an externally-controlled
+// value: doc replaces only happen when `content` changed for a reason other
+// than this editor's own last edit, so external updates (initial load,
+// rename-triggered reload) never fight the user's cursor.
+// ---------------------------------------------------------------------------
+function CodeMirrorNoteEditor({ fileId, content, onChange, linkIndex, phantomRecords, allTags, handlers, foldState, onSelectionChange, isActivePane, registerNav }) {
+  const hostRef = useRef(null);
+  const viewRef = useRef(null);
+  const lastEmittedRef = useRef(content);
+  const ctxRef = useRef(null);
 
-  const redo = useCallback(() => {
-    const h = historyRef.current;
-    if (!h.future.length) return null;
-    const next = h.future.pop();
-    h.past.push(h.last);
-    h.last = next;
-    h.lastTime = 0;
-    return next;
-  }, []);
+  if (!ctxRef.current) {
+    ctxRef.current = {
+      getView: () => viewRef.current,
+      getLinkIndex: () => linkIndex,
+      getPhantomRecords: () => phantomRecords,
+      getAllTags: () => allTags,
+      getHandlers: () => handlers,
+      getFoldState: () => foldState
+    };
+  }
+  ctxRef.current.getLinkIndex = () => linkIndex;
+  ctxRef.current.getPhantomRecords = () => phantomRecords;
+  ctxRef.current.getAllTags = () => allTags;
+  ctxRef.current.getHandlers = () => handlers;
+  ctxRef.current.getFoldState = () => foldState;
 
-  return { record, undo, redo };
+  // (Re)create the editor whenever the open file changes.
+  useEffect(() => {
+    if (!hostRef.current) return undefined;
+    const ctx = ctxRef.current;
+    const state = EditorState.create({
+      doc: content,
+      extensions: [
+        history(),
+        drawSelection(),
+        EditorView.lineWrapping,
+        cmPlaceholder(
+          'Start writing… [[Note Name]] to link, #tag to tag, > [!tip] for callouts, | tables |, +++ toggles +++, :::columns-2 for columns, :::tabs for a tab block.'
+        ),
+        autocompletion({ override: [wikilinkTagCompletionSource(ctx)], activateOnTyping: true }),
+        buildBlockWidgetPlugin(ctx),
+        buildInlinePreviewPlugin(),
+        keymap.of([
+          { key: 'Mod-z', run: cmUndo },
+          { key: 'Mod-y', mac: 'Mod-Shift-z', run: cmRedo },
+          { key: 'Tab', run: (v) => cmIndentSelection(v, false) },
+          { key: 'Shift-Tab', run: (v) => cmIndentSelection(v, true) },
+          ...completionKeymap,
+          ...historyKeymap,
+          ...defaultKeymap
+        ]),
+        EditorView.updateListener.of((update) => {
+          if (update.docChanged) {
+            const text = update.state.doc.toString();
+            lastEmittedRef.current = text;
+            onChange(text);
+          }
+          if (update.selectionSet) {
+            const sel = update.state.selection.main;
+            onSelectionChange?.(sel.from !== sel.to ? update.state.sliceDoc(sel.from, sel.to) : null);
+          }
+        }),
+        EditorView.theme({
+          '&': { height: '100%', fontSize: 'var(--editor-font-size, 15px)' },
+          '.cm-scroller': { fontFamily: 'var(--editor-font-family, inherit)', lineHeight: '1.6' },
+          '.cm-content': { padding: '0 0 40vh 0' }
+        })
+      ]
+    });
+    const view = new EditorView({ state, parent: hostRef.current });
+    viewRef.current = view;
+
+    if (registerNav) {
+      registerNav({
+        scrollToLine: (lineIndex) => {
+          const ln = Math.min(view.state.doc.lines, lineIndex + 1);
+          const line = view.state.doc.line(ln);
+          view.dispatch({ selection: { anchor: line.from, head: line.to }, scrollIntoView: true });
+          view.focus();
+        }
+      });
+    }
+
+    return () => {
+      registerNav?.(null);
+      view.destroy();
+      viewRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileId]);
+
+  // External content changes (not originating from this editor's own last
+  // dispatch) — e.g. switching tabs to a note whose content just finished
+  // loading — get pushed in as a doc replace without touching undo history
+  // semantics beyond what CodeMirror already does for a full-doc change.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    if (content === lastEmittedRef.current) return;
+    lastEmittedRef.current = content;
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: content }
+    });
+  }, [content]);
+
+  useEffect(() => {
+    if (isActivePane) viewRef.current?.focus();
+  }, [isActivePane, fileId]);
+
+  return <div ref={hostRef} className="cm-editor-host" />;
 }
 
 // Inline-editable note title, shown above the note content in both edit and
@@ -4242,8 +5608,6 @@ function NoteTitleField({ file, onRename }) {
 }
 
 function EditorContent({ file, content, onChange, linkIndex, phantomRecords, handlers, mode, loadingNote, backlinkIndex, allFiles, getBody, isActivePane }) {
-  const textareaRef = useRef(null);
-  const highlightRef = useRef(null);
   // Heading fold state (reading-view only), keyed by heading id, reset per
   // note so collapsing a section in one note doesn't leak into another.
   const [collapsedHeadings, setCollapsedHeadings] = useState(() => new Set());
@@ -4282,127 +5646,9 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
     }),
     [collapsedHeadings, collapsedToggles]
   );
-  const undoCtl = useEditorUndo(content);
-  const wrappedOnChange = useCallback(
-    (v) => {
-      undoCtl.record(v);
-      onChange(v);
-    },
-    [onChange, undoCtl]
-  );
-  const autocomplete = useLinkAutocomplete(textareaRef, wrappedOnChange, linkIndex, phantomRecords);
-
-  // Tab / Shift+Tab indent-outdent. Operates on whole lines (like every
-  // other markdown editor) so it works for plain text, list items, and
-  // nested lists alike — indenting a `- item` line's leading whitespace is
-  // exactly what turns it into a nested list item.
-  const INDENT_UNIT = '  ';
-  const applyIndent = useCallback(
-    (outdent) => {
-      const ta = textareaRef.current;
-      if (!ta) return;
-      const { selectionStart, selectionEnd, value } = ta;
-      const lineStart = value.lastIndexOf('\n', selectionStart - 1) + 1;
-      let lineEnd = value.indexOf('\n', selectionEnd > selectionStart ? selectionEnd - 1 : selectionEnd);
-      if (lineEnd === -1) lineEnd = value.length;
-      const before = value.slice(0, lineStart);
-      const after = value.slice(lineEnd);
-      const selectedLines = value.slice(lineStart, lineEnd).split('\n');
-
-      let firstLineDelta = 0;
-      let totalDelta = 0;
-      const newLines = selectedLines.map((line, i) => {
-        if (outdent) {
-          let removed = 0;
-          let next = line;
-          if (line.startsWith(INDENT_UNIT)) {
-            removed = INDENT_UNIT.length;
-            next = line.slice(INDENT_UNIT.length);
-          } else if (line.startsWith('\t')) {
-            removed = 1;
-            next = line.slice(1);
-          } else {
-            const m = line.match(/^ +/);
-            if (m) {
-              removed = m[0].length;
-              next = line.slice(removed);
-            }
-          }
-          if (i === 0) firstLineDelta = -removed;
-          totalDelta -= removed;
-          return next;
-        }
-        if (i === 0) firstLineDelta = INDENT_UNIT.length;
-        totalDelta += INDENT_UNIT.length;
-        return INDENT_UNIT + line;
-      });
-
-      const newValue = before + newLines.join('\n') + after;
-      const newStart = Math.max(lineStart, selectionStart + firstLineDelta);
-      const newEnd = Math.max(lineStart, selectionEnd + totalDelta);
-      wrappedOnChange(newValue);
-      requestAnimationFrame(() => {
-        const el = textareaRef.current;
-        if (el) el.setSelectionRange(newStart, newEnd);
-      });
-    },
-    [wrappedOnChange]
-  );
-
-  // highlightMarkdownSource re-parses and re-renders the syntax highlighting
-  // for the note on every call. An earlier version called it directly with
-  // the live `content` on every keystroke — on a note of any real length
-  // that's a full-note re-highlight blocking every single character typed,
-  // slow enough on a phone to desync from the OS's own IME/autocorrect
-  // (dropped or garbled characters, not just visible lag).
-  //
-  // The fix that replaced that (`useDeferredValue`) traded the blocking for
-  // staleness: it let the highlight overlay catch up a moment *after* the
-  // real (invisible) textarea updated, at low priority. That hid the lag on
-  // desktop, where React usually catches the deferred render up between
-  // individual keystrokes — but mobile swipe-typing and predictive text
-  // fire bursts of input fast enough that the overlay can stay measurably
-  // behind the real caret, which looked identical to the original
-  // wrap-divergence bug: text appearing somewhere other than where you're
-  // actually typing.
-  //
-  // Deferring is the wrong lever regardless of tuning — this overlay is
-  // supposed to be a live readout of the real caret position, so it can
-  // never be allowed to lag it, at any typing speed. Fixed instead by
-  // making the recompute itself cheap: highlightSourceLine is a pure
-  // function of one line's text, so a persistent cache keyed by line
-  // content turns "re-highlight everything" into "re-highlight the one
-  // line that changed" on ordinary typing. That's fast enough to run
-  // synchronously in step with every keystroke, so the overlay is never
-  // out of date relative to the real textarea, on any device.
-  const lineHighlightCacheRef = useRef(new Map());
-  const highlightedSource = useMemo(
-    () => highlightMarkdownSource(content, lineHighlightCacheRef.current),
-    [content]
-  );
-
-  // Keeps .editor-highlight pixel-aligned with the real textarea — see the
-  // long comment on .editor-highlight in App.css for why this mirrors
-  // scrollTop directly onto a real scrolling element rather than using a
-  // transform on a fixed-size layer (the previous approach, and the actual
-  // bug the user hit on long notes). This is the single place that
-  // alignment is computed, called from every event that can change either
-  // the textarea's scroll position or its content-box width.
-  const syncEditorOverlay = useCallback(() => {
-    const ta = textareaRef.current;
-    const hl = highlightRef.current;
-    if (!ta || !hl) return;
-    const scrollbarWidth = ta.offsetWidth - ta.clientWidth;
-    hl.style.right = `${scrollbarWidth}px`;
-    if (hl.scrollTop !== ta.scrollTop) hl.scrollTop = ta.scrollTop;
-  }, []);
-
-  useLayoutEffect(() => {
-    syncEditorOverlay();
-  }, [content, mode, syncEditorOverlay]);
 
   // Selection-based word/char count (status bar) only makes sense while
-  // there's an actual textarea selection to reflect — clear it whenever we
+  // there's an actual editor selection to reflect — clear it whenever we
   // leave edit mode or switch notes, so the status bar doesn't keep
   // showing counts for a selection that no longer exists on screen.
   useEffect(() => {
@@ -4411,27 +5657,14 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
 
   // Table-of-contents navigation bridge — registers a scroll-to-heading
   // function for this pane while it's the active one, so the Outline panel
-  // (which lives outside the pane tree entirely and has no DOM access to a
-  // specific editor instance) can jump to a heading regardless of whether
-  // this pane is currently in edit or reading view. Reading view has real
-  // heading elements with ids to scroll to; edit mode doesn't (it's one
-  // giant textarea), so there we estimate the target scrollTop from the
-  // line's index times the editor's fixed line-height and also move the
-  // caret there, which is the closest a plain textarea gets to "jump to
-  // heading".
+  // can jump to a heading regardless of whether this pane is currently in
+  // edit or reading view.
+  const cmNavRef = useRef(null);
   useEffect(() => {
     if (!isActivePane || !file) return undefined;
     const scrollToHeading = (lineIndex, headingId) => {
       if (mode === 'edit') {
-        const ta = textareaRef.current;
-        if (!ta) return;
-        const lines = ta.value.split('\n');
-        const charOffset = lines.slice(0, lineIndex).reduce((sum, l) => sum + l.length + 1, 0);
-        ta.focus();
-        ta.setSelectionRange(charOffset, charOffset + (lines[lineIndex]?.length || 0));
-        const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || 21;
-        ta.scrollTop = Math.max(0, lineIndex * lineHeight - ta.clientHeight / 3);
-        syncEditorOverlay();
+        cmNavRef.current?.scrollToLine(lineIndex);
       } else {
         const el = document.getElementById(headingId);
         el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -4439,19 +5672,7 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
     };
     handlers.registerActiveEditorNav?.(scrollToHeading);
     return () => handlers.registerActiveEditorNav?.(null);
-  }, [isActivePane, file, mode, handlers, syncEditorOverlay]);
-
-  useEffect(() => {
-    const ta = textareaRef.current;
-    if (!ta || typeof ResizeObserver === 'undefined') return undefined;
-    const ro = new ResizeObserver(syncEditorOverlay);
-    ro.observe(ta);
-    window.addEventListener('resize', syncEditorOverlay);
-    return () => {
-      ro.disconnect();
-      window.removeEventListener('resize', syncEditorOverlay);
-    };
-  }, [syncEditorOverlay]);
+  }, [isActivePane, file, mode, handlers]);
 
   if (!file) {
     return (
@@ -4461,11 +5682,53 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
     );
   }
 
+  if (file.kind === 'database') {
+    return (
+      <DatabaseView
+        file={file}
+        content={content}
+        onChange={(value) => onChange(value)}
+        handlers={handlers}
+        linkIndex={linkIndex}
+        loading={loadingNote}
+      />
+    );
+  }
+
+  if (file.kind === 'canvas') {
+    return (
+      <CanvasView
+        file={file}
+        content={content}
+        onChange={(value) => onChange(value)}
+        handlers={handlers}
+        linkIndex={linkIndex}
+        loading={loadingNote}
+        allFiles={allFiles}
+      />
+    );
+  }
+
   if (file.kind !== 'note') {
     return <AssetPane token={handlers.token} file={file} />;
   }
 
   const { properties, body } = parseFrontmatter(content);
+
+  // Lets a block rendered from `body` (currently just the tabs block) push
+  // an edit back to disk without knowing its own absolute position: it
+  // hands back its exact original source text and its replacement, and
+  // this finds-and-swaps that one substring within `body`, then reattaches
+  // the untouched frontmatter prefix before saving. `body` is always the
+  // tail of `content` (see parseFrontmatter), so slicing by length is safe.
+  const onMutateBlock = (oldBlockText, newBlockText) => {
+    const at = body.indexOf(oldBlockText);
+    if (at === -1) return;
+    const newBody = body.slice(0, at) + newBlockText + body.slice(at + oldBlockText.length);
+    const prefixLen = content.length - body.length;
+    onChange(content.slice(0, prefixLen) + newBody);
+  };
+  const readingHandlers = { ...handlers, onMutateBlock, getBody };
 
   return (
     <div className="editor-panes">
@@ -4473,109 +5736,27 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
       {mode === 'edit' ? (
         <div className="editor-textarea-wrap">
           <NoteTitleField file={file} onRename={handlers.onRenameFile} />
-          <div className="editor-textarea-source">
-            <div ref={highlightRef} className="editor-highlight" aria-hidden="true">
-              {highlightedSource}
-            </div>
-            <textarea
-              ref={textareaRef}
-              className="editor-textarea"
-              value={content}
-              onChange={(e) => {
-                wrappedOnChange(e.target.value);
-                autocomplete.updateFromCaret();
-              }}
-              onScroll={syncEditorOverlay}
-              onSelect={(e) => {
-                const { selectionStart, selectionEnd, value } = e.target;
-                handlers.onEditorSelectionChange?.(
-                  selectionEnd > selectionStart ? value.slice(selectionStart, selectionEnd) : null
-                );
-              }}
-              onKeyUp={(e) => {
-                if (!['ArrowUp', 'ArrowDown', 'Enter', 'Tab', 'Escape'].includes(e.key)) autocomplete.updateFromCaret();
-              }}
-              onKeyDown={(e) => {
-                const mod = e.metaKey || e.ctrlKey;
-                if (mod && !e.altKey && (e.key === 'z' || e.key === 'Z')) {
-                  e.preventDefault();
-                  const val = e.shiftKey ? undoCtl.redo() : undoCtl.undo();
-                  if (val != null) {
-                    onChange(val);
-                    requestAnimationFrame(() => {
-                      const ta = textareaRef.current;
-                      if (ta) ta.setSelectionRange(val.length, val.length);
-                    });
-                  }
-                  return;
-                }
-                if (mod && !e.altKey && (e.key === 'y' || e.key === 'Y')) {
-                  e.preventDefault();
-                  const val = undoCtl.redo();
-                  if (val != null) {
-                    onChange(val);
-                    requestAnimationFrame(() => {
-                      const ta = textareaRef.current;
-                      if (ta) ta.setSelectionRange(val.length, val.length);
-                    });
-                  }
-                  return;
-                }
-                if (e.key === 'Tab' && !autocomplete.suggestion) {
-                  e.preventDefault();
-                  applyIndent(e.shiftKey);
-                  return;
-                }
-                if (!autocomplete.suggestion) return;
-                if (e.key === 'ArrowDown') {
-                  e.preventDefault();
-                  autocomplete.move(1);
-                } else if (e.key === 'ArrowUp') {
-                  e.preventDefault();
-                  autocomplete.move(-1);
-                } else if (e.key === 'Enter' || e.key === 'Tab') {
-                  e.preventDefault();
-                  autocomplete.accept(autocomplete.suggestion.items[autocomplete.suggestion.activeIndex]);
-                } else if (e.key === 'Escape') {
-                  autocomplete.dismiss();
-                }
-              }}
-              onClick={autocomplete.updateFromCaret}
-              onBlur={() => {
-                setTimeout(autocomplete.dismiss, 120);
-                handlers.onEditorSelectionChange?.(null);
-              }}
-              spellCheck={false}
-              placeholder="Start writing… [[Note Name]] to link, #tag to tag, [[file.png]]/[[clip.mp4]]/[[song.mp3]] to embed, > [!tip] for callouts, | tables |, +++ toggles +++, :::columns-2 for columns."
-            />
-            {autocomplete.suggestion && (
-              <ul className="autocomplete-menu" style={{ top: autocomplete.suggestion.top, left: autocomplete.suggestion.left }}>
-                {autocomplete.suggestion.items.map((item, idx) => (
-                  <li
-                    key={item.id}
-                    className={idx === autocomplete.suggestion.activeIndex ? 'active' : ''}
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      autocomplete.accept(item);
-                    }}
-                  >
-                    <span className="autocomplete-label">{item.baseName}</span>
-                    {item.isPhantom ? (
-                      <span className="autocomplete-new">new</span>
-                    ) : (
-                      item.relativePath !== item.baseName && <span className="autocomplete-path">{item.dir}/</span>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+          <CodeMirrorNoteEditor
+            fileId={file.id}
+            content={content}
+            onChange={onChange}
+            linkIndex={linkIndex}
+            phantomRecords={phantomRecords}
+            allTags={handlers.allTags || []}
+            handlers={readingHandlers}
+            foldState={foldState}
+            isActivePane={isActivePane}
+            onSelectionChange={handlers.onEditorSelectionChange}
+            registerNav={(api) => {
+              cmNavRef.current = api;
+            }}
+          />
         </div>
       ) : (
         <div className="editor-preview">
           <NoteTitleField file={file} onRename={handlers.onRenameFile} />
           <PropertiesPanel properties={properties} handlers={handlers} />
-          {renderMarkdownBlocks(body, handlers, linkIndex, '', foldState)}
+          {renderMarkdownBlocks(body, readingHandlers, linkIndex, '', foldState)}
           <InlineMentions
             file={linkIndex.records.find((r) => r.id === file.id) || file}
             linkIndex={linkIndex}
@@ -4589,7 +5770,6 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
     </div>
   );
 }
-
 function EmbeddedImagePane({ token, file }) {
   const { url, error } = useDriveImageUrl(token, file.id);
   return (
@@ -4638,6 +5818,2459 @@ function AssetPane({ token, file }) {
           </a>
         </div>
       )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Databases — Notion-style tables, stored as JSON inside a ".base" file.
+// State shape is plain data (columns / rows / views); persistence is just
+// "call onChange with a new JSON string", which flows through the exact
+// same debounced Drive-save pipeline a note's textarea already uses (see
+// ensureFileLoaded / saveNow in App). Nothing here ever touches IndexedDB
+// directly — a database's body is just another buffer.
+// ============================================================================
+const DB_ROW_DND_MIME = 'application/x-vault-db-row';
+
+const IconImage = (p) => (
+  <Svg {...p}>
+    <rect x="3" y="3" width="18" height="18" rx="2" />
+    <circle cx="8.5" cy="8.5" r="1.5" />
+    <path d="m21 15-5-5L5 21" />
+  </Svg>
+);
+const IconExpand = (p) => (
+  <Svg {...p}>
+    <polyline points="15 3 21 3 21 9" />
+    <polyline points="9 21 3 21 3 15" />
+    <line x1="21" y1="3" x2="14" y2="10" />
+    <line x1="3" y1="21" x2="10" y2="14" />
+  </Svg>
+);
+
+function dbId(prefix) {
+  return `${prefix}_${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36).slice(-4)}`;
+}
+
+// Column type registry. `number_int`/`number_float` are kept as two
+// distinct types (rather than one "Number" type with a format toggle) per
+// SQL convention; `image`/`video`/`audio`/`file` are dedicated attachment
+// types (each stores an array of {id, name} Drive file references) rather
+// than one generic "file" type, so a Gallery view can tell an image column
+// apart from a PDF column when picking a cover.
+const DB_COLUMN_TYPES = {
+  text: { label: 'Text', icon: IconType },
+  text_multiline: { label: 'Multi-line text', icon: IconAlignLeft },
+  number_int: { label: 'Number (integer)', icon: IconHash },
+  number_float: { label: 'Number (decimal)', icon: IconHash },
+  select: { label: 'Select', icon: IconChevronsUpDown },
+  multi_select: { label: 'Multi-select / tags', icon: IconTags },
+  date: { label: 'Date', icon: IconCalendar },
+  checkbox: { label: 'Checkbox', icon: IconCheckSquare },
+  url: { label: 'URL', icon: IconLink2 },
+  image: { label: 'Image', icon: IconImage },
+  video: { label: 'Video', icon: IconVideo },
+  audio: { label: 'Audio', icon: IconAudio },
+  file: { label: 'File', icon: IconPaperclip }
+};
+const DB_ATTACHMENT_TYPES = new Set(['image', 'video', 'audio', 'file']);
+const DB_OPTION_COLORS = ['#8875e0', '#e0685f', '#e0a63d', '#6fcf97', '#4fa3e0', '#e07fc0', '#b0b0b0', '#5fc9c9'];
+
+function dbEmptyValue(type) {
+  if (type === 'checkbox') return false;
+  if (type === 'multi_select' || DB_ATTACHMENT_TYPES.has(type)) return [];
+  return null;
+}
+
+function dbMakeRow(columns) {
+  const values = {};
+  columns.forEach((c) => {
+    values[c.id] = dbEmptyValue(c.type);
+  });
+  return { id: dbId('row'), values, createdAt: Date.now() };
+}
+
+function makeDefaultDatabaseState(title) {
+  const nameCol = dbId('col');
+  const statusCol = dbId('col');
+  const tagsCol = dbId('col');
+  const dueCol = dbId('col');
+  const tableView = dbId('view');
+  const boardView = dbId('view');
+  const galleryView = dbId('view');
+  const columns = [
+    { id: nameCol, name: 'Name', type: 'text' },
+    {
+      id: statusCol,
+      name: 'Status',
+      type: 'select',
+      options: [
+        { id: dbId('opt'), label: 'Not started', color: '#b0b0b0' },
+        { id: dbId('opt'), label: 'In progress', color: '#e0a63d' },
+        { id: dbId('opt'), label: 'Done', color: '#6fcf97' }
+      ]
+    },
+    { id: tagsCol, name: 'Tags', type: 'multi_select', options: [] },
+    { id: dueCol, name: 'Due', type: 'date' }
+  ];
+  return {
+    version: 1,
+    title: title || 'Untitled database',
+    columns,
+    rows: [],
+    views: [
+      { id: tableView, name: 'Table', type: 'table' },
+      { id: boardView, name: 'Board', type: 'board', groupByColumnId: statusCol },
+      { id: galleryView, name: 'Gallery', type: 'gallery', coverColumnId: null }
+    ],
+    activeViewId: tableView
+  };
+}
+
+// Tolerant parse: any malformed/foreign JSON just yields a fresh default
+// database rather than crashing the pane — a `.base` file is never load-
+// bearing enough to be worth a hard error screen.
+function parseDatabaseContent(content) {
+  if (!content || !content.trim()) return makeDefaultDatabaseState();
+  try {
+    const p = JSON.parse(content);
+    if (!p || typeof p !== 'object' || !Array.isArray(p.columns)) return makeDefaultDatabaseState();
+    const views = Array.isArray(p.views) && p.views.length ? p.views : [{ id: dbId('view'), name: 'Table', type: 'table' }];
+    return {
+      version: 1,
+      title: p.title || 'Untitled database',
+      columns: p.columns,
+      rows: Array.isArray(p.rows) ? p.rows : [],
+      views,
+      activeViewId: p.activeViewId && views.some((v) => v.id === p.activeViewId) ? p.activeViewId : views[0].id
+    };
+  } catch {
+    return makeDefaultDatabaseState();
+  }
+}
+
+function serializeDatabaseState(state) {
+  return JSON.stringify(state, null, 2);
+}
+
+// A dropdown-style popover, like DropdownMenu, but the panel does NOT close
+// itself on every inner click — DropdownMenu's wrapper closes on any click
+// bubble, which is right for a plain menu of buttons but wrong here, where
+// panels contain text inputs (typing/clicking to focus would immediately
+// dismiss them). Children get an explicit `close()` to call when a pick is
+// actually made.
+function DbPopover({ trigger, children, align = 'left', width }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState(null);
+  const anchorRef = useRef(null);
+  const menuRef = useRef(null);
+  useClickOutside([anchorRef, menuRef], () => setOpen(false));
+
+  const computePos = useCallback(() => {
+    const el = anchorRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    setPos({ top: rect.bottom + 4, left: rect.left, right: window.innerWidth - rect.right });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    computePos();
+    const onReflow = () => computePos();
+    window.addEventListener('resize', onReflow);
+    window.addEventListener('scroll', onReflow, true);
+    return () => {
+      window.removeEventListener('resize', onReflow);
+      window.removeEventListener('scroll', onReflow, true);
+    };
+  }, [open, computePos]);
+
+  const toggle = useCallback((e) => {
+    e?.stopPropagation();
+    setOpen((v) => !v);
+  }, []);
+  const close = useCallback(() => setOpen(false), []);
+
+  return (
+    <span className="db-popover-wrap" ref={anchorRef}>
+      {trigger(toggle, open)}
+      {open &&
+        pos &&
+        createPortal(
+          <div
+            ref={menuRef}
+            className="db-popover portal"
+            style={{
+              top: pos.top,
+              ...(align === 'right' ? { right: pos.right } : { left: pos.left }),
+              ...(width ? { width } : {})
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {children(close)}
+          </div>,
+          document.body
+        )}
+    </span>
+  );
+}
+
+// --- Per-type cell value editors --------------------------------------------
+
+function DbTextCell({ value, onChange, multiline, dense }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value || '');
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!editing) setDraft(value || '');
+  }, [value, editing]);
+  useEffect(() => {
+    if (editing) ref.current?.focus();
+  }, [editing]);
+  const commit = () => {
+    setEditing(false);
+    if (draft !== (value || '')) onChange(draft || null);
+  };
+  if (editing) {
+    return multiline ? (
+      <textarea
+        ref={ref}
+        className="db-cell-input db-cell-textarea"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') {
+            setDraft(value || '');
+            setEditing(false);
+          }
+        }}
+        rows={dense ? 2 : 6}
+      />
+    ) : (
+      <input
+        ref={ref}
+        className="db-cell-input"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            commit();
+          }
+          if (e.key === 'Escape') {
+            setDraft(value || '');
+            setEditing(false);
+          }
+        }}
+      />
+    );
+  }
+  return (
+    <div
+      className={`db-cell-text ${!value ? 'empty' : ''} ${multiline ? 'multiline' : ''}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        setEditing(true);
+      }}
+    >
+      {value || ''}
+    </div>
+  );
+}
+
+function DbNumberCell({ value, onChange, integer }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value === null || value === undefined ? '' : String(value));
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!editing) setDraft(value === null || value === undefined ? '' : String(value));
+  }, [value, editing]);
+  useEffect(() => {
+    if (editing) ref.current?.focus();
+  }, [editing]);
+  const commit = () => {
+    setEditing(false);
+    const trimmed = draft.trim();
+    if (trimmed === '') {
+      if (value !== null) onChange(null);
+      return;
+    }
+    const num = integer ? parseInt(trimmed, 10) : parseFloat(trimmed);
+    if (Number.isNaN(num)) {
+      setDraft(value === null || value === undefined ? '' : String(value));
+      return;
+    }
+    if (num !== value) onChange(num);
+  };
+  if (editing) {
+    return (
+      <input
+        ref={ref}
+        type="number"
+        step={integer ? '1' : 'any'}
+        className="db-cell-input db-cell-number"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            commit();
+          }
+          if (e.key === 'Escape') setEditing(false);
+        }}
+      />
+    );
+  }
+  return (
+    <div
+      className={`db-cell-text db-cell-number-display ${value === null || value === undefined ? 'empty' : ''}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        setEditing(true);
+      }}
+    >
+      {value === null || value === undefined ? '' : value}
+    </div>
+  );
+}
+
+function DbCheckboxCell({ value, onChange }) {
+  return (
+    <button
+      className={`db-checkbox ${value ? 'checked' : ''}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        onChange(!value);
+      }}
+    >
+      {value && <IconCheck size={12} />}
+    </button>
+  );
+}
+
+function DbUrlCell({ value, onChange }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value || '');
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!editing) setDraft(value || '');
+  }, [value, editing]);
+  useEffect(() => {
+    if (editing) ref.current?.focus();
+  }, [editing]);
+  const commit = () => {
+    setEditing(false);
+    if (draft !== (value || '')) onChange(draft || null);
+  };
+  if (editing) {
+    return (
+      <input
+        ref={ref}
+        className="db-cell-input"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            commit();
+          }
+          if (e.key === 'Escape') setEditing(false);
+        }}
+        placeholder="https://"
+      />
+    );
+  }
+  return (
+    <div className="db-cell-url">
+      {value ? (
+        <>
+          <a href={value} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} className="db-url-link">
+            {value}
+          </a>
+          <button
+            className="db-cell-edit-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              setEditing(true);
+            }}
+          >
+            <IconEdit size={11} />
+          </button>
+        </>
+      ) : (
+        <div
+          className="db-cell-text empty"
+          onClick={(e) => {
+            e.stopPropagation();
+            setEditing(true);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function DbDateCell({ value, onChange }) {
+  return (
+    <input
+      type="date"
+      className="db-cell-date"
+      value={value || ''}
+      onClick={(e) => e.stopPropagation()}
+      onChange={(e) => onChange(e.target.value || null)}
+    />
+  );
+}
+
+function DbSelectCell({ value, onChange, column }) {
+  const options = column.options || [];
+  const current = options.find((o) => o.id === value) || null;
+  return (
+    <DbPopover
+      trigger={(toggle) => (
+        <button className="db-select-trigger" onClick={toggle}>
+          {current ? (
+            <span className="db-option-chip" style={{ '--chip-color': current.color }}>
+              {current.label}
+            </span>
+          ) : (
+            <span className="db-cell-text empty" />
+          )}
+        </button>
+      )}
+      width={200}
+    >
+      {(close) => (
+        <div className="db-select-popover">
+          {current && (
+            <button
+              className="db-popover-item db-clear-item"
+              onClick={() => {
+                onChange(null);
+                close();
+              }}
+            >
+              Clear
+            </button>
+          )}
+          {options.map((o) => (
+            <button
+              key={o.id}
+              className="db-popover-item"
+              onClick={() => {
+                onChange(o.id);
+                close();
+              }}
+            >
+              <span className="db-option-chip" style={{ '--chip-color': o.color }}>
+                {o.label}
+              </span>
+              {o.id === value && <IconCheck size={12} />}
+            </button>
+          ))}
+          {options.length === 0 && <div className="muted small db-popover-empty">No options yet — add some from Properties.</div>}
+        </div>
+      )}
+    </DbPopover>
+  );
+}
+
+function DbMultiSelectCell({ value, onChange, column, onCreateOption }) {
+  const [filter, setFilter] = useState('');
+  const options = column.options || [];
+  const selected = new Set(value);
+  const filtered = options.filter((o) => o.label.toLowerCase().includes(filter.toLowerCase()));
+  const exactExists = options.some((o) => o.label.toLowerCase() === filter.trim().toLowerCase());
+  return (
+    <DbPopover
+      trigger={(toggle) => (
+        <button className="db-multiselect-trigger" onClick={toggle}>
+          {value.length === 0 && <span className="db-cell-text empty" />}
+          {options
+            .filter((o) => selected.has(o.id))
+            .map((o) => (
+              <span key={o.id} className="db-option-chip" style={{ '--chip-color': o.color }}>
+                {o.label}
+              </span>
+            ))}
+        </button>
+      )}
+      width={220}
+    >
+      {() => (
+        <div className="db-select-popover">
+          <input
+            className="db-popover-filter"
+            placeholder="Search or create tag…"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && filter.trim() && !exactExists) {
+                e.preventDefault();
+                onCreateOption(filter.trim());
+                setFilter('');
+              }
+            }}
+          />
+          <div className="db-popover-list">
+            {filtered.map((o) => {
+              const isSel = selected.has(o.id);
+              return (
+                <button
+                  key={o.id}
+                  className="db-popover-item"
+                  onClick={() => onChange(isSel ? value.filter((id) => id !== o.id) : [...value, o.id])}
+                >
+                  <span className="db-option-chip" style={{ '--chip-color': o.color }}>
+                    {o.label}
+                  </span>
+                  {isSel && <IconCheck size={12} />}
+                </button>
+              );
+            })}
+            {filter.trim() && !exactExists && (
+              <button
+                className="db-popover-item db-create-item"
+                onClick={() => {
+                  onCreateOption(filter.trim());
+                  setFilter('');
+                }}
+              >
+                <IconPlus size={12} /> Create "{filter.trim()}"
+              </button>
+            )}
+            {options.length === 0 && !filter.trim() && (
+              <div className="muted small db-popover-empty">Type to create the vault's first tag here.</div>
+            )}
+          </div>
+        </div>
+      )}
+    </DbPopover>
+  );
+}
+
+function DbAttachmentThumb({ fileId, token }) {
+  const { url, error } = useDriveImageUrl(token, fileId);
+  if (error) {
+    return (
+      <span className="db-attachment-thumb-error">
+        <IconImageMissing size={12} />
+      </span>
+    );
+  }
+  return url ? <img src={url} className="db-attachment-thumb" alt="" /> : <span className="db-attachment-thumb loading" />;
+}
+
+function DbAttachmentCell({ value, onChange, type, dbFile, handlers }) {
+  const inputRef = useRef(null);
+  const accept = type === 'image' ? 'image/*' : type === 'video' ? 'video/*' : type === 'audio' ? 'audio/*' : undefined;
+  const parentId = dbFile?.parents?.[0];
+  const [busy, setBusy] = useState(false);
+  const typeLabel = DB_COLUMN_TYPES[type]?.label.toLowerCase() || 'file';
+
+  const handleFiles = async (files) => {
+    if (!files.length || !parentId) return;
+    setBusy(true);
+    try {
+      const uploaded = [];
+      for (const f of files) {
+        const rec = await handlers.uploadAttachment(parentId, f);
+        uploaded.push({ id: rec.id, name: rec.name });
+      }
+      onChange([...value, ...uploaded]);
+    } catch (err) {
+      window.alert(`Couldn't upload: ${err.message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <DbPopover
+      trigger={(toggle) => (
+        <button className="db-attachment-trigger" onClick={toggle}>
+          {value.length === 0 ? (
+            <span className="db-cell-text empty" />
+          ) : type === 'image' ? (
+            <span className="db-attachment-thumbs">
+              {value.slice(0, 3).map((att) => (
+                <DbAttachmentThumb key={att.id} fileId={att.id} token={handlers.token} />
+              ))}
+              {value.length > 3 && <span className="db-attachment-more">+{value.length - 3}</span>}
+            </span>
+          ) : (
+            <span className="db-attachment-chips">
+              {value.slice(0, 2).map((att) => (
+                <span key={att.id} className="db-file-chip-mini">
+                  <IconPaperclip size={10} /> {att.name}
+                </span>
+              ))}
+              {value.length > 2 && <span className="db-attachment-more">+{value.length - 2}</span>}
+            </span>
+          )}
+        </button>
+      )}
+      width={240}
+    >
+      {() => (
+        <div className="db-attachment-popover">
+          {value.map((att) => (
+            <div key={att.id} className="db-attachment-row">
+              {type === 'image' && <DbAttachmentThumb fileId={att.id} token={handlers.token} />}
+              <span className="db-attachment-name" onClick={() => handlers.onOpenAsset({ id: att.id, name: att.name })}>
+                {att.name}
+              </span>
+              <button className="db-attachment-remove" onClick={() => onChange(value.filter((a) => a.id !== att.id))}>
+                <IconX size={12} />
+              </button>
+            </div>
+          ))}
+          {value.length === 0 && <div className="muted small db-popover-empty">No {typeLabel} attached yet.</div>}
+          <button className="db-attachment-add" disabled={busy || !parentId} onClick={() => inputRef.current?.click()}>
+            {busy ? <IconLoader size={13} /> : <IconUpload size={13} />} Upload {typeLabel}
+          </button>
+          <input
+            ref={inputRef}
+            type="file"
+            multiple
+            accept={accept}
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const files = Array.from(e.target.files || []);
+              e.target.value = '';
+              handleFiles(files);
+            }}
+          />
+        </div>
+      )}
+    </DbPopover>
+  );
+}
+
+// Single dispatcher used by both the dense table cell and the full-width
+// row-detail panel — same editing UI, just different container CSS (see
+// `dense`).
+function DbCell({ column, value, onChange, dbFile, handlers, dense, onCreateOption }) {
+  switch (column.type) {
+    case 'text':
+      return <DbTextCell value={value} onChange={onChange} multiline={false} dense={dense} />;
+    case 'text_multiline':
+      return <DbTextCell value={value} onChange={onChange} multiline dense={dense} />;
+    case 'number_int':
+      return <DbNumberCell value={value} onChange={onChange} integer />;
+    case 'number_float':
+      return <DbNumberCell value={value} onChange={onChange} />;
+    case 'select':
+      return <DbSelectCell value={value} onChange={onChange} column={column} />;
+    case 'multi_select':
+      return <DbMultiSelectCell value={value || []} onChange={onChange} column={column} onCreateOption={onCreateOption} />;
+    case 'date':
+      return <DbDateCell value={value} onChange={onChange} />;
+    case 'checkbox':
+      return <DbCheckboxCell value={!!value} onChange={onChange} />;
+    case 'url':
+      return <DbUrlCell value={value} onChange={onChange} />;
+    case 'image':
+    case 'video':
+    case 'audio':
+    case 'file':
+      return <DbAttachmentCell value={value || []} onChange={onChange} type={column.type} dbFile={dbFile} handlers={handlers} />;
+    default:
+      return <span className="db-cell-empty">—</span>;
+  }
+}
+
+// --- Card property previews (Board / Gallery) -------------------------------
+
+function DbCardPropPreview({ column, value }) {
+  if (column.type === 'select') {
+    const opt = (column.options || []).find((o) => o.id === value);
+    if (!opt) return null;
+    return (
+      <span className="db-option-chip small" style={{ '--chip-color': opt.color }}>
+        {opt.label}
+      </span>
+    );
+  }
+  if (column.type === 'multi_select') {
+    const opts = (column.options || []).filter((o) => (value || []).includes(o.id));
+    if (!opts.length) return null;
+    return (
+      <span className="db-card-prop-tags">
+        {opts.map((o) => (
+          <span key={o.id} className="db-option-chip small" style={{ '--chip-color': o.color }}>
+            {o.label}
+          </span>
+        ))}
+      </span>
+    );
+  }
+  if (column.type === 'date') {
+    if (!value) return null;
+    return (
+      <span className="db-card-prop-date">
+        <IconCalendar size={10} /> {value}
+      </span>
+    );
+  }
+  return null;
+}
+
+// --- Table view --------------------------------------------------------------
+
+function DbTableView({ state, updateRowValue, addRow, deleteRow, onOpenRow, onCreateOption, dbFile, handlers, onManageColumns }) {
+  return (
+    <div className="db-table-scroll">
+      <table className="db-table">
+        <thead>
+          <tr>
+            <th className="db-th-expand" />
+            {state.columns.map((col) => {
+              const Icon = DB_COLUMN_TYPES[col.type]?.icon;
+              return (
+                <th key={col.id} className="db-th">
+                  {Icon && <Icon size={12} className="db-th-icon" />}
+                  <span>{col.name}</span>
+                </th>
+              );
+            })}
+            <th className="db-th-add">
+              <button className="db-add-col-btn" onClick={onManageColumns} title="Add property">
+                <IconPlus size={14} />
+              </button>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {state.rows.map((row) => (
+            <tr key={row.id} className="db-tr">
+              <td className="db-td-expand">
+                <button className="db-expand-btn" onClick={() => onOpenRow(row.id)} title="Open">
+                  <IconExpand size={11} />
+                </button>
+              </td>
+              {state.columns.map((col) => (
+                <td key={col.id} className="db-td">
+                  <DbCell
+                    column={col}
+                    value={row.values[col.id]}
+                    onChange={(v) => updateRowValue(row.id, col.id, v)}
+                    dbFile={dbFile}
+                    handlers={handlers}
+                    dense
+                    onCreateOption={(label) => onCreateOption(col.id, row.id, label, col.type === 'multi_select')}
+                  />
+                </td>
+              ))}
+              <td className="db-td-actions">
+                <button className="db-row-delete" onClick={() => deleteRow(row.id)} title="Delete row">
+                  <IconTrash size={12} />
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <button className="db-add-row-btn" onClick={addRow}>
+        <IconPlus size={13} /> New
+      </button>
+      {state.rows.length === 0 && <p className="muted small db-empty-hint">No rows yet.</p>}
+    </div>
+  );
+}
+
+// --- Board view ----------------------------------------------------------------
+
+function DbGroupByPicker({ columns, onPick }) {
+  const selectCols = columns.filter((c) => c.type === 'select');
+  if (!selectCols.length) return <p className="muted small">Add a Select property first, from Properties.</p>;
+  return (
+    <div className="db-groupby-pick-list">
+      {selectCols.map((c) => (
+        <button key={c.id} className="db-popover-item" onClick={() => onPick(c.id)}>
+          {c.name}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function DbCardCover({ fileId, token }) {
+  return (
+    <div className="db-card-cover">
+      <DbAttachmentThumb fileId={fileId} token={token} />
+    </div>
+  );
+}
+
+function DbBoardColumn({ bucket, rows, groupColId, columns, rowTitle, onOpenRow, onDropRow, onAddRow, onDeleteRow, coverColumn, token }) {
+  const [dragOver, setDragOver] = useState(false);
+  const previewCols = columns.filter((c) => c.id !== groupColId && (c.type === 'multi_select' || c.type === 'select' || c.type === 'date')).slice(0, 3);
+  return (
+    <div
+      className={`db-board-col ${dragOver ? 'drag-over' : ''}`}
+      onDragOver={(e) => {
+        e.preventDefault();
+        setDragOver(true);
+      }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragOver(false);
+        const rowId = e.dataTransfer.getData(DB_ROW_DND_MIME);
+        if (rowId) onDropRow(rowId);
+      }}
+    >
+      <div className="db-board-col-header">
+        <span className="db-option-chip" style={{ '--chip-color': bucket.color }}>
+          {bucket.label}
+        </span>
+        <span className="db-board-col-count">{rows.length}</span>
+      </div>
+      <div className="db-board-col-body">
+        {rows.map((row) => (
+          <div
+            key={row.id}
+            className="db-board-card"
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData(DB_ROW_DND_MIME, row.id);
+              e.dataTransfer.effectAllowed = 'move';
+            }}
+            onClick={() => onOpenRow(row.id)}
+          >
+            {coverColumn && (row.values[coverColumn.id] || [])[0] && (
+              <DbCardCover fileId={row.values[coverColumn.id][0].id} token={token} />
+            )}
+            <div className="db-board-card-title">{rowTitle(row)}</div>
+            <div className="db-board-card-props">
+              {previewCols.map((c) => (
+                <DbCardPropPreview key={c.id} column={c} value={row.values[c.id]} />
+              ))}
+            </div>
+            <button
+              className="db-board-card-delete"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDeleteRow(row.id);
+              }}
+            >
+              <IconX size={11} />
+            </button>
+          </div>
+        ))}
+        <button className="db-board-add-card" onClick={onAddRow}>
+          <IconPlus size={12} /> New
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DbBoardView({ state, view, updateRowValue, addRow, onOpenRow, rowTitle, deleteRow, onChangeGroupBy, token }) {
+  const groupCol = state.columns.find((c) => c.id === view.groupByColumnId && c.type === 'select');
+  if (!groupCol) {
+    return (
+      <div className="db-board-empty">
+        <p className="muted small">Pick a Select property to group this board by.</p>
+        <DbGroupByPicker columns={state.columns} onPick={onChangeGroupBy} />
+      </div>
+    );
+  }
+  const buckets = [{ id: null, label: 'No status', color: '#767676' }, ...groupCol.options.map((o) => ({ id: o.id, label: o.label, color: o.color }))];
+  const rowsByBucket = new Map(buckets.map((b) => [b.id, []]));
+  state.rows.forEach((row) => {
+    const v = row.values[groupCol.id] || null;
+    if (!rowsByBucket.has(v)) rowsByBucket.set(v, []);
+    rowsByBucket.get(v).push(row);
+  });
+  const coverColumn = state.columns.find((c) => c.id === view.coverColumnId && c.type === 'image');
+
+  return (
+    <div className="db-board">
+      {buckets.map((bucket) => (
+        <DbBoardColumn
+          key={String(bucket.id)}
+          bucket={bucket}
+          rows={rowsByBucket.get(bucket.id) || []}
+          groupColId={groupCol.id}
+          columns={state.columns}
+          rowTitle={rowTitle}
+          onOpenRow={onOpenRow}
+          onDropRow={(rowId) => updateRowValue(rowId, groupCol.id, bucket.id)}
+          onAddRow={() => onOpenRow(addRow({ [groupCol.id]: bucket.id }))}
+          onDeleteRow={deleteRow}
+          coverColumn={coverColumn}
+          token={token}
+        />
+      ))}
+    </div>
+  );
+}
+
+// --- Gallery view --------------------------------------------------------------
+
+function DbGalleryView({ state, view, onOpenRow, rowTitle, addRow, handlers }) {
+  const coverColumn = state.columns.find((c) => c.id === view.coverColumnId && c.type === 'image');
+  const previewCols = state.columns.filter((c) => c.type === 'select' || c.type === 'multi_select').slice(0, 2);
+  return (
+    <div className="db-gallery">
+      <div className="db-gallery-grid">
+        {state.rows.map((row) => {
+          const cover = coverColumn ? (row.values[coverColumn.id] || [])[0] : null;
+          return (
+            <div key={row.id} className="db-gallery-card" onClick={() => onOpenRow(row.id)}>
+              <div className="db-gallery-cover">
+                {cover ? (
+                  <DbAttachmentThumb fileId={cover.id} token={handlers.token} />
+                ) : (
+                  <div className="db-gallery-cover-placeholder">
+                    <IconDatabase size={22} />
+                  </div>
+                )}
+              </div>
+              <div className="db-gallery-title">{rowTitle(row)}</div>
+              <div className="db-gallery-props">
+                {previewCols.map((c) => (
+                  <DbCardPropPreview key={c.id} column={c} value={row.values[c.id]} />
+                ))}
+              </div>
+            </div>
+          );
+        })}
+        <button className="db-gallery-add" onClick={addRow}>
+          <IconPlus size={16} /> New
+        </button>
+      </div>
+      {!coverColumn && state.columns.some((c) => c.type === 'image') && (
+        <p className="muted small db-empty-hint">Pick an Image property as the cover from this view's menu.</p>
+      )}
+    </div>
+  );
+}
+
+// --- Row detail panel (Notion-style "open page") --------------------------
+
+function DbRowDetailModal({ row, columns, onClose, onChangeValue, onDelete, handlers, linkIndex, dbFile, onCreateOption }) {
+  const previewCol = columns.find((c) => c.type === 'text_multiline');
+  return (
+    <div className="modal-overlay db-row-modal-overlay" onClick={onClose}>
+      <div className="db-row-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="db-row-modal-header">
+          <button className="icon-btn" onClick={onClose} title="Close">
+            <IconX size={16} />
+          </button>
+          <button className="db-row-delete-btn" onClick={onDelete}>
+            <IconTrash size={13} /> Delete
+          </button>
+        </div>
+        <div className="db-row-modal-body">
+          {columns.map((col) => {
+            const Icon = DB_COLUMN_TYPES[col.type]?.icon;
+            return (
+              <div key={col.id} className="db-row-prop">
+                <div className="db-row-prop-label">
+                  {Icon && <Icon size={12} />}
+                  <span>{col.name}</span>
+                </div>
+                <div className="db-row-prop-value">
+                  <DbCell
+                    column={col}
+                    value={row.values[col.id]}
+                    onChange={(v) => onChangeValue(col.id, v)}
+                    dbFile={dbFile}
+                    handlers={handlers}
+                    onCreateOption={(label) => onCreateOption(col.id, row.id, label, col.type === 'multi_select')}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {previewCol && (
+          <div className="db-row-modal-preview">
+            <div className="db-row-prop-label">
+              <IconEye size={12} />
+              <span>Preview</span>
+            </div>
+            <div className="db-row-preview-body">{renderInline(row.values[previewCol.id] || '', 'dbprev', handlers, linkIndex)}</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// --- Property (column) management modal -------------------------------------
+
+function DbOptionsEditor({ options, onChange }) {
+  const [draft, setDraft] = useState('');
+  const addOption = () => {
+    const label = draft.trim();
+    if (!label) return;
+    onChange([...options, { id: dbId('opt'), label, color: DB_OPTION_COLORS[options.length % DB_OPTION_COLORS.length] }]);
+    setDraft('');
+  };
+  return (
+    <div className="db-options-editor">
+      {options.map((o) => (
+        <div key={o.id} className="db-option-editor-row">
+          <span className="db-option-chip" style={{ '--chip-color': o.color }}>
+            {o.label}
+          </span>
+          <span className="db-option-color-swatches">
+            {DB_OPTION_COLORS.map((c) => (
+              <button
+                key={c}
+                className={`db-color-swatch ${o.color === c ? 'active' : ''}`}
+                style={{ '--swatch-color': c }}
+                onClick={() => onChange(options.map((opt) => (opt.id === o.id ? { ...opt, color: c } : opt)))}
+              />
+            ))}
+          </span>
+          <button className="db-option-remove" onClick={() => onChange(options.filter((opt) => opt.id !== o.id))}>
+            <IconX size={11} />
+          </button>
+        </div>
+      ))}
+      <div className="db-option-add-row">
+        <input
+          className="db-popover-filter"
+          placeholder="Add option"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              addOption();
+            }
+          }}
+        />
+        <button className="db-option-add-btn" onClick={addOption}>
+          <IconPlus size={12} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DbColumnEditorRow({ column, onUpdate, onDelete, onMoveUp, onMoveDown }) {
+  const [name, setName] = useState(column.name);
+  useEffect(() => setName(column.name), [column.name]);
+  const Icon = DB_COLUMN_TYPES[column.type]?.icon;
+  const hasOptions = column.type === 'select' || column.type === 'multi_select';
+  return (
+    <div className="db-column-editor-row">
+      <div className="db-column-editor-main">
+        <span className="db-reorder-btns">
+          <button disabled={!onMoveUp} onClick={onMoveUp} title="Move up">
+            <IconChevronDown size={11} style={{ transform: 'rotate(180deg)' }} />
+          </button>
+          <button disabled={!onMoveDown} onClick={onMoveDown} title="Move down">
+            <IconChevronDown size={11} />
+          </button>
+        </span>
+        {Icon && <Icon size={13} className="db-column-editor-icon" />}
+        <input
+          className="db-column-name-input"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onBlur={() => {
+            const t = name.trim();
+            if (t && t !== column.name) onUpdate({ name: t });
+            else setName(column.name);
+          }}
+        />
+        <span className="db-column-type-label">{DB_COLUMN_TYPES[column.type]?.label}</span>
+        <button className="db-column-delete-btn" onClick={onDelete} title="Delete property">
+          <IconTrash size={13} />
+        </button>
+      </div>
+      {hasOptions && <DbOptionsEditor options={column.options || []} onChange={(options) => onUpdate({ options })} />}
+    </div>
+  );
+}
+
+function DbManageColumnsModal({ columns, onClose, onAdd, onUpdate, onDelete, onReorder }) {
+  const [newName, setNewName] = useState('');
+  const [newType, setNewType] = useState('text');
+  return (
+    <div className="modal-overlay db-manage-overlay" onClick={onClose}>
+      <div className="db-manage-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="db-manage-header">
+          <span>Properties</span>
+          <button className="icon-btn" onClick={onClose}>
+            <IconX size={15} />
+          </button>
+        </div>
+        <div className="db-manage-list">
+          {columns.map((col, i) => (
+            <DbColumnEditorRow
+              key={col.id}
+              column={col}
+              onUpdate={(patch) => onUpdate(col.id, patch)}
+              onDelete={() => {
+                if (window.confirm(`Delete property "${col.name}"? This removes it from every row.`)) onDelete(col.id);
+              }}
+              onMoveUp={i > 0 ? () => onReorder(col.id, -1) : null}
+              onMoveDown={i < columns.length - 1 ? () => onReorder(col.id, 1) : null}
+            />
+          ))}
+        </div>
+        <div className="db-manage-add">
+          <input
+            className="db-popover-filter"
+            placeholder="New property name"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && newName.trim()) {
+                const col = { id: dbId('col'), name: newName.trim(), type: newType };
+                if (newType === 'select' || newType === 'multi_select') col.options = [];
+                onAdd(col);
+                setNewName('');
+              }
+            }}
+          />
+          <select className="db-type-select" value={newType} onChange={(e) => setNewType(e.target.value)}>
+            {Object.entries(DB_COLUMN_TYPES).map(([type, meta]) => (
+              <option key={type} value={type}>
+                {meta.label}
+              </option>
+            ))}
+          </select>
+          <button
+            className="db-manage-add-btn"
+            onClick={() => {
+              if (!newName.trim()) return;
+              const col = { id: dbId('col'), name: newName.trim(), type: newType };
+              if (newType === 'select' || newType === 'multi_select') col.options = [];
+              onAdd(col);
+              setNewName('');
+            }}
+          >
+            <IconPlus size={13} /> Add property
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- View tabs / title -------------------------------------------------------
+
+function DbTitleField({ title, onRename }) {
+  const [draft, setDraft] = useState(title);
+  useEffect(() => setDraft(title), [title]);
+  return (
+    <input
+      className="db-title-input"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        const t = draft.trim() || 'Untitled database';
+        setDraft(t);
+        if (t !== title) onRename(t);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur();
+      }}
+      placeholder="Untitled database"
+    />
+  );
+}
+
+const DB_VIEW_TYPE_ICONS = { table: IconTable, board: IconKanban, gallery: IconLayoutGrid };
+
+function DbViewTab({ view, active, onSelect, onRename, onDelete, columns, onChangeGroupBy, onChangeCover }) {
+  const ViewIcon = DB_VIEW_TYPE_ICONS[view.type] || IconTable;
+  const [renaming, setRenaming] = useState(false);
+  const [draft, setDraft] = useState(view.name);
+  return (
+    <div className={`db-view-tab ${active ? 'active' : ''}`}>
+      <button className="db-view-tab-btn" onClick={onSelect}>
+        <ViewIcon size={13} />
+        {renaming ? (
+          <input
+            className="db-view-rename-input"
+            autoFocus
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            onBlur={() => {
+              setRenaming(false);
+              const t = draft.trim();
+              if (t && t !== view.name) onRename(t);
+              else setDraft(view.name);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur();
+            }}
+          />
+        ) : (
+          <span>{view.name}</span>
+        )}
+      </button>
+      <DbPopover
+        trigger={(toggle) => (
+          <button
+            className="db-view-tab-menu"
+            onClick={(e) => {
+              e.stopPropagation();
+              toggle(e);
+            }}
+          >
+            <IconChevronDown size={11} />
+          </button>
+        )}
+        width={200}
+      >
+        {(close) => (
+          <div className="db-view-settings-popover">
+            <button
+              className="db-popover-item"
+              onClick={() => {
+                setRenaming(true);
+                close();
+              }}
+            >
+              <IconEdit size={13} /> Rename
+            </button>
+            {view.type === 'board' && (
+              <>
+                <div className="db-popover-section-label">Group by</div>
+                {columns
+                  .filter((c) => c.type === 'select')
+                  .map((c) => (
+                    <button
+                      key={c.id}
+                      className="db-popover-item"
+                      onClick={() => {
+                        onChangeGroupBy(c.id);
+                        close();
+                      }}
+                    >
+                      {c.name} {c.id === view.groupByColumnId && <IconCheck size={12} />}
+                    </button>
+                  ))}
+                {columns.filter((c) => c.type === 'select').length === 0 && (
+                  <div className="muted small db-popover-empty">No Select properties yet.</div>
+                )}
+              </>
+            )}
+            {view.type === 'gallery' && (
+              <>
+                <div className="db-popover-section-label">Cover image</div>
+                <button
+                  className="db-popover-item"
+                  onClick={() => {
+                    onChangeCover(null);
+                    close();
+                  }}
+                >
+                  None {!view.coverColumnId && <IconCheck size={12} />}
+                </button>
+                {columns
+                  .filter((c) => c.type === 'image')
+                  .map((c) => (
+                    <button
+                      key={c.id}
+                      className="db-popover-item"
+                      onClick={() => {
+                        onChangeCover(c.id);
+                        close();
+                      }}
+                    >
+                      {c.name} {c.id === view.coverColumnId && <IconCheck size={12} />}
+                    </button>
+                  ))}
+              </>
+            )}
+            {onDelete && (
+              <button
+                className="db-popover-item danger"
+                onClick={() => {
+                  onDelete();
+                  close();
+                }}
+              >
+                <IconTrash size={13} /> Delete view
+              </button>
+            )}
+          </div>
+        )}
+      </DbPopover>
+    </div>
+  );
+}
+
+function DbAddViewButton({ onAdd }) {
+  const [name, setName] = useState('');
+  return (
+    <DbPopover
+      trigger={(toggle) => (
+        <button className="db-add-view-btn" onClick={toggle} title="Add view">
+          <IconPlus size={13} />
+        </button>
+      )}
+      width={200}
+    >
+      {(close) => (
+        <div className="db-add-view-popover">
+          <input className="db-popover-filter" placeholder="View name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+          {[
+            { type: 'table', label: 'Table', icon: IconTable },
+            { type: 'board', label: 'Board', icon: IconKanban },
+            { type: 'gallery', label: 'Gallery', icon: IconLayoutGrid }
+          ].map((opt) => (
+            <button
+              key={opt.type}
+              className="db-popover-item"
+              onClick={() => {
+                onAdd(opt.type, name.trim() || opt.label);
+                setName('');
+                close();
+              }}
+            >
+              <opt.icon size={13} /> {opt.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </DbPopover>
+  );
+}
+
+// --- Top-level database pane -------------------------------------------------
+
+function DatabaseView({ file, content, onChange, handlers, linkIndex, loading }) {
+  // Parsed/edited locally (like a form), not re-derived from `content` on
+  // every render — LeafPane remounts this component (key={file.id}) on file
+  // switch, so `content` is only ever read here at mount. Every mutation
+  // pushes a fresh JSON string up through `onChange`, which flows into the
+  // same buffer + debounced-save pipeline a note's textarea uses.
+  const [state, setState] = useState(() => parseDatabaseContent(content));
+  const [openRowId, setOpenRowId] = useState(null);
+  const [managePropsOpen, setManagePropsOpen] = useState(false);
+
+  const commit = useCallback(
+    (updater) => {
+      setState((prev) => {
+        const next = typeof updater === 'function' ? updater(prev) : updater;
+        onChange(serializeDatabaseState(next));
+        return next;
+      });
+    },
+    [onChange]
+  );
+
+  if (loading) {
+    return (
+      <div className="db-loading">
+        <IconLoader size={18} /> Loading database…
+      </div>
+    );
+  }
+
+  const activeView = state.views.find((v) => v.id === state.activeViewId) || state.views[0];
+
+  const addColumn = (col) => commit((s) => ({ ...s, columns: [...s.columns, col] }));
+  const updateColumn = (colId, patch) => commit((s) => ({ ...s, columns: s.columns.map((c) => (c.id === colId ? { ...c, ...patch } : c)) }));
+  const deleteColumn = (colId) =>
+    commit((s) => ({
+      ...s,
+      columns: s.columns.filter((c) => c.id !== colId),
+      rows: s.rows.map((r) => {
+        const v = { ...r.values };
+        delete v[colId];
+        return { ...r, values: v };
+      }),
+      views: s.views.map((v) =>
+        v.groupByColumnId === colId ? { ...v, groupByColumnId: null } : v.coverColumnId === colId ? { ...v, coverColumnId: null } : v
+      )
+    }));
+  const reorderColumn = (colId, dir) =>
+    commit((s) => {
+      const idx = s.columns.findIndex((c) => c.id === colId);
+      const swapWith = idx + dir;
+      if (idx === -1 || swapWith < 0 || swapWith >= s.columns.length) return s;
+      const cols = s.columns.slice();
+      const tmp = cols[idx];
+      cols[idx] = cols[swapWith];
+      cols[swapWith] = tmp;
+      return { ...s, columns: cols };
+    });
+
+  const addRow = (presetValues) => {
+    const row = dbMakeRow(state.columns);
+    if (presetValues) Object.assign(row.values, presetValues);
+    commit((s) => ({ ...s, rows: [...s.rows, row] }));
+    return row.id;
+  };
+  const updateRowValue = (rowId, colId, value) =>
+    commit((s) => ({
+      ...s,
+      rows: s.rows.map((r) => (r.id === rowId ? { ...r, values: { ...r.values, [colId]: value }, updatedAt: Date.now() } : r))
+    }));
+  const deleteRow = (rowId) => commit((s) => ({ ...s, rows: s.rows.filter((r) => r.id !== rowId) }));
+  const addOptionAndSetValue = (colId, rowId, label, multi) =>
+    commit((s) => {
+      const col = s.columns.find((c) => c.id === colId);
+      if (!col) return s;
+      const newOpt = { id: dbId('opt'), label, color: DB_OPTION_COLORS[(col.options || []).length % DB_OPTION_COLORS.length] };
+      const columns = s.columns.map((c) => (c.id === colId ? { ...c, options: [...(c.options || []), newOpt] } : c));
+      const rows = s.rows.map((r) => {
+        if (r.id !== rowId) return r;
+        const prevVal = r.values[colId];
+        const nextVal = multi ? [...(prevVal || []), newOpt.id] : newOpt.id;
+        return { ...r, values: { ...r.values, [colId]: nextVal } };
+      });
+      return { ...s, columns, rows };
+    });
+
+  const addView = (type, name) =>
+    commit((s) => {
+      const view = { id: dbId('view'), name, type };
+      if (type === 'board') view.groupByColumnId = s.columns.find((c) => c.type === 'select')?.id || null;
+      if (type === 'gallery') view.coverColumnId = s.columns.find((c) => c.type === 'image')?.id || null;
+      return { ...s, views: [...s.views, view], activeViewId: view.id };
+    });
+  const updateView = (viewId, patch) => commit((s) => ({ ...s, views: s.views.map((v) => (v.id === viewId ? { ...v, ...patch } : v)) }));
+  const deleteView = (viewId) =>
+    commit((s) => {
+      if (s.views.length <= 1) return s;
+      const views = s.views.filter((v) => v.id !== viewId);
+      return { ...s, views, activeViewId: s.activeViewId === viewId ? views[0].id : s.activeViewId };
+    });
+  const setActiveView = (viewId) => commit((s) => ({ ...s, activeViewId: viewId }));
+  const renameTitle = (title) => commit((s) => ({ ...s, title }));
+
+  const firstTextColumnId = (state.columns.find((c) => c.type === 'text') || state.columns[0])?.id;
+  const rowTitle = (row) => {
+    const v = firstTextColumnId ? row.values[firstTextColumnId] : null;
+    return (v && String(v).trim()) || 'Untitled';
+  };
+
+  const openRow = state.rows.find((r) => r.id === openRowId) || null;
+
+  return (
+    <div className="db-view">
+      <div className="db-header">
+        <IconDatabase size={20} className="db-header-icon" />
+        <DbTitleField title={state.title} onRename={renameTitle} />
+      </div>
+      <div className="db-view-tabs">
+        {state.views.map((v) => (
+          <DbViewTab
+            key={v.id}
+            view={v}
+            active={v.id === activeView.id}
+            onSelect={() => setActiveView(v.id)}
+            onRename={(name) => updateView(v.id, { name })}
+            onDelete={state.views.length > 1 ? () => deleteView(v.id) : null}
+            columns={state.columns}
+            onChangeGroupBy={(colId) => updateView(v.id, { groupByColumnId: colId })}
+            onChangeCover={(colId) => updateView(v.id, { coverColumnId: colId })}
+          />
+        ))}
+        <DbAddViewButton onAdd={addView} />
+        <div className="db-toolbar-spacer" />
+        <button className="db-manage-btn" onClick={() => setManagePropsOpen(true)}>
+          <IconSliders size={13} /> Properties
+        </button>
+        <button className="db-new-row-btn" onClick={() => setOpenRowId(addRow())}>
+          <IconPlus size={14} /> New
+        </button>
+      </div>
+
+      {activeView.type === 'table' && (
+        <DbTableView
+          state={state}
+          updateRowValue={updateRowValue}
+          addRow={() => addRow()}
+          deleteRow={deleteRow}
+          onOpenRow={setOpenRowId}
+          onCreateOption={addOptionAndSetValue}
+          dbFile={file}
+          handlers={handlers}
+          onManageColumns={() => setManagePropsOpen(true)}
+        />
+      )}
+      {activeView.type === 'board' && (
+        <DbBoardView
+          state={state}
+          view={activeView}
+          updateRowValue={updateRowValue}
+          addRow={addRow}
+          onOpenRow={setOpenRowId}
+          rowTitle={rowTitle}
+          deleteRow={deleteRow}
+          onChangeGroupBy={(colId) => updateView(activeView.id, { groupByColumnId: colId })}
+          token={handlers.token}
+        />
+      )}
+      {activeView.type === 'gallery' && (
+        <DbGalleryView state={state} view={activeView} onOpenRow={setOpenRowId} rowTitle={rowTitle} addRow={() => addRow()} handlers={handlers} />
+      )}
+
+      {managePropsOpen && (
+        <DbManageColumnsModal
+          columns={state.columns}
+          onClose={() => setManagePropsOpen(false)}
+          onAdd={addColumn}
+          onUpdate={updateColumn}
+          onDelete={deleteColumn}
+          onReorder={reorderColumn}
+        />
+      )}
+
+      {openRow && (
+        <DbRowDetailModal
+          row={openRow}
+          columns={state.columns}
+          onClose={() => setOpenRowId(null)}
+          onChangeValue={(colId, value) => updateRowValue(openRow.id, colId, value)}
+          onDelete={() => {
+            deleteRow(openRow.id);
+            setOpenRowId(null);
+          }}
+          handlers={handlers}
+          linkIndex={linkIndex}
+          dbFile={file}
+          onCreateOption={addOptionAndSetValue}
+        />
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// CANVAS BOARD — an Obsidian-style infinite canvas, stored as JSON inside a
+// ".canvas" file. Same "just JSON through the debounced Drive-save pipeline"
+// approach as the Database section above (see the file-format note at
+// CANVAS_EXTENSIONS near the top of this file). Schema:
+//
+//   { nodes: [
+//       { id, type:'text',  x,y,width,height, color, text },
+//       { id, type:'file',  x,y,width,height, color, file: <driveFileId> },
+//       { id, type:'link',  x,y,width,height, color, url },
+//       { id, type:'group', x,y,width,height, color, label }
+//     ],
+//     edges: [ { id, fromNode, fromSide, toNode, toSide, color, label } ] }
+//
+// Performance notes (see also the mobile/perf pass elsewhere in this file):
+//  - Node drag/resize never calls `onChange` per pixel. Live movement is
+//    tracked in a `liveOverrides` Map, batched to one state update per
+//    animation frame (see scheduleLiveOverrides), and only merged into the
+//    real (persisted) state — one single onChange/save — on pointer-up.
+//  - A plain click (pointerdown+up with no real movement) never touches
+//    state at all, so opening a canvas and clicking around doesn't spam
+//    Drive with saves.
+// ============================================================================
+const CANVAS_MIN_W = 120;
+const CANVAS_MIN_H = 60;
+const CANVAS_COLORS = ['#e0555a', '#e0a63d', '#d8c34a', '#6fcf97', '#4fb0c6', '#9b7fd1'];
+const CANVAS_ZOOM_MIN = 0.1;
+const CANVAS_ZOOM_MAX = 3;
+const CANVAS_MOVE_THRESHOLD = 3; // world px before a pointerdown counts as a drag, not a click
+
+function makeDefaultCanvasState() {
+  return { nodes: [], edges: [] };
+}
+
+// Tolerant parse: malformed/foreign JSON just yields a fresh empty canvas
+// rather than crashing the pane, same convention as parseDatabaseContent.
+function parseCanvasContent(content) {
+  if (!content || !content.trim()) return makeDefaultCanvasState();
+  try {
+    const p = JSON.parse(content);
+    const nodes = Array.isArray(p?.nodes)
+      ? p.nodes.filter((n) => n && n.id && n.type).map((n) => ({
+          width: CANVAS_MIN_W,
+          height: CANVAS_MIN_H,
+          x: 0,
+          y: 0,
+          ...n
+        }))
+      : [];
+    const edges = Array.isArray(p?.edges) ? p.edges.filter((e) => e && e.id && e.fromNode && e.toNode) : [];
+    return { nodes, edges };
+  } catch {
+    return makeDefaultCanvasState();
+  }
+}
+
+function serializeCanvasState(state) {
+  return JSON.stringify({ nodes: state.nodes, edges: state.edges }, null, 2);
+}
+
+function canvasNodeRect(node) {
+  return {
+    left: node.x,
+    top: node.y,
+    right: node.x + node.width,
+    bottom: node.y + node.height,
+    cx: node.x + node.width / 2,
+    cy: node.y + node.height / 2
+  };
+}
+
+function canvasSideAnchor(node, side) {
+  const r = canvasNodeRect(node);
+  if (side === 'top') return { x: r.cx, y: r.top };
+  if (side === 'bottom') return { x: r.cx, y: r.bottom };
+  if (side === 'left') return { x: r.left, y: r.cy };
+  return { x: r.right, y: r.cy };
+}
+
+function canvasOppositeSide(side) {
+  return side === 'top' ? 'bottom' : side === 'bottom' ? 'top' : side === 'left' ? 'right' : 'left';
+}
+
+// Whichever side of `node` is closest to world point `pt` — used when an
+// edge is dropped onto a node's body rather than one of its 4 dots.
+function canvasNearestSide(node, pt) {
+  const r = canvasNodeRect(node);
+  const d = { top: Math.abs(pt.y - r.top), bottom: Math.abs(pt.y - r.bottom), left: Math.abs(pt.x - r.left), right: Math.abs(pt.x - r.right) };
+  return Object.keys(d).reduce((a, b) => (d[a] <= d[b] ? a : b));
+}
+
+function canvasHitTest(nodes, pt, excludeId) {
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const n = nodes[i];
+    if (n.id === excludeId || n.type === 'group') continue;
+    if (pt.x >= n.x && pt.x <= n.x + n.width && pt.y >= n.y && pt.y <= n.y + n.height) return n;
+  }
+  return null;
+}
+
+// A gently-curved connector (Obsidian-style): control points are pulled
+// straight out from each anchor along its side's normal, so the curve
+// always leaves/arrives perpendicular to the card it's attached to.
+function canvasEdgePath(from, fromSide, to, toSide) {
+  const pull = Math.max(30, Math.min(140, Math.hypot(to.x - from.x, to.y - from.y) / 2));
+  const off = (side) => (side === 'top' ? { x: 0, y: -pull } : side === 'bottom' ? { x: 0, y: pull } : side === 'left' ? { x: -pull, y: 0 } : { x: pull, y: 0 });
+  const o1 = off(fromSide);
+  const o2 = off(toSide);
+  return `M ${from.x} ${from.y} C ${from.x + o1.x} ${from.y + o1.y}, ${to.x + o2.x} ${to.y + o2.y}, ${to.x} ${to.y}`;
+}
+
+function CanvasToolbar({ zoom, onZoomIn, onZoomOut, onZoomReset, onFitToContent, onAddText, onAddFile, onAddLink, onAddGroup }) {
+  return (
+    <div className="canvas-toolbar">
+      <div className="canvas-toolbar-group">
+        <button className="icon-btn" title="Add text card" onClick={onAddText}>
+          <IconStickyNote size={15} />
+        </button>
+        <button className="icon-btn" title="Embed a vault file" onClick={onAddFile}>
+          <IconFile size={15} />
+        </button>
+        <button className="icon-btn" title="Add web link card" onClick={onAddLink}>
+          <IconLink2 size={15} />
+        </button>
+        <button className="icon-btn" title="Add group" onClick={onAddGroup}>
+          <IconFrame size={15} />
+        </button>
+      </div>
+      <div className="canvas-toolbar-group">
+        <button className="icon-btn" title="Zoom out" onClick={onZoomOut}>
+          <IconZoomOut size={15} />
+        </button>
+        <button className="canvas-zoom-pct" onClick={onZoomReset} title="Reset zoom to 100%">
+          {Math.round(zoom * 100)}%
+        </button>
+        <button className="icon-btn" title="Zoom in" onClick={onZoomIn}>
+          <IconZoomIn size={15} />
+        </button>
+        <button className="icon-btn" title="Zoom to fit" onClick={onFitToContent}>
+          <IconMaximize size={15} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// A vault-file search/pick list, reused for "embed a file" — deliberately
+// tiny (no fuzzy scoring) since PaletteModal already owns the fuzzy switcher.
+function CanvasFilePickerModal({ files, onPick, onClose }) {
+  const [q, setQ] = useState('');
+  const filtered = useMemo(() => {
+    const query = q.trim().toLowerCase();
+    const list = query ? files.filter((f) => f.name.toLowerCase().includes(query)) : files;
+    return list.slice(0, 200);
+  }, [files, q]);
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal canvas-file-picker" onClick={(e) => e.stopPropagation()}>
+        <div className="help-modal-header">
+          <h3>Embed a file</h3>
+          <button className="icon-btn" onClick={onClose} aria-label="Close">
+            <IconX size={16} />
+          </button>
+        </div>
+        <input autoFocus className="canvas-file-picker-input" placeholder="Search vault files…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <div className="canvas-file-picker-list">
+          {filtered.map((f) => {
+            const Icon = ASSET_KIND_ICONS[f.kind] || IconFile;
+            return (
+              <button key={f.id} className="canvas-file-picker-row" onClick={() => onPick(f)}>
+                <Icon size={14} />
+                <span>{opensInEditorPane(f.kind) ? f.name.replace(/\.[^.]+$/i, '') : f.name}</span>
+              </button>
+            );
+          })}
+          {!filtered.length && (
+            <div className="muted small" style={{ padding: '10px 12px' }}>
+              No files found.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Live content for a `file`-type node — dispatches on the embedded file's
+// kind, reusing the exact same on-demand-fetch components notes already use
+// for inline embeds (ImageEmbed / VideoEmbed / AudioEmbed), so a canvas
+// never duplicates that fetch/caching logic.
+function CanvasFileNodeContent({ node, allFilesById, handlers, linkIndex }) {
+  const meta = allFilesById.get(node.file);
+  if (!meta) return <div className="canvas-embed-missing muted small">Missing or deleted file</div>;
+  if (meta.kind === 'image') {
+    return (
+      <div className="canvas-embed canvas-embed-image">
+        <ImageEmbed token={handlers.token} fileId={meta.id} name={meta.name} onOpen={() => handlers.onOpenById(meta.id)} />
+      </div>
+    );
+  }
+  if (meta.kind === 'video') {
+    return (
+      <div className="canvas-embed canvas-embed-media">
+        <VideoEmbed token={handlers.token} fileId={meta.id} name={meta.name} />
+      </div>
+    );
+  }
+  if (meta.kind === 'audio') {
+    return (
+      <div className="canvas-embed canvas-embed-media">
+        <AudioEmbed token={handlers.token} fileId={meta.id} name={meta.name} />
+      </div>
+    );
+  }
+  if (meta.kind === 'note') {
+    const body = handlers.getBody ? handlers.getBody(meta.id) : '';
+    const parsed = parseFrontmatter(body || '');
+    return (
+      <div className="canvas-embed canvas-embed-note">
+        <div className="canvas-embed-title">{meta.name.replace(/\.[^.]+$/i, '')}</div>
+        <div className="canvas-embed-note-body">
+          {parsed.body ? renderMarkdownBlocks(parsed.body, handlers, linkIndex, node.id) : <span className="muted small">Empty note</span>}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="canvas-embed canvas-embed-file" onDoubleClick={() => handlers.onOpenAsset?.(meta)}>
+      <IconFile size={26} />
+      <span className="muted small">{meta.name}</span>
+    </div>
+  );
+}
+
+function CanvasEdgesLayer({ nodes, edges, selectedEdgeId, connecting, onSelectEdge, onDoubleClickEdge }) {
+  const nodesById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
+  return (
+    <svg className="canvas-edges-svg">
+      <defs>
+        <marker id="canvas-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" className="canvas-arrowhead" />
+        </marker>
+      </defs>
+      {edges.map((e) => {
+        const from = nodesById.get(e.fromNode);
+        const to = nodesById.get(e.toNode);
+        if (!from || !to) return null;
+        const fromSide = e.fromSide || 'right';
+        const toSide = e.toSide || 'left';
+        const fromPt = canvasSideAnchor(from, fromSide);
+        const toPt = canvasSideAnchor(to, toSide);
+        const d = canvasEdgePath(fromPt, fromSide, toPt, toSide);
+        return (
+          <g key={e.id} className="canvas-edge-group">
+            <path
+              d={d}
+              className="canvas-edge-hit"
+              onClick={(ev) => {
+                ev.stopPropagation();
+                onSelectEdge(e.id);
+              }}
+              onDoubleClick={(ev) => {
+                ev.stopPropagation();
+                onDoubleClickEdge(e.id);
+              }}
+            />
+            <path
+              d={d}
+              className={`canvas-edge ${selectedEdgeId === e.id ? 'selected' : ''}`}
+              style={e.color ? { stroke: e.color } : undefined}
+              markerEnd="url(#canvas-arrow)"
+            />
+            {e.label && (
+              <text x={(fromPt.x + toPt.x) / 2} y={(fromPt.y + toPt.y) / 2 - 6} textAnchor="middle" className="canvas-edge-label">
+                {e.label}
+              </text>
+            )}
+          </g>
+        );
+      })}
+      {connecting && (
+        <path
+          d={canvasEdgePath(connecting.fromPt, connecting.fromSide, connecting.toPt, canvasOppositeSide(connecting.fromSide))}
+          className="canvas-edge canvas-edge-preview"
+        />
+      )}
+    </svg>
+  );
+}
+
+// Memoized: CanvasView re-renders on every pan/zoom/hover-state change, but
+// individual card props are usually unchanged, so most nodes should bail
+// out of re-rendering rather than re-diff their (sometimes note-preview-
+// rendering) contents on every frame of an unrelated node's drag.
+const CanvasNode = React.memo(function CanvasNode({
+  node,
+  selected,
+  hovered,
+  editing,
+  allFilesById,
+  handlers,
+  linkIndex,
+  onPointerDownBody,
+  onPointerDownResize,
+  onPointerDownDot,
+  onDoubleClick,
+  onHoverChange,
+  onCommitEdit
+}) {
+  const isGroup = node.type === 'group';
+  const style = { left: node.x, top: node.y, width: node.width, height: node.height };
+  if (node.color) style.borderColor = node.color;
+  return (
+    <div
+      className={`canvas-node canvas-node-${node.type} ${selected ? 'selected' : ''}`}
+      style={style}
+      onPointerEnter={() => onHoverChange(node.id)}
+      onPointerLeave={() => onHoverChange(null)}
+      onDoubleClick={(e) => onDoubleClick(e, node)}
+    >
+      {isGroup ? (
+        <div className="canvas-group-label" style={node.color ? { color: node.color } : undefined} onPointerDown={(e) => onPointerDownBody(e, node)}>
+          {node.label || 'Group'}
+        </div>
+      ) : (
+        <div className="canvas-node-body" onPointerDown={(e) => onPointerDownBody(e, node)}>
+          {node.type === 'text' &&
+            (editing ? (
+              <textarea
+                autoFocus
+                className="canvas-text-editor"
+                defaultValue={node.text || ''}
+                placeholder="Type markdown…"
+                onPointerDown={(e) => e.stopPropagation()}
+                onFocus={(e) => {
+                  const v = e.target.value;
+                  e.target.value = '';
+                  e.target.value = v;
+                }}
+                onBlur={(e) => onCommitEdit(node.id, e.target.value)}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === 'Escape') e.target.blur();
+                }}
+              />
+            ) : (
+              <div className="canvas-text-render">
+                {node.text ? renderMarkdownBlocks(node.text, handlers, linkIndex, node.id) : <span className="muted small">Double-click to edit</span>}
+              </div>
+            ))}
+          {node.type === 'file' && <CanvasFileNodeContent node={node} allFilesById={allFilesById} handlers={handlers} linkIndex={linkIndex} />}
+          {node.type === 'link' && (
+            <a className="canvas-link-card" href={node.url} target="_blank" rel="noreferrer" draggable={false}>
+              <IconLink2 size={14} />
+              <span>{node.url}</span>
+            </a>
+          )}
+        </div>
+      )}
+      {!isGroup && (selected || hovered) && !editing && (
+        <>
+          <span className="canvas-dot canvas-dot-top" onPointerDown={(e) => onPointerDownDot(e, node, 'top')} />
+          <span className="canvas-dot canvas-dot-right" onPointerDown={(e) => onPointerDownDot(e, node, 'right')} />
+          <span className="canvas-dot canvas-dot-bottom" onPointerDown={(e) => onPointerDownDot(e, node, 'bottom')} />
+          <span className="canvas-dot canvas-dot-left" onPointerDown={(e) => onPointerDownDot(e, node, 'left')} />
+        </>
+      )}
+      {selected && <span className="canvas-resize-handle" onPointerDown={(e) => onPointerDownResize(e, node)} />}
+    </div>
+  );
+});
+
+function CanvasView({ file, content, onChange, handlers, linkIndex, loading, allFiles }) {
+  const [state, setState] = useState(() => parseCanvasContent(content));
+  const [viewport, setViewport] = useState({ x: 0, y: 0, zoom: 1 });
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [selectedEdgeId, setSelectedEdgeId] = useState(null);
+  const [hoveredId, setHoveredId] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [liveOverrides, setLiveOverrides] = useState(null);
+  const [marquee, setMarquee] = useState(null);
+  const [connecting, setConnecting] = useState(null);
+  const [filePickerOpen, setFilePickerOpen] = useState(false);
+  const [spaceDown, setSpaceDown] = useState(false);
+  const [isPanning, setIsPanning] = useState(false);
+
+  const containerRef = useRef(null);
+  const dragRef = useRef(null);
+  const rafRef = useRef(null);
+  const pendingOverridesRef = useRef(null);
+  const pointersRef = useRef(new Map());
+  const loadedOnceRef = useRef(!loading);
+
+  // The buffer starts empty while Drive is still fetching content (see
+  // ensureFileLoaded in App) — this component mounts once per open tab, so
+  // it re-syncs its local state the first time real content actually
+  // arrives, then leaves local edits alone from then on (same "local state
+  // is the source of truth once loaded" rule DatabaseView uses).
+  useEffect(() => {
+    if (!loading && !loadedOnceRef.current) {
+      loadedOnceRef.current = true;
+      setState(parseCanvasContent(content));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading]);
+
+  const commit = useCallback(
+    (updater) => {
+      setState((prev) => {
+        const next = typeof updater === 'function' ? updater(prev) : updater;
+        onChange(serializeCanvasState(next));
+        return next;
+      });
+    },
+    [onChange]
+  );
+
+  const allFilesById = useMemo(() => new Map((allFiles || []).map((f) => [f.id, f])), [allFiles]);
+
+  const nodesForRender = useMemo(() => {
+    if (!liveOverrides) return state.nodes;
+    return state.nodes.map((n) => (liveOverrides.has(n.id) ? { ...n, ...liveOverrides.get(n.id) } : n));
+  }, [state.nodes, liveOverrides]);
+
+  const scheduleLiveOverrides = useCallback((map) => {
+    pendingOverridesRef.current = map;
+    if (rafRef.current) return;
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null;
+      setLiveOverrides(pendingOverridesRef.current);
+    });
+  }, []);
+
+  useEffect(() => () => rafRef.current && cancelAnimationFrame(rafRef.current), []);
+
+  const screenToWorld = useCallback(
+    (sx, sy) => {
+      const rect = containerRef.current.getBoundingClientRect();
+      return { x: (sx - rect.left - viewport.x) / viewport.zoom, y: (sy - rect.top - viewport.y) / viewport.zoom };
+    },
+    [viewport]
+  );
+
+  const zoomBy = useCallback((factor, centerScreen) => {
+    setViewport((v) => {
+      const nextZoom = clamp(v.zoom * factor, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX);
+      const rect = containerRef.current.getBoundingClientRect();
+      const cx = centerScreen ? centerScreen.x - rect.left : rect.width / 2;
+      const cy = centerScreen ? centerScreen.y - rect.top : rect.height / 2;
+      const worldX = (cx - v.x) / v.zoom;
+      const worldY = (cy - v.y) / v.zoom;
+      return { x: cx - worldX * nextZoom, y: cy - worldY * nextZoom, zoom: nextZoom };
+    });
+  }, []);
+
+  const fitToContent = useCallback(() => {
+    if (!containerRef.current) return;
+    if (!state.nodes.length) {
+      setViewport({ x: 0, y: 0, zoom: 1 });
+      return;
+    }
+    const xs = state.nodes.flatMap((n) => [n.x, n.x + n.width]);
+    const ys = state.nodes.flatMap((n) => [n.y, n.y + n.height]);
+    const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+    const rect = containerRef.current.getBoundingClientRect();
+    const pad = 60;
+    const zoom = clamp(
+      Math.min((rect.width - pad * 2) / Math.max(1, maxX - minX), (rect.height - pad * 2) / Math.max(1, maxY - minY)),
+      CANVAS_ZOOM_MIN,
+      1.5
+    );
+    setViewport({ x: rect.width / 2 - ((minX + maxX) / 2) * zoom, y: rect.height / 2 - ((minY + maxY) / 2) * zoom, zoom });
+  }, [state.nodes]);
+
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => fitToContent());
+    return () => cancelAnimationFrame(raf);
+    // Only re-fit when a different canvas file is opened.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file.id]);
+
+  // Space bar toggles pan-drag mode (Obsidian convention): plain click-drag
+  // on empty canvas draws a selection box; hold Space (or use a middle-
+  // mouse / one-finger touch drag) to pan instead.
+  useEffect(() => {
+    const kd = (e) => {
+      if (e.code === 'Space' && !e.repeat && document.activeElement?.tagName !== 'TEXTAREA') setSpaceDown(true);
+    };
+    const ku = (e) => {
+      if (e.code === 'Space') setSpaceDown(false);
+    };
+    window.addEventListener('keydown', kd);
+    window.addEventListener('keyup', ku);
+    return () => {
+      window.removeEventListener('keydown', kd);
+      window.removeEventListener('keyup', ku);
+    };
+  }, []);
+
+  // Wheel is attached natively (not passive) so preventDefault actually
+  // stops the page from scrolling/zooming underneath the canvas.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return undefined;
+    const onWheel = (e) => {
+      e.preventDefault();
+      if (e.ctrlKey || e.metaKey) {
+        zoomBy(Math.exp(-e.deltaY * 0.012), { x: e.clientX, y: e.clientY });
+      } else {
+        setViewport((v) => ({ ...v, x: v.x - e.deltaX, y: v.y - e.deltaY }));
+      }
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [zoomBy]);
+
+  const deleteSelection = useCallback(() => {
+    if (selectedEdgeId) {
+      commit((s) => ({ ...s, edges: s.edges.filter((e) => e.id !== selectedEdgeId) }));
+      setSelectedEdgeId(null);
+      return;
+    }
+    if (!selectedIds.size) return;
+    commit((s) => ({
+      ...s,
+      nodes: s.nodes.filter((n) => !selectedIds.has(n.id)),
+      edges: s.edges.filter((e) => !selectedIds.has(e.fromNode) && !selectedIds.has(e.toNode))
+    }));
+    setSelectedIds(new Set());
+  }, [selectedIds, selectedEdgeId, commit]);
+
+  const setSelectionColor = (color) => {
+    if (!selectedIds.size) return;
+    commit((s) => ({ ...s, nodes: s.nodes.map((n) => (selectedIds.has(n.id) ? { ...n, color } : n)) }));
+  };
+
+  const commitTextEdit = useCallback(
+    (id, text) => {
+      setEditingId(null);
+      commit((s) => ({ ...s, nodes: s.nodes.map((n) => (n.id === id ? { ...n, text } : n)) }));
+    },
+    [commit]
+  );
+
+  const onBgPointerDown = useCallback(
+    (e) => {
+      containerRef.current.focus();
+      containerRef.current.setPointerCapture(e.pointerId);
+      pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pointersRef.current.size >= 2) {
+        const pts = Array.from(pointersRef.current.values());
+        dragRef.current = {
+          mode: 'pinch',
+          startDist: Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1,
+          startMid: { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 },
+          startViewport: viewport
+        };
+        return;
+      }
+      const panMode = e.pointerType === 'touch' || e.button === 1 || spaceDown;
+      if (panMode) {
+        setIsPanning(true);
+        dragRef.current = { mode: 'pan', startClient: { x: e.clientX, y: e.clientY }, startViewport: viewport };
+      } else {
+        const world = screenToWorld(e.clientX, e.clientY);
+        setSelectedIds(new Set());
+        setSelectedEdgeId(null);
+        dragRef.current = { mode: 'marquee', startWorld: world };
+        setMarquee({ x0: world.x, y0: world.y, x1: world.x, y1: world.y });
+      }
+    },
+    [viewport, spaceDown, screenToWorld]
+  );
+
+  const onBackgroundDoubleClick = useCallback(
+    (e) => {
+      const world = screenToWorld(e.clientX, e.clientY);
+      const newNode = { id: uid('node'), type: 'text', x: world.x - 90, y: world.y - 30, width: 200, height: 80, text: '' };
+      commit((s) => ({ ...s, nodes: [...s.nodes, newNode] }));
+      setSelectedIds(new Set([newNode.id]));
+      setEditingId(newNode.id);
+    },
+    [screenToWorld, commit]
+  );
+
+  const beginMove = useCallback(
+    (e, node) => {
+      if (editingId === node.id) return;
+      e.stopPropagation();
+      containerRef.current.focus();
+      containerRef.current.setPointerCapture(e.pointerId);
+      let ids;
+      if (e.shiftKey) {
+        ids = new Set(selectedIds);
+        ids.has(node.id) ? ids.delete(node.id) : ids.add(node.id);
+        setSelectedIds(ids);
+      } else if (selectedIds.has(node.id)) {
+        ids = selectedIds;
+      } else {
+        ids = new Set([node.id]);
+        setSelectedIds(ids);
+      }
+      setSelectedEdgeId(null);
+      let dragIds = Array.from(ids);
+      if (node.type === 'group') {
+        const r = canvasNodeRect(node);
+        const contained = state.nodes
+          .filter((n) => n.id !== node.id && n.type !== 'group' && n.x >= r.left && n.y >= r.top && n.x + n.width <= r.right && n.y + n.height <= r.bottom)
+          .map((n) => n.id);
+        dragIds = Array.from(new Set([...dragIds, ...contained]));
+      }
+      const startPositions = new Map(state.nodes.filter((n) => dragIds.includes(n.id)).map((n) => [n.id, { x: n.x, y: n.y }]));
+      dragRef.current = { mode: 'move', ids: dragIds, startPositions, startWorld: screenToWorld(e.clientX, e.clientY), moved: false };
+    },
+    [editingId, selectedIds, state.nodes, screenToWorld]
+  );
+
+  const beginResize = useCallback(
+    (e, node) => {
+      e.stopPropagation();
+      containerRef.current.setPointerCapture(e.pointerId);
+      dragRef.current = { mode: 'resize', id: node.id, startW: node.width, startH: node.height, startWorld: screenToWorld(e.clientX, e.clientY), moved: false };
+    },
+    [screenToWorld]
+  );
+
+  const beginConnect = useCallback((e, node, side) => {
+    e.stopPropagation();
+    containerRef.current.setPointerCapture(e.pointerId);
+    const pt = canvasSideAnchor(node, side);
+    dragRef.current = { mode: 'connect', fromNodeId: node.id, fromSide: side, startClient: { x: e.clientX, y: e.clientY } };
+    setConnecting({ fromNodeId: node.id, fromSide: side, fromPt: pt, toPt: pt });
+  }, []);
+
+  const onNodeDoubleClick = useCallback(
+    (e, node) => {
+      e.stopPropagation();
+      if (node.type === 'text') {
+        setSelectedIds(new Set([node.id]));
+        setEditingId(node.id);
+      } else if (node.type === 'group') {
+        const label = window.prompt('Group name:', node.label || '');
+        if (label != null) commit((s) => ({ ...s, nodes: s.nodes.map((n) => (n.id === node.id ? { ...n, label } : n)) }));
+      } else if (node.type === 'file') {
+        const meta = allFilesById.get(node.file);
+        if (meta) (opensInEditorPane(meta.kind) ? handlers.onOpenById(meta.id) : handlers.onOpenAsset(meta));
+      } else if (node.type === 'link') {
+        window.open(node.url, '_blank', 'noreferrer');
+      }
+    },
+    [commit, allFilesById, handlers]
+  );
+
+  const onEdgeDoubleClick = useCallback(
+    (edgeId) => {
+      const edge = state.edges.find((e) => e.id === edgeId);
+      const label = window.prompt('Edge label:', edge?.label || '');
+      if (label != null) commit((s) => ({ ...s, edges: s.edges.map((e) => (e.id === edgeId ? { ...e, label } : e)) }));
+    },
+    [state.edges, commit]
+  );
+
+  const onContainerPointerMove = (e) => {
+    if (pointersRef.current.has(e.pointerId)) pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const drag = dragRef.current;
+    if (!drag) return;
+    if (drag.mode === 'pan') {
+      const dx = e.clientX - drag.startClient.x;
+      const dy = e.clientY - drag.startClient.y;
+      setViewport({ ...drag.startViewport, x: drag.startViewport.x + dx, y: drag.startViewport.y + dy });
+    } else if (drag.mode === 'pinch') {
+      const pts = Array.from(pointersRef.current.values());
+      if (pts.length < 2) return;
+      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
+      const mid = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+      const nextZoom = clamp(drag.startViewport.zoom * (dist / drag.startDist), CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX);
+      const rect = containerRef.current.getBoundingClientRect();
+      const worldX = (drag.startMid.x - rect.left - drag.startViewport.x) / drag.startViewport.zoom;
+      const worldY = (drag.startMid.y - rect.top - drag.startViewport.y) / drag.startViewport.zoom;
+      setViewport({ x: mid.x - rect.left - worldX * nextZoom, y: mid.y - rect.top - worldY * nextZoom, zoom: nextZoom });
+    } else if (drag.mode === 'marquee') {
+      const world = screenToWorld(e.clientX, e.clientY);
+      setMarquee({ x0: drag.startWorld.x, y0: drag.startWorld.y, x1: world.x, y1: world.y });
+    } else if (drag.mode === 'move') {
+      const world = screenToWorld(e.clientX, e.clientY);
+      const dx = world.x - drag.startWorld.x;
+      const dy = world.y - drag.startWorld.y;
+      if (drag.moved || Math.abs(dx) > CANVAS_MOVE_THRESHOLD || Math.abs(dy) > CANVAS_MOVE_THRESHOLD) {
+        drag.moved = true;
+        const overrides = new Map();
+        drag.ids.forEach((id) => {
+          const base = drag.startPositions.get(id);
+          if (base) overrides.set(id, { x: base.x + dx, y: base.y + dy });
+        });
+        scheduleLiveOverrides(overrides);
+      }
+    } else if (drag.mode === 'resize') {
+      const world = screenToWorld(e.clientX, e.clientY);
+      const w = Math.max(CANVAS_MIN_W, drag.startW + (world.x - drag.startWorld.x));
+      const h = Math.max(CANVAS_MIN_H, drag.startH + (world.y - drag.startWorld.y));
+      if (w !== drag.startW || h !== drag.startH) drag.moved = true;
+      scheduleLiveOverrides(new Map([[drag.id, { width: w, height: h }]]));
+    } else if (drag.mode === 'connect') {
+      setConnecting((c) => c && { ...c, toPt: screenToWorld(e.clientX, e.clientY) });
+    }
+  };
+
+  const onContainerPointerUp = (e) => {
+    pointersRef.current.delete(e.pointerId);
+    const drag = dragRef.current;
+    dragRef.current = null;
+    setIsPanning(false);
+    if (!drag) return;
+    if (drag.mode === 'marquee') {
+      const m = marquee;
+      setMarquee(null);
+      if (m) {
+        const box = { x0: Math.min(m.x0, m.x1), y0: Math.min(m.y0, m.y1), x1: Math.max(m.x0, m.x1), y1: Math.max(m.y0, m.y1) };
+        const ids = state.nodes.filter((n) => n.x < box.x1 && n.x + n.width > box.x0 && n.y < box.y1 && n.y + n.height > box.y0).map((n) => n.id);
+        if (ids.length) setSelectedIds(new Set(ids));
+      }
+    } else if (drag.mode === 'move' || drag.mode === 'resize') {
+      if (drag.moved && pendingOverridesRef.current) {
+        const overrides = pendingOverridesRef.current;
+        commit((s) => ({ ...s, nodes: s.nodes.map((n) => (overrides.has(n.id) ? { ...n, ...overrides.get(n.id) } : n)) }));
+      }
+      setLiveOverrides(null);
+      pendingOverridesRef.current = null;
+    } else if (drag.mode === 'connect') {
+      const world = screenToWorld(e.clientX, e.clientY);
+      const dist = Math.hypot(e.clientX - (drag.startClient?.x ?? e.clientX), e.clientY - (drag.startClient?.y ?? e.clientY));
+      const target = canvasHitTest(state.nodes, world, drag.fromNodeId);
+      if (target) {
+        const toSide = canvasNearestSide(target, world);
+        commit((s) => ({ ...s, edges: [...s.edges, { id: uid('edge'), fromNode: drag.fromNodeId, fromSide: drag.fromSide, toNode: target.id, toSide }] }));
+      } else if (dist > 12) {
+        const newNode = { id: uid('node'), type: 'text', x: world.x - 90, y: world.y - 30, width: 180, height: 60, text: '' };
+        const toSide = canvasOppositeSide(drag.fromSide);
+        commit((s) => ({
+          ...s,
+          nodes: [...s.nodes, newNode],
+          edges: [...s.edges, { id: uid('edge'), fromNode: drag.fromNodeId, fromSide: drag.fromSide, toNode: newNode.id, toSide }]
+        }));
+        setSelectedIds(new Set([newNode.id]));
+        setEditingId(newNode.id);
+      }
+      setConnecting(null);
+    }
+  };
+
+  const onKeyDown = (e) => {
+    if (editingId) return;
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      deleteSelection();
+    } else if (e.key === 'Escape') {
+      setSelectedIds(new Set());
+      setSelectedEdgeId(null);
+      setConnecting(null);
+    } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
+      e.preventDefault();
+      setSelectedIds(new Set(state.nodes.map((n) => n.id)));
+    } else if ((e.metaKey || e.ctrlKey) && (e.key === '=' || e.key === '+')) {
+      e.preventDefault();
+      zoomBy(1.2);
+    } else if ((e.metaKey || e.ctrlKey) && e.key === '-') {
+      e.preventDefault();
+      zoomBy(1 / 1.2);
+    } else if ((e.metaKey || e.ctrlKey) && e.key === '0') {
+      e.preventDefault();
+      setViewport((v) => ({ ...v, zoom: 1 }));
+    }
+  };
+
+  const centerWorld = useCallback(() => {
+    const rect = containerRef.current.getBoundingClientRect();
+    return screenToWorld(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  }, [screenToWorld]);
+
+  const addTextNodeAtCenter = () => {
+    const world = centerWorld();
+    const newNode = { id: uid('node'), type: 'text', x: world.x - 100, y: world.y - 40, width: 200, height: 90, text: '' };
+    commit((s) => ({ ...s, nodes: [...s.nodes, newNode] }));
+    setSelectedIds(new Set([newNode.id]));
+    setEditingId(newNode.id);
+  };
+  const addLinkNodeAtCenter = () => {
+    const url = window.prompt('URL to embed:');
+    if (!url || !url.trim()) return;
+    const world = centerWorld();
+    const newNode = { id: uid('node'), type: 'link', x: world.x - 110, y: world.y - 30, width: 240, height: 56, url: url.trim() };
+    commit((s) => ({ ...s, nodes: [...s.nodes, newNode] }));
+    setSelectedIds(new Set([newNode.id]));
+  };
+  const addGroupAtCenter = () => {
+    const world = centerWorld();
+    const newNode = { id: uid('node'), type: 'group', x: world.x - 160, y: world.y - 110, width: 320, height: 220, label: 'Group' };
+    commit((s) => ({ ...s, nodes: [newNode, ...s.nodes] }));
+    setSelectedIds(new Set([newNode.id]));
+  };
+  const addFileNodeFromPicker = (fileMeta) => {
+    setFilePickerOpen(false);
+    const world = centerWorld();
+    const isMedia = fileMeta.kind === 'image' || fileMeta.kind === 'video' || fileMeta.kind === 'audio';
+    const newNode = {
+      id: uid('node'),
+      type: 'file',
+      x: world.x - 150,
+      y: world.y - 100,
+      width: 300,
+      height: isMedia ? 220 : 260,
+      file: fileMeta.id
+    };
+    commit((s) => ({ ...s, nodes: [...s.nodes, newNode] }));
+    setSelectedIds(new Set([newNode.id]));
+  };
+
+  if (loading) {
+    return (
+      <div className="db-loading">
+        <IconLoader size={18} /> Loading canvas…
+      </div>
+    );
+  }
+
+  const selectionBounds =
+    selectedIds.size > 0
+      ? (() => {
+          const nodes = nodesForRender.filter((n) => selectedIds.has(n.id));
+          if (!nodes.length) return null;
+          const minX = Math.min(...nodes.map((n) => n.x));
+          const minY = Math.min(...nodes.map((n) => n.y));
+          return { x: minX * viewport.zoom + viewport.x, y: minY * viewport.zoom + viewport.y };
+        })()
+      : null;
+
+  return (
+    <div className="canvas-view">
+      <CanvasToolbar
+        zoom={viewport.zoom}
+        onZoomIn={() => zoomBy(1.2)}
+        onZoomOut={() => zoomBy(1 / 1.2)}
+        onZoomReset={() => setViewport((v) => ({ ...v, zoom: 1 }))}
+        onFitToContent={fitToContent}
+        onAddText={addTextNodeAtCenter}
+        onAddFile={() => setFilePickerOpen(true)}
+        onAddLink={addLinkNodeAtCenter}
+        onAddGroup={addGroupAtCenter}
+      />
+      <div
+        className={`canvas-surface ${isPanning || spaceDown ? 'panning' : ''}`}
+        ref={containerRef}
+        tabIndex={0}
+        onPointerDown={(e) => {
+          if (e.target === containerRef.current || e.target.classList.contains('canvas-world')) onBgPointerDown(e);
+        }}
+        onPointerMove={onContainerPointerMove}
+        onPointerUp={onContainerPointerUp}
+        onPointerCancel={onContainerPointerUp}
+        onDoubleClick={(e) => {
+          if (e.target === containerRef.current || e.target.classList.contains('canvas-world')) onBackgroundDoubleClick(e);
+        }}
+        onKeyDown={onKeyDown}
+      >
+        <div className="canvas-world" style={{ transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})` }}>
+          <CanvasEdgesLayer
+            nodes={nodesForRender}
+            edges={state.edges}
+            selectedEdgeId={selectedEdgeId}
+            connecting={connecting}
+            onSelectEdge={setSelectedEdgeId}
+            onDoubleClickEdge={onEdgeDoubleClick}
+          />
+          {nodesForRender.map((node) => (
+            <CanvasNode
+              key={node.id}
+              node={node}
+              selected={selectedIds.has(node.id)}
+              hovered={hoveredId === node.id}
+              editing={editingId === node.id}
+              allFilesById={allFilesById}
+              handlers={handlers}
+              linkIndex={linkIndex}
+              onPointerDownBody={beginMove}
+              onPointerDownResize={beginResize}
+              onPointerDownDot={beginConnect}
+              onDoubleClick={onNodeDoubleClick}
+              onHoverChange={setHoveredId}
+              onCommitEdit={commitTextEdit}
+            />
+          ))}
+          {marquee && (
+            <div
+              className="canvas-marquee"
+              style={{
+                left: Math.min(marquee.x0, marquee.x1),
+                top: Math.min(marquee.y0, marquee.y1),
+                width: Math.abs(marquee.x1 - marquee.x0),
+                height: Math.abs(marquee.y1 - marquee.y0)
+              }}
+            />
+          )}
+        </div>
+        {selectionBounds && (
+          <div className="canvas-selection-toolbar" style={{ left: Math.max(4, selectionBounds.x), top: Math.max(4, selectionBounds.y - 40) }}>
+            {CANVAS_COLORS.map((c) => (
+              <button key={c} className="canvas-color-swatch" style={{ background: c }} onClick={() => setSelectionColor(c)} title="Set color" />
+            ))}
+            <button className="canvas-color-swatch canvas-color-none" onClick={() => setSelectionColor(null)} title="Clear color">
+              ×
+            </button>
+            <button className="icon-btn" onClick={deleteSelection} title="Delete">
+              <IconTrash size={14} />
+            </button>
+          </div>
+        )}
+      </div>
+      {filePickerOpen && <CanvasFilePickerModal files={allFiles || []} onPick={addFileNodeFromPicker} onClose={() => setFilePickerOpen(false)} />}
     </div>
   );
 }
@@ -4945,6 +8578,500 @@ function ImageEmbed({ token, fileId, name, caption, onOpen }) {
 // 'switcher' mode it fuzzy-matches file names (⌘O); in 'commands' mode it
 // fuzzy-matches a fixed command list (⌘K / ⌘P).
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Help — replaces the old single window.alert() shortcut list with a proper
+// modal: keyboard shortcuts, a markdown syntax reference, and a plain-
+// language tour of the app's features. Content is static, so it lives right
+// in this component rather than as separate data.
+// ---------------------------------------------------------------------------
+const HELP_SHORTCUTS = [
+  { keys: '⌘/Ctrl K or P', desc: 'Open the command palette' },
+  { keys: '⌘/Ctrl O', desc: 'Quick switcher — jump to any note by name' },
+  { keys: '⌘/Ctrl S', desc: 'Save the note in the focused pane' },
+  { keys: '⌘/Ctrl Z', desc: 'Undo (⇧ for redo)' },
+  { keys: 'Tab / ⇧Tab', desc: 'Indent / outdent the current line while editing' },
+  { keys: 'Middle-click a tab', desc: 'Close that tab' },
+  { keys: 'Drag a file or folder', desc: 'Move it in the sidebar' },
+  { keys: '⌘/Ctrl-click a note or file', desc: 'Open it in a new tab instead of the current one' }
+];
+
+const HELP_MARKDOWN = [
+  { syntax: '# / ## / ###', desc: 'Headings (levels 1–6). Click the caret next to a heading in reading view to fold its section.' },
+  { syntax: '**bold**, *italic*, `code`', desc: 'Standard inline formatting.' },
+  { syntax: '[[Note Name]]', desc: 'Link to another note. Start typing after [[ for autocomplete; unmatched names become "phantom" links you can create by clicking.' },
+  { syntax: '[[image.png]] / [[clip.mp4]] / [[song.mp3]]', desc: 'Embed an image, video, or audio file inline by filename.' },
+  { syntax: '#tag or #parent/child', desc: 'Tag a note. Autocomplete suggests existing tags as you type; nested tags (parent/child) group and roll up counts in the Tags panel.' },
+  { syntax: '> [!tip] Title', desc: 'Callout block. Recognized types: note, info, abstract, summary, tip, hint, success, check, done, question, help, faq, warning, caution, attention, danger, error, failure, bug, quote, example.' },
+  { syntax: '| a | b |\\n|---|---|\\n| 1 | 2 |', desc: 'Tables, standard markdown pipe syntax.' },
+  { syntax: '+++ Toggle title\\n…content…\\n+++', desc: 'Collapsible toggle block — click the header to expand or collapse.' },
+  { syntax: ':::columns-2\\n…\\n:::column\\n…\\n:::', desc: 'Side-by-side columns. Use columns-2, columns-3, or columns-4, and separate columns with a line containing only :::column.' },
+  { syntax: ':::tabs\\n:::tab First\\n…\\n:::tab Second\\n…\\n:::', desc: 'A paginated tab block, like a Notion tab widget. Click a tab to switch pages, double-click a tab to rename it, use the × to delete it, and the + to add a new one — all directly from reading view.' },
+  { syntax: '- [ ] / - [x]', desc: 'Task checkboxes.' },
+  { syntax: '---\\nkey: value\\n---', desc: 'Frontmatter at the top of a note — shown as a Properties panel, and matched by [key] / [key:value] in search.' }
+];
+
+const HELP_FEATURES = [
+  { title: 'Tabs & panes', desc: 'Every note, database, or file opens in a tab. Split a pane right or down from the pane header to view two things side by side; drag the divider to resize.' },
+  { title: 'Reading vs. editing view', desc: 'Toggle with the eye icon in a note\'s pane header. Editing view keeps the raw markdown fully editable while still styling it — same fonts and sizes as reading view, just with the syntax characters dimmed instead of hidden.' },
+  { title: 'Backlinks', desc: 'Every note tracks what links to it. Linked/unlinked mentions show at the bottom of reading view.' },
+  { title: 'Search', desc: 'path:, file:, and tag: filter by location, filename, or tag (tag: also matches nested descendants). line:(a b) and section:(a b) require terms on the same line or under the same heading. [key] or [key:value] matches frontmatter. "exact phrase" for literal text; anything else is a plain term.' },
+  { title: 'Tags panel', desc: 'Every tag in the vault, nested tags shown as an indented tree with counts that roll up to their parent. Click any tag to search it.' },
+  { title: 'Databases', desc: 'Notion-style structured tables stored as a .base file — table, board, and gallery views, with typed columns (text, select, multi-select, date, image, etc).' },
+  { title: 'Bookmarks', desc: 'Star any note or file to pin it in the Bookmarks panel for quick access.' },
+  { title: 'Command palette & quick switcher', desc: '⌘/Ctrl K for commands (new note, split pane, toggle sidebar, etc), ⌘/Ctrl O to jump straight to a note by name.' },
+  { title: 'Images & files', desc: 'Open in their own tab just like notes — video/audio get inline players, other files get a download link — rather than a new browser tab.' },
+  { title: 'Graph view', desc: 'The network icon in the activity bar (or ⌘/Ctrl K → "Open graph view") opens a full map of every wikilink in the vault. Drag nodes, scroll to zoom, hover to see a note\'s connections, and click a node to jump straight to it. Toggle attachments and orphans on or off from the toolbar.' }
+];
+
+function HelpModal({ onClose }) {
+  const [tab, setTab] = useState('shortcuts');
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal help-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="help-modal-header">
+          <h3>Help</h3>
+          <button className="icon-btn" onClick={onClose} aria-label="Close help">
+            <IconX size={16} />
+          </button>
+        </div>
+        <div className="help-modal-tabs">
+          <button className={`help-tab ${tab === 'shortcuts' ? 'active' : ''}`} onClick={() => setTab('shortcuts')}>
+            Shortcuts
+          </button>
+          <button className={`help-tab ${tab === 'markdown' ? 'active' : ''}`} onClick={() => setTab('markdown')}>
+            Markdown syntax
+          </button>
+          <button className={`help-tab ${tab === 'features' ? 'active' : ''}`} onClick={() => setTab('features')}>
+            Features
+          </button>
+        </div>
+        <div className="help-modal-body">
+          {tab === 'shortcuts' && (
+            <div className="help-rows">
+              {HELP_SHORTCUTS.map((s) => (
+                <div className="help-row" key={s.keys}>
+                  <code className="help-row-key">{s.keys}</code>
+                  <span className="help-row-desc">{s.desc}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {tab === 'markdown' && (
+            <div className="help-rows">
+              {HELP_MARKDOWN.map((s) => (
+                <div className="help-row" key={s.syntax}>
+                  <code className="help-row-key help-row-syntax">{s.syntax}</code>
+                  <span className="help-row-desc">{s.desc}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {tab === 'features' && (
+            <div className="help-rows">
+              {HELP_FEATURES.map((f) => (
+                <div className="help-row help-row-feature" key={f.title}>
+                  <span className="help-row-title">{f.title}</span>
+                  <span className="help-row-desc">{f.desc}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function clamp(v, min, max) {
+  return Math.min(max, Math.max(min, v));
+}
+
+// Lightweight force-directed layout for Graph View — no external physics or
+// graph library is pulled in; nodes repel each other, linked pairs attract
+// along a spring, and everything is nudged gently toward the center so the
+// graph doesn't drift off-canvas. It's a damped simulation (alpha decays
+// every tick, same idea as d3-force) so it settles and stops burning CPU on
+// its own a couple of seconds after opening, rather than running forever.
+// Positions/velocities/pinned-state live in a ref (not React state) since
+// they update every animation frame; `bump` below is the only piece of
+// this that touches React state, purely to trigger a re-render per tick.
+function useForceGraph(nodeIds, edgeList, width, height) {
+  const stateRef = useRef({ pos: new Map(), vel: new Map(), pinned: new Set() });
+  const alphaRef = useRef(1);
+  const rafRef = useRef(null);
+  const stepRef = useRef(null);
+  const [, bump] = useState(0);
+
+  // Seed any node that doesn't have a position yet in a ring around the
+  // center (so new nodes don't all stack at the origin and fling apart on
+  // the first tick), and drop stale entries for nodes that no longer exist.
+  useEffect(() => {
+    const { pos, vel, pinned } = stateRef.current;
+    const idSet = new Set(nodeIds);
+    nodeIds.forEach((id, i) => {
+      if (!pos.has(id)) {
+        const angle = (i / Math.max(1, nodeIds.length)) * Math.PI * 2;
+        const r = Math.min(width, height) * 0.32;
+        pos.set(id, { x: width / 2 + Math.cos(angle) * r, y: height / 2 + Math.sin(angle) * r });
+        vel.set(id, { x: 0, y: 0 });
+      }
+    });
+    Array.from(pos.keys()).forEach((id) => {
+      if (!idSet.has(id)) {
+        pos.delete(id);
+        vel.delete(id);
+        pinned.delete(id);
+      }
+    });
+    alphaRef.current = 1;
+  }, [nodeIds, width, height]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const { pos, vel, pinned } = stateRef.current;
+    const REPULSION = 2400;
+    const SPRING = 0.02;
+    const SPRING_LEN = 95;
+    const CENTER_PULL = 0.012;
+    const DAMPING = 0.8;
+
+    function step() {
+      if (cancelled) return;
+      if (alphaRef.current > 0.008) {
+        const alpha = alphaRef.current;
+        // Pairwise repulsion — O(n²), fine at the node counts a single
+        // vault's graph realistically reaches; spatial partitioning would
+        // be the next lever if that stops being true for very large vaults.
+        for (let i = 0; i < nodeIds.length; i++) {
+          const a = pos.get(nodeIds[i]);
+          if (!a) continue;
+          for (let j = i + 1; j < nodeIds.length; j++) {
+            const b = pos.get(nodeIds[j]);
+            if (!b) continue;
+            let dx = a.x - b.x;
+            let dy = a.y - b.y;
+            const distSq = Math.max(dx * dx + dy * dy, 25);
+            const dist = Math.sqrt(distSq);
+            const force = (REPULSION * alpha) / distSq;
+            dx /= dist;
+            dy /= dist;
+            const va = vel.get(nodeIds[i]);
+            const vb = vel.get(nodeIds[j]);
+            va.x += dx * force;
+            va.y += dy * force;
+            vb.x -= dx * force;
+            vb.y -= dy * force;
+          }
+        }
+        edgeList.forEach(([s, t]) => {
+          const a = pos.get(s);
+          const b = pos.get(t);
+          if (!a || !b) return;
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+          const force = (dist - SPRING_LEN) * SPRING * alpha;
+          const fx = (dx / dist) * force;
+          const fy = (dy / dist) * force;
+          const va = vel.get(s);
+          const vb = vel.get(t);
+          va.x += fx;
+          va.y += fy;
+          vb.x -= fx;
+          vb.y -= fy;
+        });
+        nodeIds.forEach((id) => {
+          const p = pos.get(id);
+          const v = vel.get(id);
+          if (!p || !v) return;
+          v.x += (width / 2 - p.x) * CENTER_PULL * alpha;
+          v.y += (height / 2 - p.y) * CENTER_PULL * alpha;
+        });
+        nodeIds.forEach((id) => {
+          const p = pos.get(id);
+          const v = vel.get(id);
+          if (!p || !v) return;
+          if (pinned.has(id)) {
+            v.x = 0;
+            v.y = 0;
+          } else {
+            v.x *= DAMPING;
+            v.y *= DAMPING;
+            p.x += v.x;
+            p.y += v.y;
+          }
+        });
+        alphaRef.current *= 0.985;
+        bump((n) => n + 1);
+        rafRef.current = requestAnimationFrame(step);
+      } else {
+        rafRef.current = null;
+      }
+    }
+    stepRef.current = step;
+    rafRef.current = requestAnimationFrame(step);
+    return () => {
+      cancelled = true;
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+      stepRef.current = null;
+    };
+  }, [nodeIds, edgeList, width, height]);
+
+  // Raises the simulation's temperature and (re)starts the animation loop
+  // if it had already settled — called on drag, filter changes, and the
+  // manual "re-run layout" button.
+  const wake = useCallback((amount = 0.3) => {
+    alphaRef.current = Math.max(alphaRef.current, amount);
+    if (!rafRef.current && stepRef.current) rafRef.current = requestAnimationFrame(stepRef.current);
+  }, []);
+
+  return { pos: stateRef.current.pos, pinned: stateRef.current.pinned, wake };
+}
+
+// Full-screen Graph View — a force-directed map of every wikilink in the
+// vault, in the spirit of Obsidian's Graph View. Deliberately built as a
+// self-contained modal (like Help/Palette) rather than a pane-tree tab:
+// the pane/tab system is wired tightly around real Drive files (rename,
+// save, sync), and a synthetic non-file "tab" would need to fight that
+// machinery for little benefit — a modal gets the same "see the whole
+// vault, click through to a note" experience with far less risk.
+function GraphViewModal({ onClose, linkIndex, linksByFileId, onOpenFile, activeFileId }) {
+  const containerRef = useRef(null);
+  const svgRef = useRef(null);
+  const [size, setSize] = useState({ width: 800, height: 600 });
+  const [showAttachments, setShowAttachments] = useState(false);
+  const [hideOrphans, setHideOrphans] = useState(false);
+  const [query, setQuery] = useState('');
+  const [hoveredId, setHoveredId] = useState(null);
+  const [view, setView] = useState({ x: 0, y: 0, k: 1 });
+  const dragRef = useRef({ mode: null });
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (entry) setSize({ width: entry.contentRect.width, height: entry.contentRect.height });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const nodes = useMemo(
+    () => linkIndex.records.filter((r) => showAttachments || !r.isAsset),
+    [linkIndex, showAttachments]
+  );
+  const edges = useMemo(() => {
+    const nodeIdSet = new Set(nodes.map((n) => n.id));
+    const seen = new Set();
+    const out = [];
+    for (const [sourceId, links] of linksByFileId.entries()) {
+      if (!nodeIdSet.has(sourceId)) continue;
+      for (const link of links) {
+        const res = resolveLinkTarget(link.target, linkIndex);
+        if (res.status !== 'resolved' || res.file.id === sourceId || !nodeIdSet.has(res.file.id)) continue;
+        const key = sourceId < res.file.id ? `${sourceId}|${res.file.id}` : `${res.file.id}|${sourceId}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push([sourceId, res.file.id]);
+      }
+    }
+    return out;
+  }, [nodes, linksByFileId, linkIndex]);
+
+  const degree = useMemo(() => {
+    const map = new Map();
+    nodes.forEach((n) => map.set(n.id, 0));
+    edges.forEach(([a, b]) => {
+      map.set(a, (map.get(a) || 0) + 1);
+      map.set(b, (map.get(b) || 0) + 1);
+    });
+    return map;
+  }, [nodes, edges]);
+
+  const visibleNodes = useMemo(
+    () => (hideOrphans ? nodes.filter((n) => (degree.get(n.id) || 0) > 0) : nodes),
+    [nodes, degree, hideOrphans]
+  );
+  const visibleIdSet = useMemo(() => new Set(visibleNodes.map((n) => n.id)), [visibleNodes]);
+  const visibleEdges = useMemo(
+    () => edges.filter(([a, b]) => visibleIdSet.has(a) && visibleIdSet.has(b)),
+    [edges, visibleIdSet]
+  );
+  const nodeIds = useMemo(() => visibleNodes.map((n) => n.id), [visibleNodes]);
+
+  const { pos, pinned, wake } = useForceGraph(nodeIds, visibleEdges, size.width || 800, size.height || 600);
+
+  const neighborSet = useMemo(() => {
+    if (!hoveredId) return null;
+    const set = new Set([hoveredId]);
+    visibleEdges.forEach(([a, b]) => {
+      if (a === hoveredId) set.add(b);
+      if (b === hoveredId) set.add(a);
+    });
+    return set;
+  }, [hoveredId, visibleEdges]);
+
+  const matchSet = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return null;
+    return new Set(visibleNodes.filter((n) => n.baseName.toLowerCase().includes(q)).map((n) => n.id));
+  }, [query, visibleNodes]);
+
+  const toWorld = (clientX, clientY) => {
+    const rect = svgRef.current.getBoundingClientRect();
+    return { x: (clientX - rect.left - view.x) / view.k, y: (clientY - rect.top - view.y) / view.k };
+  };
+
+  const onNodePointerDown = (e, id) => {
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    const w = toWorld(e.clientX, e.clientY);
+    const p = pos.get(id);
+    pinned.add(id);
+    wake(0.4);
+    dragRef.current = {
+      mode: 'node',
+      id,
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      moved: false,
+      offsetX: (p?.x ?? w.x) - w.x,
+      offsetY: (p?.y ?? w.y) - w.y
+    };
+  };
+  const onBackgroundPointerDown = (e) => {
+    dragRef.current = { mode: 'pan', startClientX: e.clientX, startClientY: e.clientY, startViewX: view.x, startViewY: view.y };
+  };
+  const onPointerMove = (e) => {
+    const d = dragRef.current;
+    if (!d.mode) return;
+    if (d.mode === 'node') {
+      const dx = e.clientX - d.startClientX;
+      const dy = e.clientY - d.startClientY;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) d.moved = true;
+      const w = toWorld(e.clientX, e.clientY);
+      const p = pos.get(d.id);
+      if (p) {
+        p.x = w.x + d.offsetX;
+        p.y = w.y + d.offsetY;
+      }
+      wake(0.3);
+    } else if (d.mode === 'pan') {
+      setView((v) => ({ ...v, x: d.startViewX + (e.clientX - d.startClientX), y: d.startViewY + (e.clientY - d.startClientY) }));
+    }
+  };
+  const onPointerUp = () => {
+    const d = dragRef.current;
+    if (d.mode === 'node') {
+      pinned.delete(d.id);
+      wake(0.4);
+      if (!d.moved) {
+        onOpenFile(d.id);
+        onClose();
+      }
+    }
+    dragRef.current = { mode: null };
+  };
+  const onWheel = (e) => {
+    e.preventDefault();
+    const rect = svgRef.current.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const scaleBy = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    setView((v) => {
+      const newK = clamp(v.k * scaleBy, 0.15, 4);
+      const worldX = (mx - v.x) / v.k;
+      const worldY = (my - v.y) / v.k;
+      return { x: mx - worldX * newK, y: my - worldY * newK, k: newK };
+    });
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal graph-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="graph-modal-header">
+          <h3>Graph view</h3>
+          <div className="graph-modal-tools">
+            <input className="graph-search" placeholder="Find a note…" value={query} onChange={(e) => setQuery(e.target.value)} />
+            <label className="graph-toggle">
+              <input type="checkbox" checked={showAttachments} onChange={(e) => setShowAttachments(e.target.checked)} />
+              Attachments
+            </label>
+            <label className="graph-toggle">
+              <input type="checkbox" checked={hideOrphans} onChange={(e) => setHideOrphans(e.target.checked)} />
+              Hide orphans
+            </label>
+            <button className="icon-btn" title="Re-run layout" onClick={() => wake(1)}>
+              <IconRefresh size={15} />
+            </button>
+            <button className="icon-btn" title="Reset view" onClick={() => setView({ x: 0, y: 0, k: 1 })}>
+              <IconMaximize size={15} />
+            </button>
+            <button className="icon-btn" onClick={onClose} aria-label="Close graph view">
+              <IconX size={16} />
+            </button>
+          </div>
+        </div>
+        <div className="graph-canvas-wrap" ref={containerRef}>
+          <svg
+            ref={svgRef}
+            className="graph-svg"
+            onPointerDown={onBackgroundPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerLeave={onPointerUp}
+            onWheel={onWheel}
+          >
+            <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
+              {visibleEdges.map(([a, b], i) => {
+                const pa = pos.get(a);
+                const pb = pos.get(b);
+                if (!pa || !pb) return null;
+                const dim = neighborSet && !(neighborSet.has(a) && neighborSet.has(b));
+                return <line key={i} x1={pa.x} y1={pa.y} x2={pb.x} y2={pb.y} className={`graph-edge ${dim ? 'dim' : ''}`} />;
+              })}
+              {visibleNodes.map((n) => {
+                const p = pos.get(n.id);
+                if (!p) return null;
+                const deg = degree.get(n.id) || 0;
+                const r = clamp(4 + Math.sqrt(deg) * 2.4, 4, 15);
+                const dim = (neighborSet && !neighborSet.has(n.id)) || (matchSet && !matchSet.has(n.id));
+                const showLabel =
+                  visibleNodes.length <= 60 ||
+                  hoveredId === n.id ||
+                  (neighborSet && neighborSet.has(n.id)) ||
+                  (matchSet && matchSet.has(n.id));
+                return (
+                  <g
+                    key={n.id}
+                    className={`graph-node ${dim ? 'dim' : ''} ${n.id === activeFileId ? 'current' : ''} ${n.isAsset ? 'attachment' : ''}`}
+                    transform={`translate(${p.x},${p.y})`}
+                    onPointerDown={(e) => onNodePointerDown(e, n.id)}
+                    onPointerEnter={() => setHoveredId(n.id)}
+                    onPointerLeave={() => setHoveredId((h) => (h === n.id ? null : h))}
+                  >
+                    <circle r={r} />
+                    {showLabel && (
+                      <text x={r + 4} y={4} className="graph-node-label">
+                        {n.baseName}
+                      </text>
+                    )}
+                  </g>
+                );
+              })}
+            </g>
+          </svg>
+        </div>
+        <div className="graph-modal-footer">
+          {visibleNodes.length} notes · {visibleEdges.length} links
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PaletteModal({ mode, files, commands, onClose, onPickFile, onRunCommand }) {
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
@@ -4957,7 +9084,7 @@ function PaletteModal({ mode, files, commands, onClose, onPickFile, onRunCommand
   const results = useMemo(() => {
     if (mode === 'switcher') {
       return files
-        .map((f) => ({ f, score: fuzzyScore(query, f.name.replace(/\.md$/i, '')) }))
+        .map((f) => ({ f, score: fuzzyScore(query, opensInEditorPane(f.kind) ? f.name.replace(/\.[^.]+$/i, '') : f.name) }))
         .filter((s) => s.score !== null)
         .sort((a, b) => a.score - b.score)
         .slice(0, 50)
@@ -5016,7 +9143,7 @@ function PaletteModal({ mode, files, commands, onClose, onPickFile, onRunCommand
                   onMouseEnter={() => setActiveIndex(i)}
                   onClick={(e) => onPickFile(f, { newTab: e.metaKey || e.ctrlKey })}
                 >
-                  <span className="palette-result-name">{f.name.replace(/\.md$/i, '')}</span>
+                  <span className="palette-result-name">{opensInEditorPane(f.kind) ? f.name.replace(/\.[^.]+$/i, '') : f.name}</span>
                 </button>
               ))
             : results.map((c, i) => (
@@ -5103,7 +9230,14 @@ function useAccentColor() {
   return [accent, setAccent];
 }
 
-function AccentColorPicker({ accent, onChange, onClose }) {
+function AccentColorPicker({ accent, onChange, onClose, anchorRef, pickerRef }) {
+  const [pos, setPos] = useState(null);
+  useLayoutEffect(() => {
+    const anchor = anchorRef?.current;
+    if (!anchor) return;
+    const rect = anchor.getBoundingClientRect();
+    setPos({ left: rect.left, bottom: window.innerHeight - rect.top + 8 });
+  }, [anchorRef]);
   useEffect(() => {
     const onKeyDown = (e) => {
       if (e.key === 'Escape') onClose();
@@ -5111,8 +9245,19 @@ function AccentColorPicker({ accent, onChange, onClose }) {
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [onClose]);
-  return (
-    <div className="accent-picker" onClick={(e) => e.stopPropagation()}>
+  // Portaled to <body> with fixed positioning computed from the anchor's
+  // rect — this is what keeps it drawn in front of an open note's editor
+  // pane (which otherwise clips an absolutely-positioned popover via its
+  // own stacking context) instead of relying on ever-larger z-index values
+  // inside that pane's tree.
+  if (!pos) return null;
+  return createPortal(
+    <div
+      ref={pickerRef}
+      className="accent-picker accent-picker-portal"
+      style={{ left: pos.left, bottom: pos.bottom }}
+      onClick={(e) => e.stopPropagation()}
+    >
       <div className="accent-picker-title">Accent color</div>
       <div className="accent-picker-swatches">
         {ACCENT_PRESETS.map((hex) => (
@@ -5135,7 +9280,8 @@ function AccentColorPicker({ accent, onChange, onClose }) {
           Reset to default
         </button>
       )}
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -5152,10 +9298,17 @@ export default function App() {
   const [accentColor, setAccentColor] = useAccentColor();
   const [accentPickerOpen, setAccentPickerOpen] = useState(false);
   const accentPickerAnchorRef = useRef(null);
+  // The picker itself now renders through a portal into <body> (see
+  // AccentColorPicker), so it's no longer a DOM descendant of the anchor —
+  // the outside-click check below needs its own ref too, or clicking a
+  // swatch would register as "outside" and close the picker instantly.
+  const accentPickerPortalRef = useRef(null);
   useEffect(() => {
     if (!accentPickerOpen) return undefined;
     const onDocMouseDown = (e) => {
-      if (accentPickerAnchorRef.current && !accentPickerAnchorRef.current.contains(e.target)) {
+      const inAnchor = accentPickerAnchorRef.current && accentPickerAnchorRef.current.contains(e.target);
+      const inPortal = accentPickerPortalRef.current && accentPickerPortalRef.current.contains(e.target);
+      if (!inAnchor && !inPortal) {
         setAccentPickerOpen(false);
       }
     };
@@ -5181,6 +9334,8 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [bookmarks, setBookmarks] = useState(new Set());
   const [paletteMode, setPaletteMode] = useState(null); // null | 'commands' | 'switcher'
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [graphOpen, setGraphOpen] = useState(false);
   // When the switcher is opened via the tab bar's "+" button, the next pick
   // should always open in a new tab — unlike ⌘O, which navigates the current
   // tab unless the user holds Cmd/Ctrl. Tracked as a ref (not state) since it
@@ -5315,18 +9470,38 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sync.filesMeta, vaultIndex.getBody, vaultIndex.version]);
 
+  // Flat, deduped, sorted list of every tag used anywhere in the vault —
+  // powers the #tag autocomplete dropdown in the editor.
+  const allTags = useMemo(() => {
+    const set = new Set();
+    tagsByFileId.forEach((tags) => tags.forEach((t) => set.add(t)));
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [tagsByFileId]);
+
+  // Every note's frontmatter + inline `key:: value` fields, indexed once
+  // for ```query blocks (see QueryBlock/buildPagesIndex above). Same
+  // dependency shape as tagsByFileId/allTags: rebuilds only when the set of
+  // notes or their indexed bodies actually changes.
+  const pagesIndex = useMemo(
+    () => buildPagesIndex(sync.filesMeta, sync.linkIndex, vaultIndex.getBody),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sync.filesMeta, sync.linkIndex, vaultIndex.getBody, vaultIndex.version]
+  );
+
   // --- Content loading (per open tab) --------------------------------------
   const ensureFileLoaded = useCallback(
     (fileId) => {
       if (!fileId || !token) return;
       if (buffers[fileId] || loadingFileIds.current.has(fileId)) return;
       const meta = sync.filesMeta.find((f) => f.id === fileId);
-      if (!meta || meta.kind !== 'note') return;
+      if (!meta || !opensInEditorPane(meta.kind)) return;
       loadingFileIds.current.add(fileId);
       setBuffers((prev) => ({ ...prev, [fileId]: { content: '', dirty: false, saving: false, loading: true } }));
       driveGetFileContent(token, fileId)
         .then((text) => {
-          vaultIndex.updateBody(fileId, text);
+          // Databases aren't part of the note search/tag index — only
+          // notes' bodies get indexed for full-text search.
+          if (meta.kind === 'note') vaultIndex.updateBody(fileId, text);
           setBuffers((prev) => ({ ...prev, [fileId]: { content: text, dirty: false, saving: false, loading: false } }));
         })
         .catch((err) => {
@@ -5430,6 +9605,24 @@ export default function App() {
       setMobileDockOpen(false);
     },
     [paneTree, ensureFileLoaded]
+  );
+
+  // Stable wrappers around openFileInPane for the always-mounted sidebar
+  // panels (Explorer/Bookmarks) and the Graph modal. Perf note: without
+  // these, the inline `(id) => openFileInPane(...)` arrows written directly
+  // in JSX get a new identity every time App re-renders — which happens on
+  // every keystroke, since note content lives in App-level `buffers` state.
+  // A new function identity defeats React.memo on ExplorerPanel/TreeNode/
+  // BookmarksPanel, so the entire sidebar tree was re-rendering per
+  // keystroke even though nothing in it actually changed. These two
+  // references only change when the active pane does.
+  const handleSidebarOpenFile = useCallback(
+    (id, e) => openFileInPane(activePaneId, id, { newTab: !!(e && (e.metaKey || e.ctrlKey)) }),
+    [activePaneId, openFileInPane]
+  );
+  const handleSidebarOpenImage = useCallback(
+    (file, e) => openFileInPane(activePaneId, file.id, { newTab: !!(e && (e.metaKey || e.ctrlKey)) }),
+    [activePaneId, openFileInPane]
   );
 
   const selectTab = useCallback(
@@ -5637,6 +9830,58 @@ export default function App() {
     [token, sync, activePaneId, openFileInPane, vaultIndex]
   );
 
+  const handleCreateDatabaseIn = useCallback(
+    (parentId) => {
+      const name = window.prompt('New database name:');
+      if (!name || !name.trim()) return;
+      (async () => {
+        try {
+          const skeleton = serializeDatabaseState(makeDefaultDatabaseState(name.trim()));
+          const created = await driveCreateFile(token, parentId, name.trim(), skeleton, 'base', 'application/json');
+          const fileRecord = {
+            id: created.id,
+            name: created.name,
+            modifiedTime: created.modifiedTime || new Date().toISOString(),
+            parents: [parentId],
+            kind: 'database'
+          };
+          sync.registerNewFile(fileRecord);
+          setBuffers((prev) => ({ ...prev, [created.id]: { content: skeleton, dirty: false, saving: false, loading: false } }));
+          openFileInPane(activePaneId, created.id);
+        } catch (err) {
+          window.alert(`Couldn't create database: ${err.message}`);
+        }
+      })();
+    },
+    [token, sync, activePaneId, openFileInPane]
+  );
+
+  const handleCreateCanvasIn = useCallback(
+    (parentId) => {
+      const name = window.prompt('New canvas name:');
+      if (!name || !name.trim()) return;
+      (async () => {
+        try {
+          const skeleton = serializeCanvasState(makeDefaultCanvasState());
+          const created = await driveCreateFile(token, parentId, name.trim(), skeleton, 'canvas', 'application/json');
+          const fileRecord = {
+            id: created.id,
+            name: created.name,
+            modifiedTime: created.modifiedTime || new Date().toISOString(),
+            parents: [parentId],
+            kind: 'canvas'
+          };
+          sync.registerNewFile(fileRecord);
+          setBuffers((prev) => ({ ...prev, [created.id]: { content: skeleton, dirty: false, saving: false, loading: false } }));
+          openFileInPane(activePaneId, created.id);
+        } catch (err) {
+          window.alert(`Couldn't create canvas: ${err.message}`);
+        }
+      })();
+    },
+    [token, sync, activePaneId, openFileInPane]
+  );
+
   const handleCreateFolderIn = useCallback(
     async (parentId) => {
       const name = window.prompt('New folder name:');
@@ -5676,6 +9921,27 @@ export default function App() {
     [token, sync]
   );
 
+  // Uploads a single binary file for a database attachment cell (image/
+  // video/audio/file column types), registering it in the vault the same
+  // way a sidebar upload would — so it's a real Drive file, not something
+  // hidden inside the database's JSON.
+  const uploadAttachmentFile = useCallback(
+    async (parentId, file) => {
+      if (!token) throw new Error('Uploading requires Google sign-in.');
+      const created = await driveUploadBinary(token, parentId, file);
+      const kind = classifyKind(created.name, created.mimeType);
+      sync.registerNewFile({
+        id: created.id,
+        name: created.name,
+        modifiedTime: created.modifiedTime || new Date().toISOString(),
+        parents: [parentId],
+        kind
+      });
+      return { id: created.id, name: created.name, kind };
+    },
+    [token, sync]
+  );
+
   // Shared rename primitive: renames on Drive, then updates local sync state.
   // `kind` is only meaningful for files ('image' vs a note); ignored for folders.
   const performRename = useCallback(
@@ -5698,8 +9964,9 @@ export default function App() {
 
   const handleRenameNode = useCallback(
     async (node) => {
-      const isAsset = node.type === 'file' && node.kind !== 'note';
-      const currentDisplayName = node.type === 'file' && !isAsset ? node.name.replace(/\.md$/i, '') : node.name;
+      const isPage = node.type === 'file' && opensInEditorPane(node.kind);
+      const isAsset = node.type === 'file' && !isPage;
+      const currentDisplayName = node.type === 'file' && isPage ? node.name.replace(/\.[^.]+$/i, '') : node.name;
       const input = window.prompt('Rename to:', currentDisplayName);
       if (!input || !input.trim() || input.trim() === currentDisplayName) return;
 
@@ -5710,7 +9977,8 @@ export default function App() {
         const typed = input.trim();
         newName = fileExtension(typed) ? typed : `${typed}.${fileExtension(node.name) || 'bin'}`;
       } else {
-        newName = input.trim().toLowerCase().endsWith('.md') ? input.trim() : `${input.trim()}.md`;
+        const suffix = `.${extensionForKind(node.kind)}`;
+        newName = input.trim().toLowerCase().endsWith(suffix) ? input.trim() : `${input.trim()}${suffix}`;
       }
 
       performRename(node.id, node.type, node.kind, newName);
@@ -5727,16 +9995,16 @@ export default function App() {
       if (!file) return;
       const trimmed = (newDisplayTitle || '').trim();
       if (!trimmed) return;
-      const isAsset = file.kind !== 'note';
-      const currentDisplayName = isAsset ? file.name : file.name.replace(/\.md$/i, '');
+      const isPage = opensInEditorPane(file.kind);
+      const currentDisplayName = isPage ? file.name.replace(/\.[^.]+$/i, '') : file.name;
       if (trimmed === currentDisplayName) return;
-      const newName = isAsset
-        ? fileExtension(trimmed)
-          ? trimmed
-          : `${trimmed}.${fileExtension(file.name) || 'bin'}`
-        : trimmed.toLowerCase().endsWith('.md')
-          ? trimmed
-          : `${trimmed}.md`;
+      let newName;
+      if (isPage) {
+        const suffix = `.${extensionForKind(file.kind)}`;
+        newName = trimmed.toLowerCase().endsWith(suffix) ? trimmed : `${trimmed}${suffix}`;
+      } else {
+        newName = fileExtension(trimmed) ? trimmed : `${trimmed}.${fileExtension(file.name) || 'bin'}`;
+      }
       performRename(fileId, 'file', file.kind, newName);
     },
     [filesById, performRename]
@@ -5744,8 +10012,8 @@ export default function App() {
 
   const handleDeleteNode = useCallback(
     async (node) => {
-      const isAsset = node.type === 'file' && node.kind !== 'note';
-      const label = node.type === 'file' && !isAsset ? node.name.replace(/\.md$/i, '') : node.name;
+      const isPage = node.type === 'file' && opensInEditorPane(node.kind);
+      const label = node.type === 'file' && isPage ? node.name.replace(/\.[^.]+$/i, '') : node.name;
       const warning =
         node.type === 'folder'
           ? `Delete folder "${label}" and everything inside it? This moves it to Drive's trash.`
@@ -5819,8 +10087,8 @@ export default function App() {
       token,
       onOpenById: (id) => openFileInPane(activePaneId, id),
       onCreateOrOpenByName: (name) => openNoteByName(name),
-      onOpenImage: (file) => openImageInNewTab(token, file),
-      onOpenAsset: (file) => openImageInNewTab(token, file),
+      onOpenImage: (file) => openFileInPane(activePaneId, file.id),
+      onOpenAsset: (file) => openFileInPane(activePaneId, file.id),
       onRenameFile: (fileId, newDisplayName) => handleInlineRenameFile(fileId, newDisplayName),
       onOpenTag: (tag) => {
         setActiveSideView('search');
@@ -5834,28 +10102,46 @@ export default function App() {
       onNavigateToHeading: (lineIndex, headingId) => {
         activeEditorNavRef.current?.(lineIndex, headingId);
         setMobileDockOpen(false);
-      }
+      },
+      uploadAttachment: uploadAttachmentFile,
+      allTags,
+      pagesIndex,
+      ensureVaultIndexed: vaultIndex.ensureIndexed,
+      vaultIndexReady: vaultIndex.ready,
+      vaultIndexProgress: vaultIndex.progress,
+      getBody: vaultIndex.getBody
     }),
-    [token, openFileInPane, activePaneId, openNoteByName, handleInlineRenameFile]
+    [
+      token,
+      openFileInPane,
+      activePaneId,
+      openNoteByName,
+      handleInlineRenameFile,
+      uploadAttachmentFile,
+      allTags,
+      pagesIndex,
+      vaultIndex.ensureIndexed,
+      vaultIndex.ready,
+      vaultIndex.progress,
+      vaultIndex.getBody
+    ]
   );
 
   const handlePaletteFilePick = useCallback(
     (file, opts) => {
       setPaletteMode(null);
-      if (file.kind !== 'note') {
-        openImageInNewTab(token, file);
-        return;
-      }
       openFileInPane(activePaneId, file.id, { ...opts, newTab: opts?.newTab || paletteForceNewTabRef.current });
       paletteForceNewTabRef.current = false;
     },
-    [activePaneId, openFileInPane, token]
+    [activePaneId, openFileInPane]
   );
 
   const commands = useMemo(() => {
     if (!folder) return [];
     return [
       { id: 'new-note', label: 'Create new note', icon: <IconFilePlus size={15} />, run: () => handleCreateNoteIn(folder.id) },
+      { id: 'new-canvas', label: 'Create new canvas', icon: <IconCanvasKind size={15} />, run: () => handleCreateCanvasIn(folder.id) },
+      { id: 'new-database', label: 'Create new database', icon: <IconDatabase size={15} />, run: () => handleCreateDatabaseIn(folder.id) },
       { id: 'new-folder', label: 'Create new folder', icon: <IconFolderPlus size={15} />, run: () => handleCreateFolderIn(folder.id) },
       { id: 'toggle-sidebar', label: 'Toggle left sidebar', icon: <IconPanelLeft size={15} />, run: () => setMobileDockOpen((v) => !v) },
       { id: 'split-right', label: 'Split pane right', icon: <IconSplitVertical size={15} />, run: () => splitPane(activePaneId, 'row') },
@@ -5898,6 +10184,7 @@ export default function App() {
           setMobileDockOpen(true);
         }
       },
+      { id: 'open-graph', label: 'Open graph view', icon: <IconGraph size={15} />, run: () => setGraphOpen(true) },
       {
         id: 'quick-switcher',
         label: 'Quick switcher: jump to note',
@@ -5911,49 +10198,33 @@ export default function App() {
       { id: 'change-folder', label: 'Change vault folder', icon: <IconFolder size={15} />, run: handlePickFolder },
       { id: 'sign-out', label: 'Sign out', icon: <IconLogOut size={15} />, run: signOut }
     ];
-  }, [folder, handleCreateNoteIn, handleCreateFolderIn, activePaneId, splitPane, paneTree, toggleTabMode, sync, handlePickFolder, signOut]);
+  }, [folder, handleCreateNoteIn, handleCreateDatabaseIn, handleCreateCanvasIn, handleCreateFolderIn, activePaneId, splitPane, paneTree, toggleTabMode, sync, handlePickFolder, signOut]);
 
   const handlePaletteCommand = useCallback((cmd) => {
     setPaletteMode(null);
     cmd.run();
   }, []);
 
-  const showShortcutsHelp = useCallback(() => {
-    window.alert(
-      [
-        'Keyboard shortcuts',
-        '',
-        '⌘/Ctrl K or P — Command palette',
-        '⌘/Ctrl O — Quick switcher (jump to note)',
-        '⌘/Ctrl S — Save current note',
-        '[[ — Link autocomplete while typing',
-        'Middle-click a tab — Close it',
-        'Drag a file/folder in the sidebar — Move it'
-      ].join('\n')
-    );
-  }, []);
-
   if (!token) {
-    return <LoginScreen onSignIn={signIn} ready={gisReady} onSignInProxy={signInProxy} />;
+    return <OnboardingFlow step="signin" onSignIn={signIn} ready={gisReady} onSignInProxy={signInProxy} />;
   }
   if (folderRestoring) {
-    return <VaultLoadingScreen progress={{ phase: 'opening', loaded: 0, total: 0 }} />;
+    const { label, pct } = loadingStepProps({ phase: 'opening', loaded: 0, total: 0 });
+    return <OnboardingFlow step="loading" loadingLabel={label} loadingPct={pct} />;
   }
   if (!folder) {
-    return (
-      <>
-        <FolderPrompt onPick={handlePickFolder} />
-        {showProxyFolderPicker && (
-          <ProxyFolderPicker token={token} onPick={handleProxyFolderPicked} onCancel={() => setShowProxyFolderPicker(false)} />
-        )}
-      </>
-    );
+    if (showProxyFolderPicker) {
+      return <OnboardingFlow step="proxy-folder" proxyToken={token} onProxyFolderPick={handleProxyFolderPicked} />;
+    }
+    return <OnboardingFlow step="folder" onPickFolder={handlePickFolder} />;
   }
   if (!sync.cacheLoaded) {
-    return <VaultLoadingScreen progress={{ phase: 'opening', loaded: 0, total: 0 }} />;
+    const { label, pct } = loadingStepProps({ phase: 'opening', loaded: 0, total: 0 });
+    return <OnboardingFlow step="loading" loadingLabel={label} loadingPct={pct} />;
   }
   if (sync.filesMeta.length === 0 && sync.syncing) {
-    return <VaultLoadingScreen progress={sync.syncProgress} />;
+    const { label, pct } = loadingStepProps(sync.syncProgress);
+    return <OnboardingFlow step="loading" loadingLabel={label} loadingPct={pct} />;
   }
 
   const syncPct = sync.syncProgress.total > 0 ? Math.round((sync.syncProgress.loaded / sync.syncProgress.total) * 100) : null;
@@ -5980,6 +10251,7 @@ export default function App() {
             setMobileDockOpen(true);
           }}
           onOpenCommandPalette={() => setPaletteMode('commands')}
+          onOpenGraph={() => setGraphOpen(true)}
           onSync={() => sync.syncNow()}
           syncing={sync.syncing}
           onChangeFolder={handlePickFolder}
@@ -5993,9 +10265,11 @@ export default function App() {
                 tree={tree}
                 vaultRootId={folder.id}
                 currentIds={currentOpenIds}
-                onOpenFile={(id, e) => openFileInPane(activePaneId, id, { newTab: !!(e && (e.metaKey || e.ctrlKey)) })}
-                onOpenImage={(file) => openImageInNewTab(token, file)}
+                onOpenFile={handleSidebarOpenFile}
+                onOpenImage={handleSidebarOpenImage}
                 onCreateNote={handleCreateNoteIn}
+                onCreateDatabase={handleCreateDatabaseIn}
+                onCreateCanvas={handleCreateCanvasIn}
                 onCreateFolder={handleCreateFolderIn}
                 onUploadFiles={handleUploadFiles}
                 onRename={handleRenameNode}
@@ -6044,8 +10318,8 @@ export default function App() {
               <BookmarksPanel
                 bookmarks={bookmarks}
                 filesMeta={sync.filesMeta}
-                onOpenFile={(id) => openFileInPane(activePaneId, id)}
-                onOpenImage={(file) => openImageInNewTab(token, file)}
+                onOpenFile={handleSidebarOpenFile}
+                onOpenImage={handleSidebarOpenImage}
                 onToggleBookmark={toggleBookmark}
               />
             )}
@@ -6069,10 +10343,12 @@ export default function App() {
                     accent={accentColor}
                     onChange={setAccentColor}
                     onClose={() => setAccentPickerOpen(false)}
+                    anchorRef={accentPickerAnchorRef}
+                    pickerRef={accentPickerPortalRef}
                   />
                 )}
               </div>
-              <button className="icon-btn" title="Keyboard shortcuts" onClick={showShortcutsHelp}>
+              <button className="icon-btn" title="Keyboard shortcuts" onClick={() => setHelpOpen(true)}>
                 <IconHelp size={15} />
               </button>
               <button className="icon-btn" title="Change vault folder" onClick={handlePickFolder}>
@@ -6140,8 +10416,23 @@ export default function App() {
           onRunCommand={handlePaletteCommand}
         />
       )}
+      {helpOpen && <HelpModal onClose={() => setHelpOpen(false)} />}
+      {graphOpen && (
+        <GraphViewModal
+          onClose={() => setGraphOpen(false)}
+          linkIndex={sync.linkIndex}
+          linksByFileId={sync.linksByFileId}
+          onOpenFile={handleSidebarOpenFile}
+          activeFileId={activeFileForStatus?.id}
+        />
+      )}
       {showProxyFolderPicker && (
-        <ProxyFolderPicker token={token} onPick={handleProxyFolderPicked} onCancel={() => setShowProxyFolderPicker(false)} />
+        <ProxyFolderBrowser
+          token={token}
+          onPick={handleProxyFolderPicked}
+          onCancel={() => setShowProxyFolderPicker(false)}
+          variant="modal"
+        />
       )}
     </div>
   );
