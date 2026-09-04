@@ -7,7 +7,6 @@ import { autocompletion, completionKeymap } from '@codemirror/autocomplete';
 import { cmIndentSelection } from './cmIndent.js';
 import { buildInlinePreviewPlugin } from './inlinePreviewPlugin.js';
 import { wikilinkTagCompletionSource } from './wikilinkCompletion.js';
-import { buildBlockWidgetField } from './wysiwygBlocks.jsx';
 
 
 // ---------------------------------------------------------------------------
@@ -54,7 +53,6 @@ function CodeMirrorNoteEditor({ fileId, content, onChange, linkIndex, phantomRec
           'Start writing… [[Note Name]] to link, #tag to tag, > [!tip] for callouts, | tables |, +++ toggles +++, :::columns-2 for columns, :::tabs for a tab block.'
         ),
         autocompletion({ override: [wikilinkTagCompletionSource(ctx)], activateOnTyping: true }),
-        buildBlockWidgetField(ctx),
         buildInlinePreviewPlugin(),
         keymap.of([
           { key: 'Mod-z', run: cmUndo },

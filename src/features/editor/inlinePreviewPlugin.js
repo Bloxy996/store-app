@@ -1,12 +1,16 @@
 import { RangeSetBuilder } from '@codemirror/state';
 import { Decoration, ViewPlugin } from '@codemirror/view';
 
-import { TaskCheckboxWidget } from './TaskCheckboxWidget.js';
+import { isTableSeparatorRow } from '../../lib/markdownRender.jsx';
 
 
-// Per-line inline decorations: heading sizing, marker-hiding for bold /
-// italic / strike / highlight / code / wikilinks / tags / md-links, and the
-// live checkbox widget above. Runs only over visible lines.
+// Per-line inline decorations: heading sizing, and marker-dimming for
+// bold / italic / strike / highlight / code / wikilinks / tags / md-links /
+// callouts / toggles / columns / tabs / tables / task checkboxes. Editor
+// never swaps to a rendered widget for any block type (that only happens
+// in reading view, via renderMarkdownBlocks); every bit of markdown syntax
+// always stays visible here, just dimmed, the same way a heading's leading
+// '#'s are. Runs only over visible lines.
 function buildInlinePreviewPlugin() {
   const MARK_RULES = [
     { re: /\*\*([^*\n]+)\*\*/g, markLen: 2, cls: 'cm-bold' },
@@ -51,7 +55,23 @@ function buildInlinePreviewPlugin() {
   // ascending relative to each other. Collecting into a flat array and
   // sorting once before adding (see build(), below) satisfies the
   // builder's ordering requirement regardless of which rule fires where.
-  function decorateLine(out, line, isActiveLine, doc) {
+  // A contiguous run of non-blank `|` lines whose top row is followed by a
+  // valid separator row (`isTableSeparatorRow`) is a table; every row in it
+  // — header, separator, body — gets its pipes dimmed the same way.
+  const findTableHeaderLine = (doc, line) => {
+    let n = line.number;
+    while (n > 1) {
+      const prevText = doc.line(n - 1).text;
+      if (!prevText.includes('|') || prevText.trim() === '') break;
+      n--;
+    }
+    if (n >= doc.lines) return null;
+    const headerText = doc.line(n).text;
+    if (/^#{1,6}\s/.test(headerText) || !headerText.includes('|') || headerText.trim() === '') return null;
+    return isTableSeparatorRow(doc.line(n + 1)?.text || '') ? n : null;
+  };
+
+  function decorateLine(out, line, doc) {
     const text = line.text;
     const trimmed = text.trim();
 
@@ -106,6 +126,18 @@ function buildInlinePreviewPlugin() {
       out.push({ from: line.from, to: line.from + text.length, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
     }
 
+    // Table pipes and separator row — dim like everything else above.
+    if (text.includes('|') && findTableHeaderLine(doc, line) != null) {
+      let idx = text.indexOf('|');
+      while (idx !== -1) {
+        out.push({ from: line.from + idx, to: line.from + idx + 1, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+        idx = text.indexOf('|', idx + 1);
+      }
+      if (isTableSeparatorRow(text)) {
+        out.push({ from: line.from, to: line.to, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+      }
+    }
+
     // Code fence delimiter (``` or ~~~) — dim just the backticks/tildes,
     // same as heading '#'s, leaving any language tag its normal color.
     const fence = /^( {0,3})(`{3,}|~{3,})/.exec(text);
@@ -115,11 +147,13 @@ function buildInlinePreviewPlugin() {
       out.push({ from: markerFrom, to: markerTo, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
     }
 
-    // Task checkbox — always live, regardless of cursor line.
+    // Task checkbox marker — dimmed like every other syntax marker, same
+    // "always visible, never hidden, never swapped for a widget" rule as
+    // the rest of this file; no live/clickable checkbox in edit mode.
     const task = /^(\s*(?:[-*+]\s+))\[( |x|X)\]/.exec(text);
     if (task) {
       const boxFrom = line.from + task[1].length;
-      out.push({ from: boxFrom, to: boxFrom + 3, deco: Decoration.replace({ widget: new TaskCheckboxWidget(/[xX]/.test(task[2])) }) });
+      out.push({ from: boxFrom, to: boxFrom + 3, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
     }
 
     // Unordered list marker (-, *, +) — dim it like other syntax markers.
@@ -133,8 +167,10 @@ function buildInlinePreviewPlugin() {
       }
     }
 
-    // Wikilinks / tags / md-links / bold / italic / etc. Hide marker chars
-    // unless this is the active line, in which case just style them.
+    // Wikilinks / tags / md-links / bold / italic / etc. Markers always
+    // stay visible (dimmed), never hidden — same rule as every other
+    // syntax marker on this page, so nothing you're not actively looking
+    // at silently disappears.
     const inlineFrom = task ? line.from + task[0].length : line.from;
     const inlineText = text.slice(inlineFrom - line.from);
 
@@ -143,13 +179,8 @@ function buildInlinePreviewPlugin() {
     while ((m = wikiRe.exec(inlineText))) {
       const from = inlineFrom + m.index;
       const targetLen = m[1].length;
-      if (!isActiveLine) {
-        out.push({ from, to: from + 2, deco: Decoration.replace({}) });
-        out.push({ from: from + 2 + targetLen, to: from + m[0].length, deco: Decoration.replace({}) });
-      } else {
-        out.push({ from, to: from + 2, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
-        out.push({ from: from + m[0].length - 2, to: from + m[0].length, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
-      }
+      out.push({ from, to: from + 2, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+      out.push({ from: from + m[0].length - 2, to: from + m[0].length, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
       out.push({ from: from + 2, to: from + 2 + targetLen, deco: Decoration.mark({ class: 'cm-wikilink' }) });
       if (m[2]) out.push({ from: from + 2 + targetLen + 1, to: from + m[0].length - 2, deco: Decoration.mark({ class: 'cm-wikilink' }) });
     }
@@ -158,13 +189,8 @@ function buildInlinePreviewPlugin() {
     while ((m = mdLinkRe.exec(inlineText))) {
       const from = inlineFrom + m.index;
       const labelLen = m[1].length;
-      if (!isActiveLine) {
-        out.push({ from, to: from + 1, deco: Decoration.replace({}) });
-        out.push({ from: from + 1 + labelLen, to: from + m[0].length, deco: Decoration.replace({}) });
-      } else {
-        out.push({ from, to: from + 1, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
-        out.push({ from: from + 1 + labelLen, to: from + m[0].length, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
-      }
+      out.push({ from, to: from + 1, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+      out.push({ from: from + 1 + labelLen, to: from + m[0].length, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
       out.push({ from: from + 1, to: from + 1 + labelLen, deco: Decoration.mark({ class: 'cm-wikilink' }) });
     }
 
@@ -179,13 +205,8 @@ function buildInlinePreviewPlugin() {
       while ((m = rule.re.exec(inlineText))) {
         const from = inlineFrom + m.index;
         const to = from + m[0].length;
-        if (!isActiveLine) {
-          out.push({ from, to: from + rule.markLen, deco: Decoration.replace({}) });
-          out.push({ from: to - rule.markLen, to, deco: Decoration.replace({}) });
-        } else {
-          out.push({ from, to: from + rule.markLen, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
-          out.push({ from: to - rule.markLen, to, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
-        }
+        out.push({ from, to: from + rule.markLen, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+        out.push({ from: to - rule.markLen, to, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
         out.push({ from: from + rule.markLen, to: to - rule.markLen, deco: Decoration.mark({ class: rule.cls }) });
       }
     }
@@ -202,7 +223,6 @@ function buildInlinePreviewPlugin() {
         }
       }
       build(view) {
-        const cursorLine = view.state.doc.lineAt(view.state.selection.main.head).number;
         const lines = [];
         for (const { from, to } of view.visibleRanges) {
           let pos = from;
@@ -215,7 +235,7 @@ function buildInlinePreviewPlugin() {
         lines.sort((a, b) => a.from - b.from);
         const entries = [];
         for (const line of lines) {
-          decorateLine(entries, line, line.number === cursorLine, view.state.doc);
+          decorateLine(entries, line, view.state.doc);
         }
         entries.sort((a, b) => a.from - b.from || a.to - b.to);
         const builder = new RangeSetBuilder();

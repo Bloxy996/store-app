@@ -12,26 +12,12 @@
 // Replaces the old hand-rolled <textarea> + syntax-highlight overlay. Two
 // layers of "WYSIWYG" live here:
 //
-//  1. Inline marks (**bold**, *italic*, [[wikilinks]], #tags, ==highlight==,
-//     `code`) are decorated in place by `buildInlinePreviewPlugin`. Marker
-//     characters are hidden on every line except the one the cursor is
-//     currently on, so a token always drops back to raw, editable markdown
-//     the moment you touch it — the same "line reveals its own source"
-//     model Obsidian's Live Preview uses. Only `view.visibleRanges` are
-//     scanned per update (not the whole note), so cost no longer scales
-//     with note length the way the old full-note overlay did.
-//
-//  2. Block constructs that already have a full React renderer — callouts,
-//     +++ toggles +++, :::columns-N:::, :::tabs:::, and pipe tables — are
-//     swapped for an actual rendered block via `buildBlockWidgetField`
-//     whenever the cursor is outside them, reusing `renderMarkdownBlocks`
-//     (same component reading view uses) rather than a second parser.
-//     Tables get real inline-editable cells (`EditableMarkdownTable`);
-//     everything else keeps its existing interactive bits (tab-switching,
-//     toggle expand/collapse) because it's the *same* component tree
-//     reading view already uses, just mounted as a widget. Clicking any
-//     non-interactive part of a rendered block drops it back to raw
-//     markdown for editing.
+// All markdown syntax (bold/italic/wikilinks/tags/headings/callouts/
+// toggles/columns/tabs/tables/task checkboxes) is decorated in place by
+// `buildInlinePreviewPlugin` — marker characters are dimmed, never hidden
+// or swapped for a rendered/widget form, so the raw markdown is always what
+// you're editing. Only `view.visibleRanges` are scanned per update (not the
+// whole note), so cost doesn't scale with note length.
 //
 // Requires: codemirror, @codemirror/state, @codemirror/view,
 // @codemirror/commands, @codemirror/autocomplete (all pulled in by the

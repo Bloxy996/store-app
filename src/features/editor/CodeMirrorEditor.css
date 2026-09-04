@@ -103,31 +103,6 @@
   background: rgba(230, 200, 80, 0.35);
   border-radius: 2px;
 }
-.cm-task-checkbox {
-  vertical-align: middle;
-  margin: 0 4px 2px 0;
-  accent-color: var(--accent);
-  cursor: pointer;
-}
-
-/* Block-level WYSIWYG widgets (tables, callouts, toggles, columns, tabs) —
-   see buildBlockWidgetField/MarkdownBlockWidget in App.jsx. Rendered by
-   the same React components reading view uses, mounted directly into the
-   CodeMirror content flow as a block decoration. */
-.cm-wysiwyg-block {
-  margin: 4px 0;
-}
-.cm-block-generic {
-  cursor: text;
-  border-radius: 6px;
-  transition: background-color 0.1s ease;
-}
-.cm-block-generic:hover {
-  background: color-mix(in srgb, var(--bg-2) 55%, transparent);
-}
-.cm-wysiwyg-table .md-table.cm-editable-table {
-  margin: 0;
-}
 .cm-editable-column,
 .cm-editable-tab-body {
   cursor: text;
