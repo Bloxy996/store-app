@@ -94,7 +94,7 @@
 }
 
 /* Block-level WYSIWYG widgets (tables, callouts, toggles, columns, tabs) —
-   see buildBlockWidgetPlugin/MarkdownBlockWidget in App.jsx. Rendered by
+   see buildBlockWidgetField/MarkdownBlockWidget in App.jsx. Rendered by
    the same React components reading view uses, mounted directly into the
    CodeMirror content flow as a block decoration. */
 .cm-wysiwyg-block {

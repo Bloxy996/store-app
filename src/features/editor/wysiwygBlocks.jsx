@@ -1,7 +1,7 @@
 import React, { useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
-import { RangeSetBuilder } from '@codemirror/state';
-import { Decoration, ViewPlugin, WidgetType } from '@codemirror/view';
+import { RangeSetBuilder, StateField } from '@codemirror/state';
+import { Decoration, EditorView, WidgetType } from '@codemirror/view';
 
 import { isTableSeparatorRow, renderMarkdownBlocks, splitTableRow, tableColAlign } from '../../lib/markdownRender.jsx';
 
@@ -298,43 +298,50 @@ class MarkdownBlockWidget extends WidgetType {
 }
 
 
-function buildBlockWidgetPlugin(ctx) {
-  return ViewPlugin.fromClass(
-    class {
-      constructor(view) {
-        this.cachedText = null;
-        this.cachedRanges = [];
-        this.decorations = this.build(view);
-      }
-      update(update) {
-        if (update.docChanged || update.selectionSet) {
-          this.decorations = this.build(update.view);
-        }
-      }
-      build(view) {
-        const doc = view.state.doc;
-        const text = doc.toString();
-        if (text !== this.cachedText) {
-          this.cachedText = text;
-          this.cachedRanges = findWysiwygBlockRanges(text.split('\n'));
-        }
-        const sel = view.state.selection.main;
-        const selStartLine = doc.lineAt(sel.from).number - 1;
-        const selEndLine = doc.lineAt(sel.to).number - 1;
-        const builder = new RangeSetBuilder();
-        for (const r of this.cachedRanges) {
-          if (selEndLine >= r.startLine && selStartLine <= r.endLine) continue; // cursor inside: show raw source
-          const fromLine = doc.line(r.startLine + 1);
-          const toLine = doc.line(r.endLine + 1);
-          const raw = doc.sliceString(fromLine.from, toLine.to);
-          const widget = new MarkdownBlockWidget(raw, fromLine.from, toLine.to, `cmblk-${r.startLine}-`, ctx, r.kind);
-          builder.add(fromLine.from, toLine.to, Decoration.replace({ widget, block: true }));
-        }
-        return builder.finish();
-      }
+// Block decorations (Decoration.replace with `block: true`, as used below)
+// are only allowed to come from a StateField — CodeMirror throws "Block
+// decorations may not be specified via plugins" if a ViewPlugin provides
+// them, since plugin decorations are recomputed lazily during the view's
+// own update/measure pass and can desync its block-height bookkeeping.
+// A StateField's value is part of editor state itself, computed inline
+// with each transaction, so it doesn't have that problem.
+function buildBlockWidgetField(ctx) {
+  // Same per-instance range cache the old ViewPlugin kept on `this` —
+  // recomputing the block ranges is redone from scratch on the doc text,
+  // so caching keeps it from re-scanning the whole note on every
+  // selection-only update (e.g. arrow-key movement).
+  const cache = { text: null, ranges: [] };
+  const build = (state) => {
+    const doc = state.doc;
+    const text = doc.toString();
+    if (text !== cache.text) {
+      cache.text = text;
+      cache.ranges = findWysiwygBlockRanges(text.split('\n'));
+    }
+    const sel = state.selection.main;
+    const selStartLine = doc.lineAt(sel.from).number - 1;
+    const selEndLine = doc.lineAt(sel.to).number - 1;
+    const builder = new RangeSetBuilder();
+    for (const r of cache.ranges) {
+      if (selEndLine >= r.startLine && selStartLine <= r.endLine) continue; // cursor inside: show raw source
+      const fromLine = doc.line(r.startLine + 1);
+      const toLine = doc.line(r.endLine + 1);
+      const raw = doc.sliceString(fromLine.from, toLine.to);
+      const widget = new MarkdownBlockWidget(raw, fromLine.from, toLine.to, `cmblk-${r.startLine}-`, ctx, r.kind);
+      builder.add(fromLine.from, toLine.to, Decoration.replace({ widget, block: true }));
+    }
+    return builder.finish();
+  };
+  return StateField.define({
+    create(state) {
+      return build(state);
     },
-    { decorations: (v) => v.decorations }
-  );
+    update(decorations, tr) {
+      if (tr.docChanged || tr.selection) return build(tr.state);
+      return decorations;
+    },
+    provide: (f) => EditorView.decorations.from(f)
+  });
 }
 
-export { findWysiwygBlockRanges, parseMarkdownTableRaw, buildMarkdownTableRaw, EditableMarkdownTable, MarkdownBlockWidget, buildBlockWidgetPlugin };
+export { findWysiwygBlockRanges, parseMarkdownTableRaw, buildMarkdownTableRaw, EditableMarkdownTable, MarkdownBlockWidget, buildBlockWidgetField };

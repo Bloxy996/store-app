@@ -1,302 +1,150 @@
-diff --git a/src/features/canvas/CanvasNode.jsx b/src/features/canvas/CanvasNode.jsx
-index 4925201..93c677b 100644
---- a/src/features/canvas/CanvasNode.jsx
-+++ b/src/features/canvas/CanvasNode.jsx
-@@ -123,6 +123,7 @@ const CanvasNode = React.memo(function CanvasNode({
-   selected,
-   hovered,
-   editing,
-+  connectTarget,
-   allFilesById,
-   handlers,
-   linkIndex,
-@@ -138,7 +139,7 @@ const CanvasNode = React.memo(function CanvasNode({
-   if (node.color) style.borderColor = node.color;
-   return (
-     <div
--      className={`canvas-node canvas-node-${node.type} ${selected ? 'selected' : ''}`}
-+      className={`canvas-node canvas-node-${node.type} ${selected ? 'selected' : ''} ${connectTarget ? 'connect-target' : ''}`}
-       style={style}
-       onPointerEnter={() => onHoverChange(node.id)}
-       onPointerLeave={() => onHoverChange(null)}
-diff --git a/src/features/canvas/CanvasView.jsx b/src/features/canvas/CanvasView.jsx
-index 501ef20..eae355a 100644
---- a/src/features/canvas/CanvasView.jsx
-+++ b/src/features/canvas/CanvasView.jsx
-@@ -20,6 +20,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
-   const [liveOverrides, setLiveOverrides] = useState(null);
-   const [marquee, setMarquee] = useState(null);
-   const [connecting, setConnecting] = useState(null);
-+  const [connectTargetId, setConnectTargetId] = useState(null);
-   const [filePickerOpen, setFilePickerOpen] = useState(false);
-   const [spaceDown, setSpaceDown] = useState(false);
-   const [isPanning, setIsPanning] = useState(false);
-@@ -228,7 +229,13 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
-       if (editingId === node.id) return;
-       e.stopPropagation();
-       containerRef.current.focus();
--      containerRef.current.setPointerCapture(e.pointerId);
-+      // Capture on the node's own element, not the container: capturing on
-+      // an ancestor makes the browser retarget the click/dblclick events
-+      // that follow this pointerdown to the capturing element instead of
-+      // the node underneath the cursor, so a double-click here was being
-+      // reported to canvas-surface as a background double-click (creating
-+      // a stray node) rather than to the node (entering text-edit mode).
-+      e.currentTarget.setPointerCapture(e.pointerId);
-       let ids;
-       if (e.shiftKey) {
-         ids = new Set(selectedIds);
-@@ -258,7 +265,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
-   const beginResize = useCallback(
-     (e, node) => {
-       e.stopPropagation();
--      containerRef.current.setPointerCapture(e.pointerId);
-+      e.currentTarget.setPointerCapture(e.pointerId);
-       dragRef.current = { mode: 'resize', id: node.id, startW: node.width, startH: node.height, startWorld: screenToWorld(e.clientX, e.clientY), moved: false };
+diff --git a/src/features/editor/CodeMirrorEditor.css b/src/features/editor/CodeMirrorEditor.css
+index 42b78c5..ebb914f 100644
+--- a/src/features/editor/CodeMirrorEditor.css
++++ b/src/features/editor/CodeMirrorEditor.css
+@@ -94,7 +94,7 @@
+ }
+ 
+ /* Block-level WYSIWYG widgets (tables, callouts, toggles, columns, tabs) —
+-   see buildBlockWidgetPlugin/MarkdownBlockWidget in App.jsx. Rendered by
++   see buildBlockWidgetField/MarkdownBlockWidget in App.jsx. Rendered by
+    the same React components reading view uses, mounted directly into the
+    CodeMirror content flow as a block decoration. */
+ .cm-wysiwyg-block {
+diff --git a/src/features/editor/CodeMirrorNoteEditor.jsx b/src/features/editor/CodeMirrorNoteEditor.jsx
+index 652af66..473d2a2 100644
+--- a/src/features/editor/CodeMirrorNoteEditor.jsx
++++ b/src/features/editor/CodeMirrorNoteEditor.jsx
+@@ -7,7 +7,7 @@ import { autocompletion, completionKeymap } from '@codemirror/autocomplete';
+ import { cmIndentSelection } from './cmIndent.js';
+ import { buildInlinePreviewPlugin } from './inlinePreviewPlugin.js';
+ import { wikilinkTagCompletionSource } from './wikilinkCompletion.js';
+-import { buildBlockWidgetPlugin } from './wysiwygBlocks.jsx';
++import { buildBlockWidgetField } from './wysiwygBlocks.jsx';
+ 
+ 
+ // ---------------------------------------------------------------------------
+@@ -54,7 +54,7 @@ function CodeMirrorNoteEditor({ fileId, content, onChange, linkIndex, phantomRec
+           'Start writing… [[Note Name]] to link, #tag to tag, > [!tip] for callouts, | tables |, +++ toggles +++, :::columns-2 for columns, :::tabs for a tab block.'
+         ),
+         autocompletion({ override: [wikilinkTagCompletionSource(ctx)], activateOnTyping: true }),
+-        buildBlockWidgetPlugin(ctx),
++        buildBlockWidgetField(ctx),
+         buildInlinePreviewPlugin(),
+         keymap.of([
+           { key: 'Mod-z', run: cmUndo },
+diff --git a/src/features/editor/cmIndent.js b/src/features/editor/cmIndent.js
+index dde4ae8..3f8cfb2 100644
+--- a/src/features/editor/cmIndent.js
++++ b/src/features/editor/cmIndent.js
+@@ -23,7 +23,7 @@
+ //
+ //  2. Block constructs that already have a full React renderer — callouts,
+ //     +++ toggles +++, :::columns-N:::, :::tabs:::, and pipe tables — are
+-//     swapped for an actual rendered block via `buildBlockWidgetPlugin`
++//     swapped for an actual rendered block via `buildBlockWidgetField`
+ //     whenever the cursor is outside them, reusing `renderMarkdownBlocks`
+ //     (same component reading view uses) rather than a second parser.
+ //     Tables get real inline-editable cells (`EditableMarkdownTable`);
+diff --git a/src/features/editor/wysiwygBlocks.jsx b/src/features/editor/wysiwygBlocks.jsx
+index c4f617f..94f11cd 100644
+--- a/src/features/editor/wysiwygBlocks.jsx
++++ b/src/features/editor/wysiwygBlocks.jsx
+@@ -1,7 +1,7 @@
+ import React, { useMemo } from 'react';
+ import { createRoot } from 'react-dom/client';
+-import { RangeSetBuilder } from '@codemirror/state';
+-import { Decoration, ViewPlugin, WidgetType } from '@codemirror/view';
++import { RangeSetBuilder, StateField } from '@codemirror/state';
++import { Decoration, EditorView, WidgetType } from '@codemirror/view';
+ 
+ import { isTableSeparatorRow, renderMarkdownBlocks, splitTableRow, tableColAlign } from '../../lib/markdownRender.jsx';
+ 
+@@ -298,43 +298,50 @@ class MarkdownBlockWidget extends WidgetType {
+ }
+ 
+ 
+-function buildBlockWidgetPlugin(ctx) {
+-  return ViewPlugin.fromClass(
+-    class {
+-      constructor(view) {
+-        this.cachedText = null;
+-        this.cachedRanges = [];
+-        this.decorations = this.build(view);
+-      }
+-      update(update) {
+-        if (update.docChanged || update.selectionSet) {
+-          this.decorations = this.build(update.view);
+-        }
+-      }
+-      build(view) {
+-        const doc = view.state.doc;
+-        const text = doc.toString();
+-        if (text !== this.cachedText) {
+-          this.cachedText = text;
+-          this.cachedRanges = findWysiwygBlockRanges(text.split('\n'));
+-        }
+-        const sel = view.state.selection.main;
+-        const selStartLine = doc.lineAt(sel.from).number - 1;
+-        const selEndLine = doc.lineAt(sel.to).number - 1;
+-        const builder = new RangeSetBuilder();
+-        for (const r of this.cachedRanges) {
+-          if (selEndLine >= r.startLine && selStartLine <= r.endLine) continue; // cursor inside: show raw source
+-          const fromLine = doc.line(r.startLine + 1);
+-          const toLine = doc.line(r.endLine + 1);
+-          const raw = doc.sliceString(fromLine.from, toLine.to);
+-          const widget = new MarkdownBlockWidget(raw, fromLine.from, toLine.to, `cmblk-${r.startLine}-`, ctx, r.kind);
+-          builder.add(fromLine.from, toLine.to, Decoration.replace({ widget, block: true }));
+-        }
+-        return builder.finish();
+-      }
++// Block decorations (Decoration.replace with `block: true`, as used below)
++// are only allowed to come from a StateField — CodeMirror throws "Block
++// decorations may not be specified via plugins" if a ViewPlugin provides
++// them, since plugin decorations are recomputed lazily during the view's
++// own update/measure pass and can desync its block-height bookkeeping.
++// A StateField's value is part of editor state itself, computed inline
++// with each transaction, so it doesn't have that problem.
++function buildBlockWidgetField(ctx) {
++  // Same per-instance range cache the old ViewPlugin kept on `this` —
++  // recomputing the block ranges is redone from scratch on the doc text,
++  // so caching keeps it from re-scanning the whole note on every
++  // selection-only update (e.g. arrow-key movement).
++  const cache = { text: null, ranges: [] };
++  const build = (state) => {
++    const doc = state.doc;
++    const text = doc.toString();
++    if (text !== cache.text) {
++      cache.text = text;
++      cache.ranges = findWysiwygBlockRanges(text.split('\n'));
++    }
++    const sel = state.selection.main;
++    const selStartLine = doc.lineAt(sel.from).number - 1;
++    const selEndLine = doc.lineAt(sel.to).number - 1;
++    const builder = new RangeSetBuilder();
++    for (const r of cache.ranges) {
++      if (selEndLine >= r.startLine && selStartLine <= r.endLine) continue; // cursor inside: show raw source
++      const fromLine = doc.line(r.startLine + 1);
++      const toLine = doc.line(r.endLine + 1);
++      const raw = doc.sliceString(fromLine.from, toLine.to);
++      const widget = new MarkdownBlockWidget(raw, fromLine.from, toLine.to, `cmblk-${r.startLine}-`, ctx, r.kind);
++      builder.add(fromLine.from, toLine.to, Decoration.replace({ widget, block: true }));
++    }
++    return builder.finish();
++  };
++  return StateField.define({
++    create(state) {
++      return build(state);
      },
-     [screenToWorld]
-@@ -266,7 +273,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
- 
-   const beginConnect = useCallback((e, node, side) => {
-     e.stopPropagation();
--    containerRef.current.setPointerCapture(e.pointerId);
-+    e.currentTarget.setPointerCapture(e.pointerId);
-     const pt = canvasSideAnchor(node, side);
-     dragRef.current = { mode: 'connect', fromNodeId: node.id, fromSide: side, startClient: { x: e.clientX, y: e.clientY } };
-     setConnecting({ fromNodeId: node.id, fromSide: side, fromPt: pt, toPt: pt });
-@@ -341,7 +348,13 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
-       if (w !== drag.startW || h !== drag.startH) drag.moved = true;
-       scheduleLiveOverrides(new Map([[drag.id, { width: w, height: h }]]));
-     } else if (drag.mode === 'connect') {
--      setConnecting((c) => c && { ...c, toPt: screenToWorld(e.clientX, e.clientY) });
-+      const world = screenToWorld(e.clientX, e.clientY);
-+      setConnecting((c) => c && { ...c, toPt: world });
-+      // Highlight whatever existing card the pointer is over so it's clear
-+      // a drop here will connect to it, instead of silently succeeding (or
-+      // silently missing and creating a new card) with no visual feedback.
-+      const target = canvasHitTest(state.nodes, world, drag.fromNodeId);
-+      setConnectTargetId(target ? target.id : null);
-     }
-   };
- 
-@@ -385,6 +398,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
-         setEditingId(newNode.id);
-       }
-       setConnecting(null);
-+      setConnectTargetId(null);
-     }
-   };
- 
-@@ -397,6 +411,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
-       setSelectedIds(new Set());
-       setSelectedEdgeId(null);
-       setConnecting(null);
-+      setConnectTargetId(null);
-     } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
-       e.preventDefault();
-       setSelectedIds(new Set(state.nodes.map((n) => n.id)));
-@@ -518,6 +533,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
-               selected={selectedIds.has(node.id)}
-               hovered={hoveredId === node.id}
-               editing={editingId === node.id}
-+              connectTarget={connectTargetId === node.id}
-               allFilesById={allFilesById}
-               handlers={handlers}
-               linkIndex={linkIndex}
-diff --git a/src/features/canvas/canvas.css b/src/features/canvas/canvas.css
-index aa8e210..eeb3a15 100644
---- a/src/features/canvas/canvas.css
-+++ b/src/features/canvas/canvas.css
-@@ -83,6 +83,13 @@
-   border-color: var(--accent);
-   box-shadow: 0 0 0 2px var(--accent-soft), 0 2px 8px rgba(0, 0, 0, 0.4);
- }
-+/* Shown while dragging a connection over this card, so it's clear a drop
-+   here will link to it (rather than silently missing and creating a new
-+   card, or silently succeeding with no visible confirmation). */
-+.canvas-node.connect-target {
-+  border-color: var(--accent);
-+  box-shadow: 0 0 0 3px var(--accent-soft);
-+}
- .canvas-node-body {
-   height: 100%;
-   width: 100%;
-diff --git a/src/features/database/DbCells.jsx b/src/features/database/DbCells.jsx
-index 4639057..5fc2d5f 100644
---- a/src/features/database/DbCells.jsx
-+++ b/src/features/database/DbCells.jsx
-@@ -13,7 +13,15 @@ import { useDriveImageUrl } from '../../hooks/useDriveImageUrl.js';
- // panels contain text inputs (typing/clicking to focus would immediately
- // dismiss them). Children get an explicit `close()` to call when a pick is
- // actually made.
--function DbPopover({ trigger, children, align = 'left', width }) {
-+// `inline` renders the panel as a normal in-flow child positioned relative
-+// to the trigger instead of portaling to document.body. Portaled popovers
-+// need their own z-index guess relative to whatever they might be opened
-+// inside of (e.g. the row-detail modal), which is exactly how the status/
-+// tag pickers ended up stuck behind that modal. A popover opened from
-+// inside another popup doesn't have that problem in the first place — it
-+// naturally stacks above its own container in normal DOM order — so
-+// callers rendering inside a modal should pass `inline`.
-+function DbPopover({ trigger, children, align = 'left', width, inline = false }) {
-   const [open, setOpen] = useState(false);
-   const [pos, setPos] = useState(null);
-   const anchorRef = useRef(null);
-@@ -21,14 +29,15 @@ function DbPopover({ trigger, children, align = 'left', width }) {
-   useClickOutside([anchorRef, menuRef], () => setOpen(false));
- 
-   const computePos = useCallback(() => {
-+    if (inline) return;
-     const el = anchorRef.current;
-     if (!el) return;
-     const rect = el.getBoundingClientRect();
-     setPos({ top: rect.bottom + 4, left: rect.left, right: window.innerWidth - rect.right });
--  }, []);
-+  }, [inline]);
- 
-   useLayoutEffect(() => {
--    if (!open) return;
-+    if (!open || inline) return;
-     computePos();
-     const onReflow = () => computePos();
-     window.addEventListener('resize', onReflow);
-@@ -37,7 +46,7 @@ function DbPopover({ trigger, children, align = 'left', width }) {
-       window.removeEventListener('resize', onReflow);
-       window.removeEventListener('scroll', onReflow, true);
-     };
--  }, [open, computePos]);
-+  }, [open, inline, computePos]);
- 
-   const toggle = useCallback((e) => {
-     e?.stopPropagation();
-@@ -45,6 +54,24 @@ function DbPopover({ trigger, children, align = 'left', width }) {
-   }, []);
-   const close = useCallback(() => setOpen(false), []);
- 
-+  if (inline) {
-+    return (
-+      <span className="db-popover-wrap db-popover-wrap-inline" ref={anchorRef}>
-+        {trigger(toggle, open)}
-+        {open && (
-+          <div
-+            ref={menuRef}
-+            className={`db-popover inline ${align === 'right' ? 'align-right' : ''}`}
-+            style={width ? { width } : undefined}
-+            onClick={(e) => e.stopPropagation()}
-+          >
-+            {children(close)}
-+          </div>
-+        )}
-+      </span>
-+    );
-+  }
-+
-   return (
-     <span className="db-popover-wrap" ref={anchorRef}>
-       {trigger(toggle, open)}
-@@ -290,11 +317,12 @@ function DbDateCell({ value, onChange }) {
+-    { decorations: (v) => v.decorations }
+-  );
++    update(decorations, tr) {
++      if (tr.docChanged || tr.selection) return build(tr.state);
++      return decorations;
++    },
++    provide: (f) => EditorView.decorations.from(f)
++  });
  }
  
- 
--function DbSelectCell({ value, onChange, column }) {
-+function DbSelectCell({ value, onChange, column, dense }) {
-   const options = column.options || [];
-   const current = options.find((o) => o.id === value) || null;
-   return (
-     <DbPopover
-+      inline={!dense}
-       trigger={(toggle) => (
-         <button className="db-select-trigger" onClick={toggle}>
-           {current ? (
-@@ -344,7 +372,7 @@ function DbSelectCell({ value, onChange, column }) {
- }
- 
- 
--function DbMultiSelectCell({ value, onChange, column, onCreateOption }) {
-+function DbMultiSelectCell({ value, onChange, column, onCreateOption, dense }) {
-   const [filter, setFilter] = useState('');
-   const options = column.options || [];
-   const selected = new Set(value);
-@@ -352,6 +380,7 @@ function DbMultiSelectCell({ value, onChange, column, onCreateOption }) {
-   const exactExists = options.some((o) => o.label.toLowerCase() === filter.trim().toLowerCase());
-   return (
-     <DbPopover
-+      inline={!dense}
-       trigger={(toggle) => (
-         <button className="db-multiselect-trigger" onClick={toggle}>
-           {value.length === 0 && <span className="db-cell-text empty" />}
-@@ -534,9 +563,9 @@ function DbCell({ column, value, onChange, dbFile, handlers, dense, onCreateOpti
-     case 'number_float':
-       return <DbNumberCell value={value} onChange={onChange} />;
-     case 'select':
--      return <DbSelectCell value={value} onChange={onChange} column={column} />;
-+      return <DbSelectCell value={value} onChange={onChange} column={column} dense={dense} />;
-     case 'multi_select':
--      return <DbMultiSelectCell value={value || []} onChange={onChange} column={column} onCreateOption={onCreateOption} />;
-+      return <DbMultiSelectCell value={value || []} onChange={onChange} column={column} onCreateOption={onCreateOption} dense={dense} />;
-     case 'date':
-       return <DbDateCell value={value} onChange={onChange} />;
-     case 'checkbox':
-diff --git a/src/features/database/database.css b/src/features/database/database.css
-index cc108c2..7a589c7 100644
---- a/src/features/database/database.css
-+++ b/src/features/database/database.css
-@@ -160,7 +160,10 @@
- }
- .db-popover.portal {
-   position: fixed;
--  z-index: 400;
-+  /* Above .db-row-modal-overlay's z-index: 500 — a portal popover opened
-+     from a cell inside the row-detail modal (e.g. an attachment picker)
-+     needs to outrank the modal it's floating above, not just the page. */
-+  z-index: 600;
-   background: var(--bg-3);
-   border: 1px solid var(--bg-4);
-   border-radius: var(--radius-md);
-@@ -171,6 +174,33 @@
-   max-height: 340px;
-   overflow-y: auto;
- }
-+/* Inline variant (see DbPopover's `inline` prop): a normal in-flow child
-+   positioned relative to its trigger instead of a document.body portal.
-+   Used for the status/tag pickers inside the row-detail modal so they
-+   can't end up stacked behind whatever they're opened inside of. */
-+.db-popover-wrap-inline {
-+  position: relative;
-+  display: inline-flex;
-+}
-+.db-popover.inline {
-+  position: absolute;
-+  top: calc(100% + 4px);
-+  left: 0;
-+  z-index: 5;
-+  background: var(--bg-3);
-+  border: 1px solid var(--bg-4);
-+  border-radius: var(--radius-md);
-+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45);
-+  min-width: 160px;
-+  max-width: 320px;
-+  padding: 6px;
-+  max-height: 340px;
-+  overflow-y: auto;
-+}
-+.db-popover.inline.align-right {
-+  left: auto;
-+  right: 0;
-+}
- .db-popover-item {
-   display: flex;
-   align-items: center;
-diff --git a/src/features/graph/GraphViewModal.css b/src/features/graph/GraphViewModal.css
-index d654a64..9e527bf 100644
---- a/src/features/graph/GraphViewModal.css
-+++ b/src/features/graph/GraphViewModal.css
-@@ -253,7 +253,7 @@
-   padding: 0.15em 0.4em;
-   font-family: var(--font-mono);
-   font-size: 0.88em;
--  color: #e3b8ac;
-+  color: var(--accent);
- }
- .editor-preview pre {
-   background: var(--bg-0);
+-export { findWysiwygBlockRanges, parseMarkdownTableRaw, buildMarkdownTableRaw, EditableMarkdownTable, MarkdownBlockWidget, buildBlockWidgetPlugin };
++export { findWysiwygBlockRanges, parseMarkdownTableRaw, buildMarkdownTableRaw, EditableMarkdownTable, MarkdownBlockWidget, buildBlockWidgetField };

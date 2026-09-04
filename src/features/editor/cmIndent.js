@@ -23,7 +23,7 @@
 //
 //  2. Block constructs that already have a full React renderer — callouts,
 //     +++ toggles +++, :::columns-N:::, :::tabs:::, and pipe tables — are
-//     swapped for an actual rendered block via `buildBlockWidgetPlugin`
+//     swapped for an actual rendered block via `buildBlockWidgetField`
 //     whenever the cursor is outside them, reusing `renderMarkdownBlocks`
 //     (same component reading view uses) rather than a second parser.
 //     Tables get real inline-editable cells (`EditableMarkdownTable`);
