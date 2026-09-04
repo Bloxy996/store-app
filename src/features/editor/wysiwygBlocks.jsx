@@ -264,7 +264,14 @@ class MarkdownBlockWidget extends WidgetType {
       const view = this.ctx.getView();
       if (!view) return;
       evt.preventDefault();
-      view.dispatch({ selection: { anchor: this.from } });
+      // Place the cursor at the character under the pointer, not always at
+      // the block's start — posAtCoords maps the actual click position back
+      // to a doc offset, which is what makes clicking into the middle/end
+      // of a rendered block (e.g. the 2nd line of a callout) land there
+      // instead of jumping to the top of the block every time.
+      const pos = view.posAtCoords({ x: evt.clientX, y: evt.clientY });
+      const anchor = pos == null ? this.from : Math.max(this.from, Math.min(this.to, pos));
+      view.dispatch({ selection: { anchor } });
       view.focus();
     };
 

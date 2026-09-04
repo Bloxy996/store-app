@@ -18,6 +18,31 @@ function buildInlinePreviewPlugin() {
     { re: /(?<![\w_])_([^_\s][^_\n]*?)_(?![\w_])/g, markLen: 1, cls: 'cm-italic' }
   ];
 
+  // Same color grouping as the reading-view `.callout-*` CSS (see
+  // markdownRender.jsx / GraphViewModal.css) so a callout keeps its look
+  // while its raw markdown is being edited, instead of the wysiwyg block
+  // widget disappearing into plain unstyled text.
+  const calloutGroup = (type) => {
+    if (/^(warning|caution|attention)$/.test(type)) return 'warn';
+    if (/^(danger|error|failure|bug)$/.test(type)) return 'danger';
+    if (/^(tip|hint|success|check|done)$/.test(type)) return 'tip';
+    return 'note';
+  };
+  // A callout's type lives only on its first line (`> [!type] Title`); walk
+  // upward through the contiguous `>` lines to find it so continuation
+  // lines get the same color.
+  const findCalloutType = (doc, line) => {
+    let n = line.number;
+    while (n >= 1) {
+      const text = doc.line(n).text;
+      if (!/^>/.test(text)) return null;
+      const m = /^>\s?\[!([a-zA-Z]+)\]/.exec(text);
+      if (m) return m[1].toLowerCase();
+      n--;
+    }
+    return null;
+  };
+
   // Every call pushes {from, to, deco, lineDeco} entries into `out` rather
   // than adding to the RangeSetBuilder directly — the builder requires
   // strictly ascending `from` across the *whole* document, but the several
@@ -26,7 +51,7 @@ function buildInlinePreviewPlugin() {
   // ascending relative to each other. Collecting into a flat array and
   // sorting once before adding (see build(), below) satisfies the
   // builder's ordering requirement regardless of which rule fires where.
-  function decorateLine(out, line, isActiveLine) {
+  function decorateLine(out, line, isActiveLine, doc) {
     const text = line.text;
 
     // Heading: size the whole line, dim the leading hashes.
@@ -36,10 +61,25 @@ function buildInlinePreviewPlugin() {
       out.push({ from: line.from, to: line.from + heading[1].length + 1, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
     }
 
-    // Blockquote / callout marker.
+    // Blockquote / callout marker. Dimmed like a heading's '#'s — always
+    // visible, never hidden — so editing a callout still reads as a
+    // callout instead of reverting to bare markdown while focused. The
+    // whole line also gets the callout's color as a line decoration, and
+    // the `[!type] Title` portion of the first line is bolded to match the
+    // rendered widget's title row.
     const quote = /^>\s?/.exec(text);
     if (quote) {
       out.push({ from: line.from, to: line.from + quote[0].length, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+      const calloutType = findCalloutType(doc, line);
+      if (calloutType) {
+        const group = calloutGroup(calloutType);
+        out.push({ from: line.from, to: line.from, deco: Decoration.line({ class: `cm-callout-line cm-callout-${group}` }) });
+        const title = /^>\s?\[!([a-zA-Z]+)\]([+-]?)\s*/.exec(text);
+        if (title) {
+          out.push({ from: line.from + quote[0].length, to: line.from + title[0].length, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+          out.push({ from: line.from + title[0].length, to: line.to, deco: Decoration.mark({ class: 'cm-callout-title-text' }) });
+        }
+      }
     }
 
     // Thematic break (---, ***, ___) — dim the whole rule line, same
@@ -158,7 +198,7 @@ function buildInlinePreviewPlugin() {
         lines.sort((a, b) => a.from - b.from);
         const entries = [];
         for (const line of lines) {
-          decorateLine(entries, line, line.number === cursorLine);
+          decorateLine(entries, line, line.number === cursorLine, view.state.doc);
         }
         entries.sort((a, b) => a.from - b.from || a.to - b.to);
         const builder = new RangeSetBuilder();
