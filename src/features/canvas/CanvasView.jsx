@@ -20,6 +20,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
   const [liveOverrides, setLiveOverrides] = useState(null);
   const [marquee, setMarquee] = useState(null);
   const [connecting, setConnecting] = useState(null);
+  const [connectTargetId, setConnectTargetId] = useState(null);
   const [filePickerOpen, setFilePickerOpen] = useState(false);
   const [spaceDown, setSpaceDown] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
@@ -228,7 +229,13 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
       if (editingId === node.id) return;
       e.stopPropagation();
       containerRef.current.focus();
-      containerRef.current.setPointerCapture(e.pointerId);
+      // Capture on the node's own element, not the container: capturing on
+      // an ancestor makes the browser retarget the click/dblclick events
+      // that follow this pointerdown to the capturing element instead of
+      // the node underneath the cursor, so a double-click here was being
+      // reported to canvas-surface as a background double-click (creating
+      // a stray node) rather than to the node (entering text-edit mode).
+      e.currentTarget.setPointerCapture(e.pointerId);
       let ids;
       if (e.shiftKey) {
         ids = new Set(selectedIds);
@@ -258,7 +265,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
   const beginResize = useCallback(
     (e, node) => {
       e.stopPropagation();
-      containerRef.current.setPointerCapture(e.pointerId);
+      e.currentTarget.setPointerCapture(e.pointerId);
       dragRef.current = { mode: 'resize', id: node.id, startW: node.width, startH: node.height, startWorld: screenToWorld(e.clientX, e.clientY), moved: false };
     },
     [screenToWorld]
@@ -266,7 +273,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
 
   const beginConnect = useCallback((e, node, side) => {
     e.stopPropagation();
-    containerRef.current.setPointerCapture(e.pointerId);
+    e.currentTarget.setPointerCapture(e.pointerId);
     const pt = canvasSideAnchor(node, side);
     dragRef.current = { mode: 'connect', fromNodeId: node.id, fromSide: side, startClient: { x: e.clientX, y: e.clientY } };
     setConnecting({ fromNodeId: node.id, fromSide: side, fromPt: pt, toPt: pt });
@@ -341,7 +348,13 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
       if (w !== drag.startW || h !== drag.startH) drag.moved = true;
       scheduleLiveOverrides(new Map([[drag.id, { width: w, height: h }]]));
     } else if (drag.mode === 'connect') {
-      setConnecting((c) => c && { ...c, toPt: screenToWorld(e.clientX, e.clientY) });
+      const world = screenToWorld(e.clientX, e.clientY);
+      setConnecting((c) => c && { ...c, toPt: world });
+      // Highlight whatever existing card the pointer is over so it's clear
+      // a drop here will connect to it, instead of silently succeeding (or
+      // silently missing and creating a new card) with no visual feedback.
+      const target = canvasHitTest(state.nodes, world, drag.fromNodeId);
+      setConnectTargetId(target ? target.id : null);
     }
   };
 
@@ -385,6 +398,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
         setEditingId(newNode.id);
       }
       setConnecting(null);
+      setConnectTargetId(null);
     }
   };
 
@@ -397,6 +411,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
       setSelectedIds(new Set());
       setSelectedEdgeId(null);
       setConnecting(null);
+      setConnectTargetId(null);
     } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
       e.preventDefault();
       setSelectedIds(new Set(state.nodes.map((n) => n.id)));
@@ -518,6 +533,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
               selected={selectedIds.has(node.id)}
               hovered={hoveredId === node.id}
               editing={editingId === node.id}
+              connectTarget={connectTargetId === node.id}
               allFilesById={allFilesById}
               handlers={handlers}
               linkIndex={linkIndex}

@@ -160,7 +160,10 @@
 }
 .db-popover.portal {
   position: fixed;
-  z-index: 400;
+  /* Above .db-row-modal-overlay's z-index: 500 — a portal popover opened
+     from a cell inside the row-detail modal (e.g. an attachment picker)
+     needs to outrank the modal it's floating above, not just the page. */
+  z-index: 600;
   background: var(--bg-3);
   border: 1px solid var(--bg-4);
   border-radius: var(--radius-md);
@@ -170,6 +173,33 @@
   padding: 6px;
   max-height: 340px;
   overflow-y: auto;
+}
+/* Inline variant (see DbPopover's `inline` prop): a normal in-flow child
+   positioned relative to its trigger instead of a document.body portal.
+   Used for the status/tag pickers inside the row-detail modal so they
+   can't end up stacked behind whatever they're opened inside of. */
+.db-popover-wrap-inline {
+  position: relative;
+  display: inline-flex;
+}
+.db-popover.inline {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 5;
+  background: var(--bg-3);
+  border: 1px solid var(--bg-4);
+  border-radius: var(--radius-md);
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45);
+  min-width: 160px;
+  max-width: 320px;
+  padding: 6px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+.db-popover.inline.align-right {
+  left: auto;
+  right: 0;
 }
 .db-popover-item {
   display: flex;

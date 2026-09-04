@@ -123,6 +123,7 @@ const CanvasNode = React.memo(function CanvasNode({
   selected,
   hovered,
   editing,
+  connectTarget,
   allFilesById,
   handlers,
   linkIndex,
@@ -138,7 +139,7 @@ const CanvasNode = React.memo(function CanvasNode({
   if (node.color) style.borderColor = node.color;
   return (
     <div
-      className={`canvas-node canvas-node-${node.type} ${selected ? 'selected' : ''}`}
+      className={`canvas-node canvas-node-${node.type} ${selected ? 'selected' : ''} ${connectTarget ? 'connect-target' : ''}`}
       style={style}
       onPointerEnter={() => onHoverChange(node.id)}
       onPointerLeave={() => onHoverChange(null)}

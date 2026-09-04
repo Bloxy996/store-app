@@ -13,7 +13,15 @@ import { useDriveImageUrl } from '../../hooks/useDriveImageUrl.js';
 // panels contain text inputs (typing/clicking to focus would immediately
 // dismiss them). Children get an explicit `close()` to call when a pick is
 // actually made.
-function DbPopover({ trigger, children, align = 'left', width }) {
+// `inline` renders the panel as a normal in-flow child positioned relative
+// to the trigger instead of portaling to document.body. Portaled popovers
+// need their own z-index guess relative to whatever they might be opened
+// inside of (e.g. the row-detail modal), which is exactly how the status/
+// tag pickers ended up stuck behind that modal. A popover opened from
+// inside another popup doesn't have that problem in the first place — it
+// naturally stacks above its own container in normal DOM order — so
+// callers rendering inside a modal should pass `inline`.
+function DbPopover({ trigger, children, align = 'left', width, inline = false }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState(null);
   const anchorRef = useRef(null);
@@ -21,14 +29,15 @@ function DbPopover({ trigger, children, align = 'left', width }) {
   useClickOutside([anchorRef, menuRef], () => setOpen(false));
 
   const computePos = useCallback(() => {
+    if (inline) return;
     const el = anchorRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
     setPos({ top: rect.bottom + 4, left: rect.left, right: window.innerWidth - rect.right });
-  }, []);
+  }, [inline]);
 
   useLayoutEffect(() => {
-    if (!open) return;
+    if (!open || inline) return;
     computePos();
     const onReflow = () => computePos();
     window.addEventListener('resize', onReflow);
@@ -37,13 +46,31 @@ function DbPopover({ trigger, children, align = 'left', width }) {
       window.removeEventListener('resize', onReflow);
       window.removeEventListener('scroll', onReflow, true);
     };
-  }, [open, computePos]);
+  }, [open, inline, computePos]);
 
   const toggle = useCallback((e) => {
     e?.stopPropagation();
     setOpen((v) => !v);
   }, []);
   const close = useCallback(() => setOpen(false), []);
+
+  if (inline) {
+    return (
+      <span className="db-popover-wrap db-popover-wrap-inline" ref={anchorRef}>
+        {trigger(toggle, open)}
+        {open && (
+          <div
+            ref={menuRef}
+            className={`db-popover inline ${align === 'right' ? 'align-right' : ''}`}
+            style={width ? { width } : undefined}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {children(close)}
+          </div>
+        )}
+      </span>
+    );
+  }
 
   return (
     <span className="db-popover-wrap" ref={anchorRef}>
@@ -290,11 +317,12 @@ function DbDateCell({ value, onChange }) {
 }
 
 
-function DbSelectCell({ value, onChange, column }) {
+function DbSelectCell({ value, onChange, column, dense }) {
   const options = column.options || [];
   const current = options.find((o) => o.id === value) || null;
   return (
     <DbPopover
+      inline={!dense}
       trigger={(toggle) => (
         <button className="db-select-trigger" onClick={toggle}>
           {current ? (
@@ -344,7 +372,7 @@ function DbSelectCell({ value, onChange, column }) {
 }
 
 
-function DbMultiSelectCell({ value, onChange, column, onCreateOption }) {
+function DbMultiSelectCell({ value, onChange, column, onCreateOption, dense }) {
   const [filter, setFilter] = useState('');
   const options = column.options || [];
   const selected = new Set(value);
@@ -352,6 +380,7 @@ function DbMultiSelectCell({ value, onChange, column, onCreateOption }) {
   const exactExists = options.some((o) => o.label.toLowerCase() === filter.trim().toLowerCase());
   return (
     <DbPopover
+      inline={!dense}
       trigger={(toggle) => (
         <button className="db-multiselect-trigger" onClick={toggle}>
           {value.length === 0 && <span className="db-cell-text empty" />}
@@ -534,9 +563,9 @@ function DbCell({ column, value, onChange, dbFile, handlers, dense, onCreateOpti
     case 'number_float':
       return <DbNumberCell value={value} onChange={onChange} />;
     case 'select':
-      return <DbSelectCell value={value} onChange={onChange} column={column} />;
+      return <DbSelectCell value={value} onChange={onChange} column={column} dense={dense} />;
     case 'multi_select':
-      return <DbMultiSelectCell value={value || []} onChange={onChange} column={column} onCreateOption={onCreateOption} />;
+      return <DbMultiSelectCell value={value || []} onChange={onChange} column={column} onCreateOption={onCreateOption} dense={dense} />;
     case 'date':
       return <DbDateCell value={value} onChange={onChange} />;
     case 'checkbox':

@@ -83,6 +83,13 @@
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-soft), 0 2px 8px rgba(0, 0, 0, 0.4);
 }
+/* Shown while dragging a connection over this card, so it's clear a drop
+   here will link to it (rather than silently missing and creating a new
+   card, or silently succeeding with no visible confirmation). */
+.canvas-node.connect-target {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
 .canvas-node-body {
   height: 100%;
   width: 100%;
