@@ -1,5 +1,7 @@
 import { history } from '@codemirror/commands';
 
+let uidCounter = 0;
+
 function uid(prefix) {
   uidCounter += 1;
   return `${prefix}-${Date.now().toString(36)}-${uidCounter}`;
