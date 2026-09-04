@@ -66,6 +66,27 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
     return () => handlers.onEditorSelectionChange?.(null);
   }, [file?.id, mode, handlers]);
 
+  // Reading view has no CodeMirror to report selection changes for it, so
+  // mirror the same status-bar behavior here off the browser's native
+  // selection: any highlight made inside the preview pane updates the
+  // word/char count, clearing back to the whole-note count once the
+  // highlight is gone.
+  const previewRef = useRef(null);
+  useEffect(() => {
+    if (mode === 'edit') return undefined;
+    const onSelectionChange = () => {
+      const sel = window.getSelection();
+      const text = sel && sel.rangeCount && !sel.isCollapsed ? sel.toString() : '';
+      if (text.trim() && previewRef.current && previewRef.current.contains(sel.anchorNode)) {
+        handlers.onEditorSelectionChange?.(text);
+      } else {
+        handlers.onEditorSelectionChange?.(null);
+      }
+    };
+    document.addEventListener('selectionchange', onSelectionChange);
+    return () => document.removeEventListener('selectionchange', onSelectionChange);
+  }, [mode, file?.id, handlers]);
+
   // Table-of-contents navigation bridge — registers a scroll-to-heading
   // function for this pane while it's the active one, so the Outline panel
   // can jump to a heading regardless of whether this pane is currently in
@@ -168,7 +189,7 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
           />
         </div>
       ) : (
-        <div className="editor-preview">
+        <div className="editor-preview" ref={previewRef}>
           <NoteTitleField file={file} onRename={handlers.onRenameFile} />
           <PropertiesPanel properties={properties} handlers={handlers} />
           {renderMarkdownBlocks(body, readingHandlers, linkIndex, '', foldState)}

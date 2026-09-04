@@ -350,7 +350,6 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldSt
   const lines = content.split('\n');
   const blocks = [];
   let listBuffer = [];
-  let listType = null;
   let codeBuffer = null;
   let codeLang = null;
   let quoteBuffer = [];
@@ -363,18 +362,69 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldSt
   // index are skipped by the main loop.
   let skipUntil = -1;
 
+  // Nests list items (and task items) by indent depth, so a sub-bullet
+  // typed at a deeper indent in the editor renders as an actual nested
+  // <ul>/<ol> here instead of the old flat single-level list. 2 leading
+  // space-equivalents (a tab counts as 2) = one level, matching the
+  // indent/outdent unit in cmIndent.js.
+  const indentLevel = (text) => {
+    const raw = /^[ \t]*/.exec(text)[0];
+    return Math.floor(raw.replace(/\t/g, '  ').length / 2);
+  };
+
+  const buildListTree = (items) => {
+    const root = { indent: -1, children: [] };
+    const stack = [root];
+    for (const item of items) {
+      while (stack.length > 1 && stack[stack.length - 1].indent >= item.indent) stack.pop();
+      const node = { ...item, children: [] };
+      stack[stack.length - 1].children.push(node);
+      stack.push(node);
+    }
+    return root.children;
+  };
+
+  const renderListNodes = (nodes, keyBase2) => {
+    // Group consecutive same-tag siblings into one <ul>/<ol> — a run of
+    // '-' items and a run of '1.' items at the same level become separate
+    // lists, same as CommonMark.
+    const groups = [];
+    for (const n of nodes) {
+      const tag = n.type === 'ol' ? 'ol' : 'ul';
+      const last = groups[groups.length - 1];
+      if (last && last.tag === tag) last.nodes.push(n);
+      else groups.push({ tag, nodes: [n] });
+    }
+    return groups.map((g, gi) => (
+      <g.tag key={`${keyBase2}-g${gi}`}>
+        {g.nodes.map((n, ni) => {
+          const itemKey = `${keyBase2}-g${gi}-${ni}`;
+          return (
+            <li key={ni} className={n.type === 'task' ? 'task-line-item' : undefined}>
+              {n.type === 'task' ? (
+                <label className="task-line">
+                  <input type="checkbox" checked={n.checked} readOnly />
+                  <span className={n.checked ? 'task-done' : ''}>{renderInline(n.text, itemKey, handlers, linkIndex)}</span>
+                </label>
+              ) : (
+                renderInline(n.text, itemKey, handlers, linkIndex)
+              )}
+              {n.children.length > 0 && renderListNodes(n.children, itemKey)}
+            </li>
+          );
+        })}
+      </g.tag>
+    ));
+  };
+
   const flushList = () => {
     if (!listBuffer.length) return;
-    const Tag = listType === 'ol' ? 'ol' : 'ul';
     blocks.push(
-      <Tag key={`${keyBase}list-${blocks.length}`}>
-        {listBuffer.map((item, idx) => (
-          <li key={idx}>{renderInline(item, `${keyBase}li-${blocks.length}-${idx}`, handlers, linkIndex)}</li>
-        ))}
-      </Tag>
+      <React.Fragment key={`${keyBase}list-${blocks.length}`}>
+        {renderListNodes(buildListTree(listBuffer), `${keyBase}list-${blocks.length}`)}
+      </React.Fragment>
     );
     listBuffer = [];
-    listType = null;
   };
 
   const flushQuote = () => {
@@ -633,15 +683,8 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldSt
       codeBuffer = [];
       codeLang = line.trim().slice(3).trim().toLowerCase();
     } else if (taskUl) {
-      flushList();
       flushQuote();
-      const checked = taskUl[1].toLowerCase() === 'x';
-      blocks.push(
-        <div className="task-line" key={`${keyBase}task-${idx}`}>
-          <input type="checkbox" checked={checked} readOnly />
-          <span className={checked ? 'task-done' : ''}>{renderInline(taskUl[2], `${keyBase}t-${idx}`, handlers, linkIndex)}</span>
-        </div>
-      );
+      listBuffer.push({ type: 'task', indent: indentLevel(line), checked: taskUl[1].toLowerCase() === 'x', text: taskUl[2] });
     } else if (hr) {
       flushList();
       flushQuote();
@@ -651,19 +694,26 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldSt
       quoteBuffer.push(quote[1]);
     } else if (ul) {
       flushQuote();
-      listType = 'ul';
-      listBuffer.push(ul[1]);
+      listBuffer.push({ type: 'ul', indent: indentLevel(line), text: ul[1] });
     } else if (ol) {
       flushQuote();
-      listType = 'ol';
-      listBuffer.push(ol[1]);
+      listBuffer.push({ type: 'ol', indent: indentLevel(line), text: ol[1] });
     } else if (line.trim() === '') {
       flushList();
       flushQuote();
     } else {
       flushList();
       flushQuote();
-      blocks.push(<p key={`${keyBase}p-${idx}`}>{renderInline(line, `${keyBase}p-${idx}`, handlers, linkIndex)}</p>);
+      // A plain indented line keeps its indent as block padding (applies to
+      // the wrapped continuation lines too, not just the first) — same
+      // indent unit as list nesting above.
+      const indent = indentLevel(line);
+      const style = indent > 0 ? { paddingLeft: `${indent * 1.6}em` } : undefined;
+      blocks.push(
+        <p key={`${keyBase}p-${idx}`} style={style}>
+          {renderInline(line.replace(/^[ \t]*/, ''), `${keyBase}p-${idx}`, handlers, linkIndex)}
+        </p>
+      );
     }
   });
   flushList();

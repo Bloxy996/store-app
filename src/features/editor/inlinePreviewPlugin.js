@@ -71,9 +71,30 @@ function buildInlinePreviewPlugin() {
     return isTableSeparatorRow(doc.line(n + 1)?.text || '') ? n : null;
   };
 
-  function decorateLine(out, line, doc) {
+  function decorateLine(out, line, doc, frontmatterEnd) {
     const text = line.text;
     const trimmed = text.trim();
+
+    // Frontmatter (the leading `---`/`---` block) isn't markdown, so it
+    // just gets greyed out wholesale like a comment — no heading/list/etc.
+    // parsing inside it.
+    if (frontmatterEnd && line.number <= frontmatterEnd) {
+      out.push({ from: line.from, to: line.to, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+      return;
+    }
+
+    // Hanging indent: a line's leading whitespace is real, typed text (not
+    // stripped), so without help a soft-wrapped continuation resets to
+    // column 0. Shifting the whole line's CSS start left by that many `ch`
+    // via text-indent, then padding it back out by the same amount, cancels
+    // out for the line's own first (real) row but leaves every wrapped row
+    // sitting at that padding — i.e. the wrap keeps the line's indent.
+    // Applies uniformly to list items and plain indented lines alike.
+    const leadingWs = /^[ \t]*/.exec(text)[0];
+    if (leadingWs.length) {
+      const ch = leadingWs.replace(/\t/g, '  ').length;
+      out.push({ from: line.from, to: line.from, deco: Decoration.line({ attributes: { style: `padding-left: ${ch}ch; text-indent: -${ch}ch;` } }) });
+    }
 
     // Heading: size the whole line, dim the leading hashes.
     const heading = /^(#{1,6})\s+/.exec(text);
@@ -223,11 +244,23 @@ function buildInlinePreviewPlugin() {
         }
       }
       build(view) {
+        const doc = view.state.doc;
+        // Computed once per rebuild (not per line) so a frontmatter-less
+        // note never pays for a doc-length scan per visible line.
+        let frontmatterEnd = 0;
+        if (doc.lines >= 2 && doc.line(1).text.trim() === '---') {
+          for (let n = 2; n <= doc.lines; n++) {
+            if (doc.line(n).text.trim() === '---') {
+              frontmatterEnd = n;
+              break;
+            }
+          }
+        }
         const lines = [];
         for (const { from, to } of view.visibleRanges) {
           let pos = from;
           while (pos <= to) {
-            const line = view.state.doc.lineAt(pos);
+            const line = doc.lineAt(pos);
             lines.push(line);
             pos = line.to + 1;
           }
@@ -235,7 +268,7 @@ function buildInlinePreviewPlugin() {
         lines.sort((a, b) => a.from - b.from);
         const entries = [];
         for (const line of lines) {
-          decorateLine(entries, line, view.state.doc);
+          decorateLine(entries, line, doc, frontmatterEnd);
         }
         entries.sort((a, b) => a.from - b.from || a.to - b.to);
         const builder = new RangeSetBuilder();

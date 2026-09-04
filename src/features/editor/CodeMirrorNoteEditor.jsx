@@ -54,6 +54,7 @@ function CodeMirrorNoteEditor({ fileId, content, onChange, linkIndex, phantomRec
         ),
         autocompletion({ override: [wikilinkTagCompletionSource(ctx)], activateOnTyping: true }),
         buildInlinePreviewPlugin(),
+        EditorView.contentAttributes.of({ spellcheck: 'true', autocorrect: 'on' }),
         keymap.of([
           { key: 'Mod-z', run: cmUndo },
           { key: 'Mod-y', mac: 'Mod-Shift-z', run: cmRedo },

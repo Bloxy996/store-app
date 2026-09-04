@@ -36,11 +36,10 @@
   outline: none;
 }
 
-/* Live-preview inline marks (see buildInlinePreviewPlugin in App.jsx) — the
-   marker characters (**, _, ==, [[]], etc.) are hidden via a zero-width
-   `Decoration.replace` on every line except the one the caret is on, so
-   this class only ever needs to dim them on the active line rather than
-   also hide them; hiding is done structurally, not with CSS. */
+/* Live-preview inline marks (see buildInlinePreviewPlugin.js) — marker
+   characters (**, _, ==, [[]], etc.), block delimiters, and frontmatter are
+   all dimmed with this same class rather than hidden, so raw markdown is
+   always visible and editable. */
 .cm-mark-dim {
   color: var(--text-faint);
   opacity: 0.7;

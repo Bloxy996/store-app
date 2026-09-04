@@ -233,6 +233,24 @@
 .editor-preview li {
   margin: 0.15em 0;
 }
+/* Dash bullets (Obsidian-style) instead of browser default discs; ordered
+   lists keep their native numbering. Nested <ul>/<ol> inherit the same
+   rules automatically since they're rendered as regular <li> children. */
+.editor-preview ul {
+  list-style: none;
+}
+.editor-preview ul > li {
+  position: relative;
+}
+.editor-preview ul > li::before {
+  content: '-';
+  position: absolute;
+  left: -1.1em;
+  color: var(--text-muted);
+}
+.editor-preview ul > li.task-line-item::before {
+  content: none;
+}
 .editor-preview blockquote {
   margin: 0.8em 0;
   padding: 2px 16px;
