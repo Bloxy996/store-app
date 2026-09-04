@@ -1,0 +1,92 @@
+/* ---------------------------------------------------------------------------
+   Generic modal overlay (folder prompt / proxy picker)
+--------------------------------------------------------------------------- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  padding: 20px;
+}
+.modal {
+  background: #202020;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  width: min(460px, 100%);
+  max-height: 82vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.modal h3 {
+  margin: 0 0 14px;
+  font-size: 16px;
+}
+/* Same folder-browser content as the "change vault folder" modal, but laid
+   out as a plain static card for the initial onboarding flow — no overlay,
+   no popup, so it reads as one continuous page rather than a stacked
+   dialog. */
+.inline-folder-browser {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 18px;
+  width: min(420px, 90vw);
+  text-align: left;
+  margin-top: 4px;
+}
+.breadcrumb {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+.folder-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.folder-list li {
+  border-bottom: 1px solid var(--border-soft);
+}
+.folder-list li:last-child {
+  border-bottom: none;
+}
+.folder-list .link-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 12px;
+  color: var(--text-normal);
+}
+.folder-list .link-btn:hover {
+  background: var(--bg-2);
+}
+.manual-folder-entry {
+  margin-top: 12px;
+}
+.manual-folder-row {
+  display: flex;
+  gap: 6px;
+}
+.manual-folder-row input {
+  flex: 1;
+  padding: 8px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-normal);
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}

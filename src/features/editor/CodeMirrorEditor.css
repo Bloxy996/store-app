@@ -1,0 +1,346 @@
+/* ===========================================================================
+ * CodeMirror 6 live-preview editor
+ * ===========================================================================
+ * .cm-editor-host wraps the CodeMirror instance itself; CodeMirror manages
+ * its own scrolling (.cm-scroller) and caret, so none of the old dual-layer
+ * scrollTop-mirroring machinery is needed anymore — one real editable
+ * surface, not a transparent textarea plus a synced-by-hand overlay.
+ * ------------------------------------------------------------------------ */
+.cm-editor-host {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+.cm-editor-host .cm-editor {
+  height: 100%;
+}
+.cm-editor-host .cm-scroller {
+  padding: 14px clamp(20px, 8vw, 120px) 28px;
+  color: var(--text-normal);
+  caret-color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+.cm-editor-host .cm-content {
+  padding: 0;
+}
+.cm-editor-host .cm-selectionBackground {
+  background: var(--accent-soft) !important;
+}
+.cm-editor-host .cm-cursor {
+  border-left-color: var(--text-muted);
+}
+.cm-editor-host .cm-placeholder {
+  color: var(--text-faint);
+}
+.cm-editor-host .cm-focused {
+  outline: none;
+}
+
+/* Live-preview inline marks (see buildInlinePreviewPlugin in App.jsx) — the
+   marker characters (**, _, ==, [[]], etc.) are hidden via a zero-width
+   `Decoration.replace` on every line except the one the caret is on, so
+   this class only ever needs to dim them on the active line rather than
+   also hide them; hiding is done structurally, not with CSS. */
+.cm-mark-dim {
+  color: var(--text-faint);
+  opacity: 0.7;
+}
+.cm-heading {
+  font-weight: 700;
+  color: var(--text-normal);
+}
+.cm-heading-1 { font-size: 1.7em; }
+.cm-heading-2 { font-size: 1.4em; }
+.cm-heading-3 { font-size: 1.2em; }
+.cm-heading-4,
+.cm-heading-5,
+.cm-heading-6 { font-size: 1.05em; color: var(--text-muted); }
+.cm-wikilink,
+.cm-tag {
+  color: var(--link-color);
+}
+.cm-tag {
+  color: var(--accent-hover);
+}
+.cm-bold {
+  color: var(--text-normal);
+  font-weight: 700;
+}
+.cm-italic {
+  color: var(--text-normal);
+  font-style: italic;
+}
+.cm-inline-code {
+  color: var(--accent);
+  background: var(--bg-2);
+  border-radius: 3px;
+  font-family: var(--font-mono);
+}
+.cm-strike {
+  color: var(--text-muted);
+  text-decoration: line-through;
+  text-decoration-color: var(--text-faint);
+}
+.cm-highlight {
+  color: var(--text-normal);
+  background: rgba(230, 200, 80, 0.35);
+  border-radius: 2px;
+}
+.cm-task-checkbox {
+  vertical-align: middle;
+  margin: 0 4px 2px 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* Block-level WYSIWYG widgets (tables, callouts, toggles, columns, tabs) —
+   see buildBlockWidgetPlugin/MarkdownBlockWidget in App.jsx. Rendered by
+   the same React components reading view uses, mounted directly into the
+   CodeMirror content flow as a block decoration. */
+.cm-wysiwyg-block {
+  margin: 4px 0;
+}
+.cm-block-generic {
+  cursor: text;
+  border-radius: 6px;
+  transition: background-color 0.1s ease;
+}
+.cm-block-generic:hover {
+  background: color-mix(in srgb, var(--bg-2) 55%, transparent);
+}
+.cm-wysiwyg-table .md-table.cm-editable-table {
+  margin: 0;
+}
+.cm-editable-table th,
+.cm-editable-table td {
+  position: relative;
+}
+.cm-table-cell-edit {
+  display: inline-block;
+  min-width: 12px;
+  outline: none;
+}
+.cm-table-cell-edit:focus {
+  box-shadow: inset 0 0 0 1px var(--accent);
+  border-radius: 2px;
+}
+.cm-table-col-btns {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 6px;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+.cm-editable-table th:hover .cm-table-col-btns {
+  opacity: 0.7;
+}
+.cm-table-col-btns button,
+.cm-table-row-btn button,
+.cm-table-add-col button {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 3px;
+}
+.cm-table-col-btns button:hover,
+.cm-table-row-btn button:hover,
+.cm-table-add-col button:hover {
+  color: var(--danger);
+}
+.cm-table-row-btn {
+  width: 20px;
+  text-align: center;
+  opacity: 0;
+}
+.cm-editable-table tr:hover .cm-table-row-btn {
+  opacity: 0.7;
+}
+.cm-table-add-col {
+  width: 24px;
+  text-align: center;
+}
+.cm-table-add-row {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 6px;
+}
+.cm-table-add-row:hover {
+  color: var(--text-normal);
+}
+
+/* CodeMirror's own autocomplete tooltip (@codemirror/autocomplete) —
+   restyled to match the app's palette rather than its unstyled default. */
+.cm-tooltip.cm-tooltip-autocomplete {
+  background: #232323;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+.cm-tooltip-autocomplete ul {
+  max-height: 240px;
+  font-family: var(--font-ui);
+}
+.cm-tooltip-autocomplete ul li {
+  padding: 6px 8px !important;
+  font-size: 13px;
+  color: var(--text-normal);
+}
+.cm-tooltip-autocomplete ul li[aria-selected] {
+  background: var(--bg-3) !important;
+  color: var(--text-normal) !important;
+}
+.cm-tooltip-autocomplete .cm-completionDetail {
+  color: var(--text-faint);
+  font-size: 11.5px;
+  font-style: normal;
+  margin-left: 8px;
+}
+
+.autocomplete-menu {
+  position: absolute;
+  z-index: 40;
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  min-width: 220px;
+  max-width: 340px;
+  background: #232323;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  max-height: 240px;
+  overflow-y: auto;
+}
+.autocomplete-menu li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-normal);
+}
+.autocomplete-menu li.active,
+.autocomplete-menu li:hover {
+  background: var(--bg-3);
+}
+.autocomplete-label {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.autocomplete-path {
+  color: var(--text-faint);
+  font-size: 11.5px;
+  flex-shrink: 0;
+}
+.autocomplete-new {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+  border: 1px solid var(--bg-4);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+.autocomplete-tag-icon {
+  flex-shrink: 0;
+  align-self: center;
+  color: var(--text-faint);
+}
+
+.help-modal {
+  width: min(560px, 100%);
+  max-height: 78vh;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+.help-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px 10px;
+  border-bottom: 1px solid var(--border-soft);
+  flex-shrink: 0;
+}
+.help-modal-header h3 {
+  margin: 0;
+  font-size: 15px;
+}
+.help-modal-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 14px 0;
+  flex-shrink: 0;
+}
+.help-tab {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  padding: 7px 12px;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  cursor: pointer;
+}
+.help-tab:hover {
+  color: var(--text-normal);
+  background: var(--bg-3);
+}
+.help-tab.active {
+  color: var(--text-normal);
+  background: var(--bg-2);
+  font-weight: 600;
+}
+.help-modal-body {
+  padding: 14px 18px 18px;
+  overflow-y: auto;
+}
+.help-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.help-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 180px) 1fr;
+  gap: 12px;
+  align-items: start;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.help-row-feature {
+  grid-template-columns: minmax(100px, 150px) 1fr;
+}
+.help-row-key {
+  background: var(--bg-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: 3px 7px;
+  font-size: 11.5px;
+  color: var(--text-normal);
+  white-space: pre-wrap;
+  width: fit-content;
+}
+.help-row-syntax {
+  white-space: pre-line;
+  font-family: var(--font-mono, monospace);
+}
+.help-row-title {
+  font-weight: 600;
+  color: var(--text-normal);
+}
+.help-row-desc {
+  color: var(--text-muted);
+  white-space: pre-line;
+}

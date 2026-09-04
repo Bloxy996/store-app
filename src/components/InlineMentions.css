@@ -1,0 +1,60 @@
+/* ---------------------------------------------------------------------------
+   Inline "Linked mentions" / "Unlinked mentions" (bottom of preview)
+--------------------------------------------------------------------------- */
+.inline-mentions {
+  margin-top: 40px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.mentions-group {
+  margin-bottom: 10px;
+}
+.mentions-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 4px;
+  color: var(--text-normal);
+  font-weight: 600;
+  font-size: 14px;
+}
+.mentions-header.muted-header {
+  color: var(--text-faint);
+  font-weight: 500;
+}
+.mentions-header svg {
+  color: var(--text-faint);
+}
+.mentions-count {
+  color: var(--text-faint);
+  font-weight: 400;
+  font-size: 12.5px;
+}
+.mentions-body {
+  padding-left: 4px;
+}
+.mentions-source {
+  margin: 6px 0;
+  padding: 8px 10px;
+  background: var(--bg-0);
+  border-radius: var(--radius-md);
+}
+.mentions-source-name {
+  color: var(--text-normal);
+  font-weight: 500;
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+.mentions-source-name:hover {
+  color: var(--link-color);
+}
+.mentions-snippet {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 3px 0;
+}
+.mentions-snippet:hover {
+  color: var(--text-normal);
+}

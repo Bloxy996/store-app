@@ -1,0 +1,41 @@
+/* ---------------------------------------------------------------------------
+   App shell
+--------------------------------------------------------------------------- */
+.app-shell {
+  height: 100vh; /* fallback for browsers without dvh support */
+  height: 100dvh; /* on mobile, 100vh is measured against the *largest* possible
+    viewport (address/toolbar collapsed), not what's actually visible. As the
+    page scrolls and the browser chrome shows/hides, the real visible area
+    shrinks and grows while this box stayed the same fixed height — content
+    near the bottom got clipped (still in the DOM, just outside the visible
+    area) and anything positioned relative to the top of this now-taller-than-
+    the-screen box could appear to "stick" as the chrome animated. 100dvh
+    tracks the actual visible viewport instead, so the shell (and everything
+    that scrolls inside it) resizes with the chrome rather than around it. */
+  width: 100vw;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.topbar-progress {
+  height: 2px;
+  background: transparent;
+  position: relative;
+  z-index: 50;
+}
+.topbar-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+.workspace {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.dock-scrim {
+  display: none;
+}

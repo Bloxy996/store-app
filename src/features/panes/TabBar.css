@@ -1,0 +1,101 @@
+/* ---------------------------------------------------------------------------
+   Tab bar
+--------------------------------------------------------------------------- */
+.tab-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  background: var(--bg-0);
+  border-bottom: 1px solid var(--border);
+  height: 36px;
+  padding: 0 4px;
+}
+.tab-bar.inactive {
+  opacity: 0.72;
+}
+.tab-bar-scroll {
+  flex: 1;
+  display: flex;
+  overflow-x: auto;
+  min-width: 0;
+  scrollbar-width: none;
+}
+.tab-bar-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 6px 0 12px;
+  height: 30px;
+  margin-top: 3px;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  max-width: 220px;
+  flex-shrink: 0;
+  position: relative;
+  cursor: pointer;
+}
+.tab:hover {
+  background: var(--bg-2);
+}
+.tab.active {
+  background: var(--bg-1);
+  color: var(--text-normal);
+}
+.tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tab-dirty-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex-shrink: 0;
+}
+.tab-close,
+.tab-menu-btn {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+  opacity: 0;
+}
+.tab:hover .tab-close,
+.tab:hover .tab-menu-btn,
+.tab.active .tab-close,
+.tab.active .tab-menu-btn {
+  opacity: 1;
+}
+.tab-close:hover,
+.tab-menu-btn:hover {
+  background: var(--bg-3);
+  color: var(--text-normal);
+}
+.tab-menu-wrap {
+  display: inline-flex;
+}
+.tab-new {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-faint);
+  border-radius: var(--radius-sm);
+  margin-left: 2px;
+}
+.tab-new:hover {
+  background: var(--bg-2);
+  color: var(--text-normal);
+}

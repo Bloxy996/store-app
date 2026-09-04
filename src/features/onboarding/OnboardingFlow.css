@@ -1,0 +1,115 @@
+/* ---------------------------------------------------------------------------
+   Onboarding — sign-in / folder-select / loading, all one shell
+--------------------------------------------------------------------------- */
+.center-screen {
+  height: 100vh;
+  width: 100vw;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+  background: radial-gradient(circle at 50% 30%, #202020, var(--bg-1) 70%);
+}
+.center-screen h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+}
+.center-screen p {
+  margin: 0 0 6px;
+  max-width: 340px;
+}
+
+.btn {
+  padding: 9px 18px;
+  border-radius: var(--radius-md);
+  background: var(--bg-2);
+  color: var(--text-normal);
+  font-size: 13.5px;
+  font-weight: 500;
+  border: 1px solid var(--border);
+}
+.btn:hover:not(:disabled) {
+  background: var(--bg-3);
+}
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--text-on-accent);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+.btn-secondary {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  text-decoration: underline;
+  padding: 4px;
+}
+/* Neutral (grey) button — used throughout the sign-in / vault-selection
+   flow so that flow never reads as "purple", independent of the user's
+   chosen accent color (which is a per-vault preference set later). */
+.btn-neutral {
+  background: var(--bg-3);
+  border-color: var(--bg-4);
+  color: var(--text-normal);
+}
+.btn-neutral:hover:not(:disabled) {
+  background: var(--bg-4);
+}
+
+.proxy-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(320px, 84vw);
+  margin-top: 6px;
+  /* Slightly-lighter-grey card, distinct from the page background. */
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 14px;
+}
+.proxy-form input {
+  padding: 9px 12px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-normal);
+}
+
+.progress-bar {
+  width: min(280px, 70vw);
+  height: 4px;
+  background: var(--bg-2);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+.progress-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.25s ease;
+}
+/* Used on the pre-vault onboarding loading screens, where nothing should
+   read as the (purple) accent color yet. */
+.progress-bar-fill.neutral {
+  background: #ffffff;
+}
+.progress-bar-fill.indeterminate {
+  width: 40% !important;
+  animation: indeterminate-sweep 1.2s ease-in-out infinite;
+}
+@keyframes indeterminate-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(350%);
+  }
+}

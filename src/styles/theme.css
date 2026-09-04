@@ -1,0 +1,177 @@
+/* ============================================================================
+   VAULT — Obsidian-style dark theme
+   Palette approximates Obsidian's default dark theme: near-black chrome,
+   a slightly lighter content pane, a muted purple accent for links/active
+   states, and a restrained, monoline icon set (see the Icon* components in
+   App.jsx — no emoji anywhere in this file's target markup).
+   ============================================================================ */
+
+:root {
+  --bg-0: #171717; /* activity bar, side dock, tab bar, headers */
+  --bg-1: #1e1e1e; /* main content / editor background */
+  --bg-2: #262626; /* hover state */
+  --bg-3: #2e2e2e; /* active/selected row, active tab */
+  --bg-4: #333333; /* borders on hover, stronger separators */
+  --border: #2c2c2c;
+  --border-soft: #262626;
+
+  --text-normal: #dcddde;
+  --text-muted: #999999;
+  --text-faint: #6b6b6b;
+  --text-on-accent: #ffffff;
+
+  --accent: #8875e0;
+  --accent-hover: #9986ea;
+  --accent-soft: rgba(136, 117, 224, 0.16);
+  --link-color: #b7a6ff;
+  --tag-bg: rgba(136, 117, 224, 0.14);
+  --tag-color: #b7a6ff;
+  --danger: #e0685f;
+  --success: #6fcf97;
+  --mark-bg: rgba(230, 190, 80, 0.35);
+  --mark-color: #f1e4b8;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Mobile touch tuning: remove the gray tap-highlight flash on touch devices
+   (we already show our own :hover/:active states) and tell the browser
+   these controls don't need the ~300ms double-tap-to-zoom delay, so taps on
+   buttons/rows feel instant rather than slightly laggy. Purely additive —
+   doesn't change layout or behavior on desktop/mouse input. */
+button,
+.tree-row,
+.tab,
+a {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+html,
+body,
+#root {
+
+  height: 100%;
+  margin: 0;
+  /* Mobile Safari and Chrome/Android silently boost the *rendered*
+     font-size of text past its declared CSS value on narrow viewports
+     ("text autosizing" / font boosting), to make small text more
+     readable — and critically, the heuristic that decides how much to
+     boost can land differently on a <textarea> than on a plain <div>
+     even with byte-identical font-size/width/padding, because form
+     controls aren't always sized by the same pass as block content. The
+     editor's syntax-highlight overlay only stays character-aligned with
+     the real (invisible) textarea underneath it if both render text at
+     literally the same size — this is the same category of wrap-
+     divergence bug as the heading font-size one fixed earlier, just
+     triggered by the browser itself rather than by our own CSS, which is
+     why it only ever showed up on mobile. Setting this to 100% turns the
+     boosting off entirely, so every element renders at exactly the
+     font-size it's declared — desktop browsers ignore the property, so
+     this is a no-op there. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  background: var(--bg-1);
+  color: var(--text-normal);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+input,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  outline: none;
+}
+
+a {
+  color: var(--link-color);
+}
+
+::selection {
+  background: rgba(136, 117, 224, 0.35);
+}
+
+/* Thin, Obsidian-style scrollbars everywhere */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--bg-4) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--bg-4);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #444;
+  background-clip: padding-box;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+.muted.small,
+.small {
+  font-size: 12.5px;
+}
+.empty-hint {
+  padding: 10px 14px;
+}
+.error-text {
+  color: var(--danger);
+  font-size: 12.5px;
+  margin: 4px 0 0;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}

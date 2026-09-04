@@ -1,0 +1,38 @@
+/* ---------------------------------------------------------------------------
+   Activity bar — thin left-most icon ribbon
+--------------------------------------------------------------------------- */
+.activity-bar {
+  width: 46px;
+  flex-shrink: 0;
+  background: var(--bg-0);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 0;
+}
+.activity-bar-top,
+.activity-bar-bottom {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.activity-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+}
+.activity-btn:hover {
+  background: var(--bg-2);
+  color: var(--text-normal);
+}
+.activity-btn.active {
+  background: var(--bg-3);
+  color: var(--text-normal);
+}

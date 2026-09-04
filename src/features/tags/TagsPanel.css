@@ -1,0 +1,52 @@
+/* ---------------------------------------------------------------------------
+   Tags panel
+--------------------------------------------------------------------------- */
+.tag-list {
+  padding: 2px 6px;
+}
+.tag-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--text-normal);
+}
+.tag-row:hover {
+  background: var(--bg-2);
+}
+.tag-row-icon {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.tag-row-name {
+  flex: 1;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tag-row-count {
+  font-size: 11px;
+  color: var(--text-faint);
+  background: var(--bg-2);
+  border-radius: 8px;
+  padding: 1px 6px;
+}
+
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  background: var(--tag-bg);
+  color: var(--tag-color);
+  border-radius: 10px;
+  padding: 1px 7px;
+  font-size: 12.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tag-chip:hover {
+  background: rgba(136, 117, 224, 0.26);
+}

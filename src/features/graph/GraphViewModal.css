@@ -1,0 +1,556 @@
+/* ---------------------------------------------------------------------------
+   Graph view (full-vault wikilink map, opened as a large modal)
+--------------------------------------------------------------------------- */
+.graph-modal {
+  width: min(1100px, 94vw);
+  height: min(760px, 88vh);
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+.graph-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-soft);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.graph-modal-header h3 {
+  margin: 0;
+  font-size: 15px;
+  flex-shrink: 0;
+}
+.graph-modal-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.graph-search {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-normal);
+  font-size: 12.5px;
+  padding: 5px 9px;
+  width: 160px;
+}
+.graph-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.graph-canvas-wrap {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+  background: var(--bg-0);
+}
+.graph-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+  touch-action: none;
+}
+.graph-svg:active {
+  cursor: grabbing;
+}
+.graph-edge {
+  stroke: var(--border);
+  stroke-width: 1;
+  transition: opacity 0.12s ease;
+}
+.graph-edge.dim {
+  opacity: 0.12;
+}
+.graph-node {
+  cursor: pointer;
+  transition: opacity 0.12s ease;
+}
+.graph-node.dim {
+  opacity: 0.25;
+}
+.graph-node circle {
+  fill: var(--accent);
+  stroke: var(--bg-0);
+  stroke-width: 1.5;
+}
+.graph-node.attachment circle {
+  fill: var(--text-faint);
+}
+.graph-node.current circle {
+  stroke: var(--accent);
+  stroke-width: 2.5;
+}
+.graph-node-label {
+  fill: var(--text-muted);
+  font-size: 10px;
+  paint-order: stroke;
+  stroke: var(--bg-0);
+  stroke-width: 3px;
+  pointer-events: none;
+  user-select: none;
+}
+.graph-modal-footer {
+  padding: 7px 16px;
+  border-top: 1px solid var(--border-soft);
+  font-size: 11.5px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+@media (max-width: 720px) {
+  .graph-modal {
+    width: 100vw;
+    height: 100vh;
+    max-height: 100vh;
+    border-radius: 0;
+  }
+  .graph-search {
+    width: 120px;
+  }
+}
+@media (max-width: 640px) {
+  .help-row,
+  .help-row-feature {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+}
+
+.editor-preview {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  overflow-y: auto;
+  padding: 32px clamp(20px, 8vw, 120px) 80px;
+}
+.preview-title {
+  font-size: 28px;
+  font-weight: 700;
+  margin: 0 0 14px;
+  color: var(--text-normal);
+}
+/* The title field is the same shared <input class="note-title-input"> used
+   in edit mode, where its parent (.editor-textarea-wrap) has no padding of
+   its own, so the input supplies its own. Here it's nested inside
+   .editor-preview, which already pads its content on every side — without
+   this override the input's padding stacks on top of that, pushing the
+   title right of (and further down than) the properties panel/body text
+   beneath it, which only get .editor-preview's padding once. */
+.editor-preview .note-title-input {
+  padding: 0;
+  margin: 0 0 14px;
+}
+
+/* Markdown block typography */
+.editor-preview h1,
+.editor-preview h2,
+.editor-preview h3,
+.editor-preview h4,
+.editor-preview h5,
+.editor-preview h6 {
+  color: var(--text-normal);
+  font-weight: 600;
+  margin: 1.4em 0 0.5em;
+  line-height: 1.3;
+}
+.editor-preview h1 {
+  font-size: 1.65em;
+}
+.editor-preview h2 {
+  font-size: 1.4em;
+}
+.editor-preview h3 {
+  font-size: 1.2em;
+}
+.editor-preview h4 {
+  font-size: 1.05em;
+}
+.editor-preview h5 {
+  font-size: 0.95em;
+  color: var(--text-muted);
+}
+.editor-preview h6 {
+  font-size: 0.85em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.editor-preview h1,
+.editor-preview h2,
+.editor-preview h3,
+.editor-preview h4,
+.editor-preview h5,
+.editor-preview h6 {
+  scroll-margin-top: 12px;
+}
+.heading-fold-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1em;
+  height: 1em;
+  margin-right: 0.2em;
+  vertical-align: middle;
+  cursor: pointer;
+  color: var(--text-faint);
+  transform: rotate(0deg);
+  transition: transform 0.1s ease;
+}
+.heading-fold-toggle.collapsed {
+  transform: rotate(-90deg);
+}
+.heading-fold-toggle:hover {
+  color: var(--text-muted);
+}
+.heading-fold-count {
+  margin-left: 0.5em;
+  font-size: 0.6em;
+  font-weight: 400;
+  color: var(--text-faint);
+  vertical-align: middle;
+}
+.editor-preview p {
+  line-height: 1.7;
+  margin: 0.7em 0;
+  color: var(--text-normal);
+}
+.editor-preview ul,
+.editor-preview ol {
+  line-height: 1.7;
+  padding-left: 1.6em;
+  margin: 0.5em 0;
+}
+.editor-preview li {
+  margin: 0.15em 0;
+}
+.editor-preview blockquote {
+  margin: 0.8em 0;
+  padding: 2px 16px;
+  border-left: 3px solid var(--bg-4);
+  color: var(--text-muted);
+}
+.editor-preview blockquote p {
+  margin: 0.35em 0;
+}
+.editor-preview hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.6em 0;
+}
+.editor-preview code {
+  background: var(--bg-2);
+  border-radius: 3px;
+  padding: 0.15em 0.4em;
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  color: #e3b8ac;
+}
+.editor-preview pre {
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  overflow-x: auto;
+  margin: 0.8em 0;
+}
+.editor-preview pre code {
+  background: none;
+  padding: 0;
+  color: var(--text-normal);
+}
+.task-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0.25em 0;
+  line-height: 1.6;
+}
+.task-line input[type='checkbox'] {
+  margin-top: 5px;
+  accent-color: var(--accent);
+}
+.task-done {
+  color: var(--text-faint);
+  text-decoration: line-through;
+}
+
+/* Wikilinks / tags / embeds inside preview */
+.wikilink {
+  color: var(--link-color);
+  cursor: pointer;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+.wikilink:hover {
+  text-decoration: underline;
+}
+.wikilink-new {
+  color: var(--text-faint);
+  border-bottom: 1px dashed var(--text-faint);
+}
+.wikilink-new:hover {
+  color: var(--link-color);
+}
+.wikilink-missing-image {
+  color: var(--danger);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.92em;
+}
+.wikilink-ambiguous-wrap {
+  position: relative;
+  display: inline-block;
+}
+.wikilink-ambiguous {
+  color: #e0b95f;
+  border-bottom: 1px dotted #e0b95f;
+}
+.ambiguous-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 30;
+  background: #232323;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+}
+.ambiguous-menu button {
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  color: var(--text-normal);
+}
+.ambiguous-menu button:hover {
+  background: var(--bg-2);
+}
+
+.image-embed-wrap {
+  display: block;
+  margin: 0.6em 0;
+}
+.image-embed {
+  display: inline-block;
+  max-width: 100%;
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.image-embed img {
+  max-width: 100%;
+  max-height: 480px;
+  display: block;
+  border-radius: var(--radius-md);
+}
+.image-embed-loading {
+  display: inline-block;
+  padding: 20px 30px;
+  background: var(--bg-2);
+  border-radius: var(--radius-md);
+  color: var(--text-faint);
+  font-size: 12.5px;
+}
+.image-embed-caption {
+  display: block;
+  color: var(--text-faint);
+  font-size: 12px;
+  margin-top: 2px;
+}
+.image-pane-img {
+  max-width: 100%;
+  border-radius: var(--radius-md);
+  display: block;
+}
+
+/* Video / audio embeds + generic file chips inside preview */
+.video-embed {
+  display: block;
+  max-width: 100%;
+  max-height: 480px;
+  margin: 0.6em 0;
+  border-radius: var(--radius-md);
+  background: #000;
+}
+.audio-embed-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0.6em 0;
+  max-width: 420px;
+}
+.audio-embed {
+  width: 100%;
+}
+.audio-embed-name {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+.embed-loading {
+  display: inline-block;
+  padding: 10px 16px;
+  background: var(--bg-2);
+  border-radius: var(--radius-md);
+}
+.file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px 2px 8px;
+  margin: 0 2px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-normal);
+  cursor: pointer;
+  font-size: 0.92em;
+}
+.file-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Asset pane (video/audio/generic-file tab content, reading view) */
+.asset-pane-video {
+  max-width: 100%;
+  max-height: 70vh;
+  border-radius: var(--radius-md);
+  background: #000;
+  display: block;
+}
+.asset-pane-audio {
+  width: 100%;
+  max-width: 480px;
+}
+.asset-pane-file {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--text-faint);
+}
+.asset-download-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: var(--radius-md);
+  text-decoration: none;
+  font-size: 13px;
+}
+.asset-download-btn:hover {
+  filter: brightness(1.08);
+}
+.tree-kind-icon {
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+/* Callouts (Obsidian-style `> [!type] Title`) */
+.callout {
+  margin: 0.9em 0;
+  padding: 10px 14px 12px;
+  border-radius: var(--radius-md);
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-2));
+}
+.callout-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+.callout-icon {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+.callout-body {
+  margin-top: 6px;
+  color: var(--text-normal);
+}
+.callout-body > *:first-child {
+  margin-top: 0;
+}
+.callout-body > *:last-child {
+  margin-bottom: 0;
+}
+.callout-warning,
+.callout-caution,
+.callout-attention {
+  border-left-color: #e0b95f;
+  background: rgba(224, 185, 95, 0.1);
+}
+.callout-warning .callout-icon,
+.callout-caution .callout-icon,
+.callout-attention .callout-icon {
+  color: #e0b95f;
+}
+.callout-danger,
+.callout-error,
+.callout-failure,
+.callout-bug {
+  border-left-color: var(--danger);
+  background: rgba(220, 90, 90, 0.1);
+}
+.callout-danger .callout-icon,
+.callout-error .callout-icon,
+.callout-failure .callout-icon,
+.callout-bug .callout-icon {
+  color: var(--danger);
+}
+.callout-tip,
+.callout-hint,
+.callout-success,
+.callout-check,
+.callout-done {
+  border-left-color: #6fbf73;
+  background: rgba(111, 191, 115, 0.1);
+}
+.callout-tip .callout-icon,
+.callout-hint .callout-icon,
+.callout-success .callout-icon,
+.callout-check .callout-icon,
+.callout-done .callout-icon {
+  color: #6fbf73;
+}
+
+/* Tables */
+.md-table {
+  border-collapse: collapse;
+  margin: 0.9em 0;
+  width: 100%;
+  font-size: 0.94em;
+}
+.md-table th,
+.md-table td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.md-table th {
+  background: var(--bg-2);
+  color: var(--text-normal);
+  font-weight: 600;
+}
+.md-table tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--bg-2) 40%, transparent);
+}

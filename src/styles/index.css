@@ -1,0 +1,30 @@
+/* Auto-generated import index — order matches the original App.css
+ * cascade exactly, so splitting into per-feature files changes nothing
+ * about which rule wins. Each feature's CSS is co-located with its
+ * component instead of living in one 4,000+ line file. */
+
+@import 'theme.css';
+@import 'layout.css';
+@import '../components/ActivityBar.css';
+@import '../features/sidebar/sidebar.css';
+@import '../features/sidebar/ExplorerPanel.css';
+@import '../components/DropdownMenu.css';
+@import '../features/search/SearchPanel.css';
+@import '../features/tags/TagsPanel.css';
+@import '../features/panes/PaneNode.css';
+@import '../features/panes/TabBar.css';
+@import '../features/panes/PaneHeader.css';
+@import '../features/editor/EditorContent.css';
+@import '../features/editor/CodeMirrorEditor.css';
+@import '../features/graph/GraphViewModal.css';
+@import '../features/query/QueryBlock.css';
+@import '../components/PropertiesPanel.css';
+@import '../components/InlineMentions.css';
+@import '../components/StatusBar.css';
+@import '../features/onboarding/OnboardingFlow.css';
+@import 'modal.css';
+@import '../features/palette/PaletteModal.css';
+@import '../components/ImageViewer.css';
+@import 'responsive.css';
+@import '../features/database/database.css';
+@import '../features/canvas/canvas.css';

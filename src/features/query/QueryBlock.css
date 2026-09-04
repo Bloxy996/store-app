@@ -1,0 +1,198 @@
+/* ===========================================================================
+ * Frontmatter query blocks (```query / ```dataview) — see QueryBlock in
+ * App.jsx. .query-table reuses .md-table's styling as-is; everything below
+ * is specific to LIST/TASK output and the loading/error/empty states.
+ * ------------------------------------------------------------------------ */
+.query-block {
+  margin: 0.9em 0;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-2) 45%, transparent);
+  font-size: 0.9em;
+}
+.query-block-loading {
+  color: var(--text-faint);
+}
+.query-block-error {
+  color: var(--danger);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+.query-block-empty {
+  font-style: italic;
+}
+.query-list {
+  margin: 0.6em 0;
+  padding-left: 1.4em;
+}
+.query-tasklist {
+  margin: 0.6em 0;
+}
+.query-task-group {
+  margin: 0 0 10px 0;
+}
+.query-task-group:last-child {
+  margin-bottom: 0;
+}
+.query-task-source {
+  font-weight: 600;
+  font-size: 0.92em;
+  margin-bottom: 2px;
+  color: var(--text-muted);
+}
+.query-task-group .task-line {
+  margin-left: 4px;
+}
+
+/* Toggle blocks (`+++ Title` ... `+++`) */
+.toggle-block {
+  margin: 0.6em 0;
+}
+.toggle-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  padding: 3px 4px;
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  color: var(--text-normal);
+}
+.toggle-header:hover {
+  background: var(--bg-2);
+}
+.toggle-caret {
+  display: inline-flex;
+  color: var(--text-faint);
+  transition: transform 0.12s ease;
+}
+.toggle-block:not(.collapsed) .toggle-caret {
+  transform: rotate(90deg);
+}
+.toggle-body {
+  margin: 4px 0 4px 20px;
+  padding-left: 8px;
+  border-left: 2px solid var(--bg-4);
+}
+.toggle-body > *:first-child {
+  margin-top: 0;
+}
+
+/* Multi-column layout (`:::columns-2/3/4` ... `:::column` ... `:::`) */
+.md-columns {
+  display: grid;
+  grid-template-columns: repeat(var(--col-count, 2), 1fr);
+  gap: 20px;
+  margin: 0.9em 0;
+  align-items: start;
+}
+.md-column > *:first-child {
+  margin-top: 0;
+}
+@media (max-width: 720px) {
+  .md-columns {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Notion-style in-note tab block (`:::tabs` / `:::tab Name` / `:::`) */
+.tabs-block {
+  margin: 0.9em 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--bg-0);
+}
+.tabs-block-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 4px 0;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.tabs-block-bar::-webkit-scrollbar {
+  display: none;
+}
+.tabs-block-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 6px 6px 12px;
+  font-size: 13px;
+  color: var(--text-muted);
+  border-bottom: 2px solid transparent;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.tabs-block-tab:hover {
+  color: var(--text-normal);
+  background: var(--bg-2);
+}
+.tabs-block-tab.active {
+  color: var(--text-normal);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+  background: var(--bg-0);
+}
+.tabs-block-tab-label {
+  pointer-events: none;
+}
+.tabs-block-tab-close {
+  display: flex;
+  align-items: center;
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.tabs-block-tab-close:hover {
+  color: var(--text-normal);
+  background: var(--bg-3);
+}
+.tabs-block-add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  padding: 6px 10px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.tabs-block-add:hover {
+  color: var(--text-normal);
+  background: var(--bg-2);
+}
+.tabs-block-rename-input {
+  background: var(--bg-2);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  color: var(--text-normal);
+  font-size: 13px;
+  padding: 1px 4px;
+  width: 8em;
+}
+.tabs-block-body {
+  padding: 10px 14px;
+}
+.tabs-block-body > *:first-child {
+  margin-top: 0;
+}
+.tabs-block-body > *:last-child {
+  margin-bottom: 0;
+}
+@media (max-width: 720px) {
+  .tabs-block-tab {
+    padding: 8px 6px 8px 10px;
+  }
+}

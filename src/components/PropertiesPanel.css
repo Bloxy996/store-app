@@ -1,0 +1,32 @@
+/* ---------------------------------------------------------------------------
+   Properties panel (frontmatter)
+--------------------------------------------------------------------------- */
+.properties-panel {
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 6px 4px;
+  margin-bottom: 18px;
+}
+.properties-row {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 10px;
+  padding: 6px 10px;
+  align-items: center;
+  border-radius: var(--radius-sm);
+}
+.properties-row:hover {
+  background: var(--bg-2);
+}
+.properties-key {
+  color: var(--text-faint);
+  font-size: 12.5px;
+}
+.properties-value {
+  color: var(--text-normal);
+  font-size: 13px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}

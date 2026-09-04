@@ -1,0 +1,102 @@
+/* ---------------------------------------------------------------------------
+   File tree — folders show only a chevron, notes/images show no icon at
+   all (extension is enough to tell images apart), per the "no emoji, no
+   redundant icons" brief.
+--------------------------------------------------------------------------- */
+.file-tree {
+  padding: 2px 6px;
+}
+.tree-row {
+  display: flex;
+  align-items: center;
+  border-radius: var(--radius-sm);
+  position: relative;
+  /* Large vaults can have thousands of rows; skip layout/paint for the ones
+     currently scrolled out of view instead of doing full work for all of
+     them on every render. contain-intrinsic-size keeps scrollbar height
+     roughly accurate before a row has ever been measured. Both properties
+     are ignored (no-op, not a regression) on browsers that don't support
+     them yet. */
+  content-visibility: auto;
+  contain-intrinsic-size: 0 28px;
+}
+.tree-row.drag-over {
+  outline: 1.5px dashed var(--accent);
+  outline-offset: -1px;
+  background: var(--accent-soft);
+}
+.tree-row:hover {
+  background: var(--bg-2);
+}
+.tree-row:hover .tree-menu-btn {
+  opacity: 1;
+}
+
+.tree-item {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  text-align: left;
+  padding: 5px 6px;
+  border-radius: var(--radius-sm);
+  color: var(--text-normal);
+  min-width: 0;
+  font-size: 13.5px;
+}
+.tree-item.active {
+  background: var(--bg-3);
+}
+.tree-file .tree-label {
+  color: var(--text-muted);
+}
+.tree-item.active .tree-label {
+  color: var(--text-normal);
+}
+.tree-folder .tree-label {
+  color: var(--text-normal);
+  font-weight: 500;
+}
+.tree-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tree-caret {
+  display: flex;
+  align-items: center;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.bookmark-dot {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.tree-menu-btn {
+  opacity: 0;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  margin-right: 4px;
+}
+.tree-menu-btn:hover {
+  background: var(--bg-3);
+  color: var(--text-normal);
+}
+
+.root-drop-zone {
+  height: 36px;
+  margin-top: 4px;
+  border-radius: var(--radius-sm);
+}
+.root-drop-zone.drag-over {
+  outline: 1.5px dashed var(--accent);
+  outline-offset: -1px;
+  background: var(--accent-soft);
+}

@@ -1,0 +1,68 @@
+/* ---------------------------------------------------------------------------
+   Command palette / quick switcher
+--------------------------------------------------------------------------- */
+.palette-overlay {
+  align-items: flex-start;
+  padding-top: 12vh;
+  background: rgba(0, 0, 0, 0.45);
+}
+.palette-modal {
+  width: min(560px, 92vw);
+  background: #202020;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+.palette-input-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-faint);
+}
+.palette-input {
+  flex: 1;
+  background: none;
+  font-size: 15px;
+  color: var(--text-normal);
+}
+.palette-input::placeholder {
+  color: var(--text-faint);
+}
+.palette-results {
+  max-height: 50vh;
+  overflow-y: auto;
+  padding: 6px;
+}
+.palette-result {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 13.5px;
+  color: var(--text-normal);
+  text-align: left;
+}
+.palette-result svg {
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.palette-result.active,
+.palette-result:hover {
+  background: var(--bg-3);
+}
+.palette-result-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.palette-result-hint {
+  color: var(--text-faint);
+  font-size: 11.5px;
+  flex-shrink: 0;
+}
