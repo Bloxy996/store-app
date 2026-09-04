@@ -53,6 +53,7 @@ function buildInlinePreviewPlugin() {
   // builder's ordering requirement regardless of which rule fires where.
   function decorateLine(out, line, isActiveLine, doc) {
     const text = line.text;
+    const trimmed = text.trim();
 
     // Heading: size the whole line, dim the leading hashes.
     const heading = /^(#{1,6})\s+/.exec(text);
@@ -80,6 +81,22 @@ function buildInlinePreviewPlugin() {
           out.push({ from: line.from + title[0].length, to: line.to, deco: Decoration.mark({ class: 'cm-callout-title-text' }) });
         }
       }
+    }
+
+    // Toggle (`+++ Title` / closing `+++`) and columns/tabs (`:::columns-N`,
+    // `:::tabs`, `:::column`, `:::tab Name`, closing `:::`) delimiters — same
+    // "dim, never hide" treatment as a heading's '#'s, so these blocks don't
+    // turn into unstyled plain text while their raw markdown is being edited.
+    const toggleDelim = /^\+\+\+\s?/.exec(text);
+    if (toggleDelim) {
+      const to = trimmed === '+++' ? line.to : line.from + toggleDelim[0].length;
+      out.push({ from: line.from, to, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+    }
+    const tabDelim = /^:::tab\s+/.exec(text);
+    if (tabDelim) {
+      out.push({ from: line.from, to: line.from + tabDelim[0].length, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+    } else if (trimmed === ':::' || trimmed === ':::tabs' || trimmed === ':::column' || /^:::columns-[234]$/.test(trimmed)) {
+      out.push({ from: line.from, to: line.to, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
     }
 
     // Thematic break (---, ***, ___) — dim the whole rule line, same

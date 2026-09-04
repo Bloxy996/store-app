@@ -3,7 +3,14 @@ import { createRoot } from 'react-dom/client';
 import { RangeSetBuilder, StateField } from '@codemirror/state';
 import { Decoration, EditorView, WidgetType } from '@codemirror/view';
 
-import { isTableSeparatorRow, renderMarkdownBlocks, splitTableRow, tableColAlign } from '../../lib/markdownRender.jsx';
+import {
+  isTableSeparatorRow,
+  parseTabsBlock,
+  renderMarkdownBlocks,
+  serializeTabsBlock,
+  splitTableRow,
+  tableColAlign
+} from '../../lib/markdownRender.jsx';
 
 
 // ---------------------------------------------------------------------------
@@ -223,6 +230,96 @@ function EditableMarkdownTable({ raw, onCommit }) {
 }
 
 
+function parseColumnsRaw(raw) {
+  const lines = raw.split('\n');
+  const colCount = parseInt(/^:::columns-([234])/.exec(lines[0])[1], 10);
+  const inner = lines.slice(1, -1);
+  const chunks = [[]];
+  inner.forEach((l) => {
+    if (l.trim() === ':::column') chunks.push([]);
+    else chunks[chunks.length - 1].push(l);
+  });
+  return { colCount, chunks };
+}
+
+function buildColumnsRaw({ colCount, chunks }) {
+  const body = chunks.map((c) => c.join('\n')).join('\n:::column\n');
+  return `:::columns-${colCount}\n${body}\n:::`;
+}
+
+// Columns and tabs get real side-by-side / paged editing, same trick the
+// table uses: their root carries `data-cm-interactive`, so a click inside
+// never hits `revealRaw` and the CodeMirror selection never actually moves
+// into the block's line range — meaning `buildBlockWidgetField` keeps this
+// widget mounted (instead of swapping to flat raw text) the whole time the
+// person is typing in a column/tab. Bodies are plain contentEditable raw
+// markdown (like table cells): no live syntax dimming while typing, since
+// re-rendering styled markup on every keystroke fights the caret, but
+// unlike a table cell they can hold multiple lines/blocks.
+function EditableMarkdownColumns({ raw, onCommit }) {
+  const parsed = useMemo(() => parseColumnsRaw(raw), [raw]);
+  const setColumn = (ci, text) => {
+    const chunks = parsed.chunks.map((c) => c.slice());
+    chunks[ci] = text.split('\n');
+    onCommit(buildColumnsRaw({ ...parsed, chunks }));
+  };
+  return (
+    <div className="md-columns cm-editable-columns" style={{ '--col-count': parsed.colCount }} data-cm-interactive="true">
+      {parsed.chunks.map((chunk, ci) => (
+        <div
+          key={ci}
+          className="md-column cm-editable-column"
+          contentEditable
+          suppressContentEditableWarning
+          onBlur={(e) => setColumn(ci, e.currentTarget.innerText.replace(/\n$/, ''))}
+        >
+          {chunk.join('\n')}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Same pattern for tabs, reusing the reading view's own parse/serialize
+// pair. Only the active tab's body is mounted, so switching tabs while
+// editing behaves exactly like switching pages in reading view.
+function EditableMarkdownTabs({ raw, onCommit }) {
+  const innerLines = useMemo(() => raw.split('\n').slice(1, -1), [raw]);
+  const tabs = useMemo(() => parseTabsBlock(innerLines), [innerLines]);
+  const [active, setActive] = React.useState(0);
+  const safeActive = Math.min(active, tabs.length - 1);
+  const setBody = (text) => {
+    const next = tabs.map((t, i) => (i === safeActive ? { ...t, lines: text.split('\n') } : t));
+    onCommit(serializeTabsBlock(next));
+  };
+  return (
+    <div className="tabs-block cm-editable-tabs" data-cm-interactive="true">
+      <div className="tabs-block-bar">
+        {tabs.map((t, i) => (
+          <button
+            type="button"
+            key={i}
+            className={`tabs-block-tab ${i === safeActive ? 'active' : ''}`}
+            onMouseDown={(e) => { e.preventDefault(); setActive(i); }}
+          >
+            <span className="tabs-block-tab-label">{t.name}</span>
+          </button>
+        ))}
+      </div>
+      <div
+        key={safeActive}
+        className="tabs-block-body cm-editable-tab-body"
+        contentEditable
+        suppressContentEditableWarning
+        onBlur={(e) => setBody(e.currentTarget.innerText.replace(/\n$/, ''))}
+      >
+        {tabs[safeActive].lines.join('\n')}
+      </div>
+    </div>
+  );
+}
+
+
 // A single rendered block, mounted as a CodeMirror block widget. Non-table
 // blocks reuse `renderMarkdownBlocks` verbatim (the reading-view renderer),
 // so toggle expand/collapse and tab-switching already work — their
@@ -275,8 +372,13 @@ class MarkdownBlockWidget extends WidgetType {
       view.focus();
     };
 
+    const commitRaw = (newRaw) => replaceRange(this.from, this.to, newRaw);
     if (this.kind === 'table') {
-      root.render(<EditableMarkdownTable raw={this.raw} onCommit={(newRaw) => replaceRange(this.from, this.to, newRaw)} />);
+      root.render(<EditableMarkdownTable raw={this.raw} onCommit={commitRaw} />);
+    } else if (this.kind === 'columns') {
+      root.render(<EditableMarkdownColumns raw={this.raw} onCommit={commitRaw} />);
+    } else if (this.kind === 'tabs') {
+      root.render(<EditableMarkdownTabs raw={this.raw} onCommit={commitRaw} />);
     } else {
       root.render(
         <div onMouseDown={revealRaw} className="cm-block-generic">
@@ -351,4 +453,15 @@ function buildBlockWidgetField(ctx) {
   });
 }
 
-export { findWysiwygBlockRanges, parseMarkdownTableRaw, buildMarkdownTableRaw, EditableMarkdownTable, MarkdownBlockWidget, buildBlockWidgetField };
+export {
+  findWysiwygBlockRanges,
+  parseMarkdownTableRaw,
+  buildMarkdownTableRaw,
+  parseColumnsRaw,
+  buildColumnsRaw,
+  EditableMarkdownTable,
+  EditableMarkdownColumns,
+  EditableMarkdownTabs,
+  MarkdownBlockWidget,
+  buildBlockWidgetField
+};
