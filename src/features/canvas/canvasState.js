@@ -114,6 +114,32 @@ function canvasHitTest(nodes, pt, excludeId) {
 }
 
 
+// World-unit distance from a point to a node's rect (0 if the point is
+// already inside it). Used to find "nearby" cards while dragging a
+// connection, so their 4 dots can be surfaced as drop targets even before
+// the pointer is exactly over the card (see canvasNodesNear).
+function canvasDistToRect(node, pt) {
+  const r = canvasNodeRect(node);
+  const dx = Math.max(r.left - pt.x, 0, pt.x - r.right);
+  const dy = Math.max(r.top - pt.y, 0, pt.y - r.bottom);
+  return Math.hypot(dx, dy);
+}
+
+
+// Ids of every non-group node within `dist` world px of `pt`, excluding
+// `excludeId` (the card the connection is being dragged from). Caller
+// passes a distance already divided by zoom so the "nearby" radius stays
+// visually constant on screen regardless of zoom level.
+function canvasNodesNear(nodes, pt, excludeId, dist) {
+  const ids = new Set();
+  for (const n of nodes) {
+    if (n.id === excludeId || n.type === 'group') continue;
+    if (canvasDistToRect(n, pt) <= dist) ids.add(n.id);
+  }
+  return ids;
+}
+
+
 // A gently-curved connector (Obsidian-style): control points are pulled
 // straight out from each anchor along its side's normal, so the curve
 // always leaves/arrives perpendicular to the card it's attached to.
@@ -125,4 +151,8 @@ function canvasEdgePath(from, fromSide, to, toSide) {
   return `M ${from.x} ${from.y} C ${from.x + o1.x} ${from.y + o1.y}, ${to.x + o2.x} ${to.y + o2.y}, ${to.x} ${to.y}`;
 }
 
-export { CANVAS_MIN_W, CANVAS_MIN_H, CANVAS_COLORS, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX, CANVAS_MOVE_THRESHOLD, makeDefaultCanvasState, parseCanvasContent, serializeCanvasState, canvasNodeRect, canvasSideAnchor, canvasOppositeSide, canvasNearestSide, canvasHitTest, canvasEdgePath };
+// Screen-px radius (divided by zoom before use) for the "nearby card" dot
+// reveal while dragging a connection — see canvasNodesNear.
+const CANVAS_CONNECT_NEAR_PX = 70;
+
+export { CANVAS_MIN_W, CANVAS_MIN_H, CANVAS_COLORS, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX, CANVAS_MOVE_THRESHOLD, CANVAS_CONNECT_NEAR_PX, makeDefaultCanvasState, parseCanvasContent, serializeCanvasState, canvasNodeRect, canvasSideAnchor, canvasOppositeSide, canvasNearestSide, canvasHitTest, canvasNodesNear, canvasEdgePath };

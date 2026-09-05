@@ -45,6 +45,11 @@
   color: var(--text-normal);
 }
 
+/* background-position/-size are set inline per-frame from viewport
+   x/y/zoom (CanvasView) so the dot grid pans and scales with the camera
+   exactly like a node would, instead of staying fixed to the viewport
+   while everything drawn on top of it moves. The values below are just
+   the zoom=1, x=0, y=0 fallback before that inline style is first applied. */
 .canvas-surface {
   flex: 1;
   min-height: 0;
@@ -53,6 +58,7 @@
   background-color: var(--bg-1);
   background-image: radial-gradient(var(--bg-4) 1px, transparent 1px);
   background-size: 22px 22px;
+  background-position: 0 0;
   cursor: default;
   touch-action: none; /* we own pan/zoom/select gestures ourselves */
   outline: none;
@@ -70,23 +76,32 @@
   will-change: transform;
 }
 
+/* .canvas-node is position/size ONLY, overflow: visible — it's the
+   coordinate anchor for the dots and resize handle, which must NOT be
+   clipped by the card's own rounded-corner overflow (see .canvas-node-inner
+   below). This split is why dots used to render as half-circles: they were
+   children of the overflow:hidden card box itself. */
 .canvas-node {
   position: absolute;
+  user-select: none;
+}
+.canvas-node-inner {
+  height: 100%;
+  width: 100%;
   border: 1.5px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-2);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
   overflow: hidden;
-  user-select: none;
 }
-.canvas-node.selected {
+.canvas-node.selected .canvas-node-inner {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-soft), 0 2px 8px rgba(0, 0, 0, 0.4);
 }
 /* Shown while dragging a connection over this card, so it's clear a drop
    here will link to it (rather than silently missing and creating a new
    card, or silently succeeding with no visible confirmation). */
-.canvas-node.connect-target {
+.canvas-node.connect-target .canvas-node-inner {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
@@ -203,16 +218,27 @@
   padding: 12px;
 }
 
+/* Was `.canvas-group` targeting a class that was never actually applied
+   (the element only ever got `canvas-node-group`) — groups rendered with
+   the plain opaque-card styles above instead of this dashed/transparent
+   look, which is most of what "groups are completely broken" meant.
+   Styling now lives on the descendant `.canvas-node-inner` since that's
+   the box with the border/background/overflow, per the split above. */
 .canvas-group {
+  z-index: 0;
+}
+.canvas-group .canvas-node-inner {
   background: rgba(255, 255, 255, 0.02);
   border-style: dashed;
   border-color: var(--border-soft);
   box-shadow: none;
-  z-index: 0;
 }
-.canvas-group.selected {
+.canvas-group.selected .canvas-node-inner {
   border-style: dashed;
 }
+/* A direct sibling of .canvas-node (not nested inside .canvas-node-inner),
+   so its -11px upward offset isn't clipped by the inner box's
+   overflow: hidden — the same fix as the dots, applied to the group label. */
 .canvas-group-label {
   position: absolute;
   top: -11px;
@@ -224,6 +250,7 @@
   color: var(--text-muted);
   cursor: grab;
   border-radius: var(--radius-sm);
+  z-index: 1;
 }
 
 .canvas-dot {
@@ -381,18 +408,28 @@
   white-space: nowrap;
 }
 
-/* Mobile: bigger touch targets for dots/resize handle, toolbar wraps. */
+/* Narrow screens: toolbar wraps instead of overflowing. */
 @media (max-width: 720px) {
   .canvas-toolbar {
     flex-wrap: wrap;
     gap: 4px;
   }
-  .canvas-dot {
-    width: 14px;
-    height: 14px;
-  }
+}
+/* Touch input (phones AND tablets/laptops with a touchscreen, regardless of
+   viewport width — `pointer: coarse` is the correct signal here, not a
+   width breakpoint) gets bigger dot/resize-handle hit targets. Uses a
+   transparent ::after halo rather than growing the element itself, so the
+   visible dot size doesn't change, only what you can actually land a
+   fat-finger tap on. */
+@media (pointer: coarse) {
+  .canvas-dot,
   .canvas-resize-handle {
-    width: 18px;
-    height: 18px;
+    position: absolute;
+  }
+  .canvas-dot::after,
+  .canvas-resize-handle::after {
+    content: '';
+    position: absolute;
+    inset: -11px;
   }
 }

@@ -4,7 +4,7 @@ import { IconLoader, IconTrash } from '../../components/icons.jsx';
 import { CanvasFilePickerModal } from './CanvasFilePickerModal.jsx';
 import { CanvasEdgesLayer, CanvasNode } from './CanvasNode.jsx';
 import { CanvasToolbar } from './CanvasToolbar.jsx';
-import { CANVAS_COLORS, CANVAS_MIN_H, CANVAS_MIN_W, CANVAS_MOVE_THRESHOLD, CANVAS_ZOOM_MAX, CANVAS_ZOOM_MIN, canvasHitTest, canvasNearestSide, canvasNodeRect, canvasOppositeSide, canvasSideAnchor, parseCanvasContent, serializeCanvasState } from './canvasState.js';
+import { CANVAS_COLORS, CANVAS_CONNECT_NEAR_PX, CANVAS_MIN_H, CANVAS_MIN_W, CANVAS_MOVE_THRESHOLD, CANVAS_ZOOM_MAX, CANVAS_ZOOM_MIN, canvasHitTest, canvasNearestSide, canvasNodeRect, canvasNodesNear, canvasOppositeSide, canvasSideAnchor, parseCanvasContent, serializeCanvasState } from './canvasState.js';
 import { clamp } from '../../lib/mathUtils.js';
 import { uid } from '../../lib/paneTree.js';
 import { opensInEditorPane } from '../../lib/vaultConfig.js';
@@ -21,6 +21,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
   const [marquee, setMarquee] = useState(null);
   const [connecting, setConnecting] = useState(null);
   const [connectTargetId, setConnectTargetId] = useState(null);
+  const [nearbyConnectIds, setNearbyConnectIds] = useState(null);
   const [filePickerOpen, setFilePickerOpen] = useState(false);
   const [spaceDown, setSpaceDown] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
@@ -355,6 +356,11 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
       // silently missing and creating a new card) with no visual feedback.
       const target = canvasHitTest(state.nodes, world, drag.fromNodeId);
       setConnectTargetId(target ? target.id : null);
+      // Also reveal the 4 dots on any card within a screen-constant radius
+      // of the pointer (not just the one directly under it), so the user
+      // can see and drag onto a precise connection point on a nearby card
+      // instead of only ever landing a plain body-to-body edge.
+      setNearbyConnectIds(canvasNodesNear(state.nodes, world, drag.fromNodeId, CANVAS_CONNECT_NEAR_PX / viewport.zoom));
     }
   };
 
@@ -399,6 +405,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
       }
       setConnecting(null);
       setConnectTargetId(null);
+      setNearbyConnectIds(null);
     }
   };
 
@@ -412,6 +419,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
       setSelectedEdgeId(null);
       setConnecting(null);
       setConnectTargetId(null);
+      setNearbyConnectIds(null);
     } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
       e.preventDefault();
       setSelectedIds(new Set(state.nodes.map((n) => n.id)));
@@ -506,6 +514,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
         className={`canvas-surface ${isPanning || spaceDown ? 'panning' : ''}`}
         ref={containerRef}
         tabIndex={0}
+        style={{ backgroundPosition: `${viewport.x}px ${viewport.y}px`, backgroundSize: `${22 * viewport.zoom}px ${22 * viewport.zoom}px` }}
         onPointerDown={(e) => {
           if (e.target === containerRef.current || e.target.classList.contains('canvas-world')) onBgPointerDown(e);
         }}
@@ -534,6 +543,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
               hovered={hoveredId === node.id}
               editing={editingId === node.id}
               connectTarget={connectTargetId === node.id}
+              connectHighlight={!!connecting && nearbyConnectIds?.has(node.id)}
               allFilesById={allFilesById}
               handlers={handlers}
               linkIndex={linkIndex}

@@ -434,12 +434,11 @@ buried in this one):**
   reasonable starting point but need real research/rework (force
   parameters, local-neighborhood view, node sizing by connection count,
   filters) rather than incremental tweaks.
-- **Canvas fixes**: connection-point dots clipped at card edges, no
-  "nearby connectable targets" highlight while dragging an arrow, broken
-  groups, camera drag not moving the background dot grid, mobile
-  support. All in `CanvasNode.jsx`/`CanvasView.jsx`/`canvas.css` — several
-  distinct bugs, worth separating into their own fixes rather than one
-  large risky diff.
+- ~~**Canvas fixes**: connection-point dots clipped, no nearby-target
+  highlight, broken groups, background grid not panning, mobile support~~
+  — done, see section 11. Full markdown-in-card editing for canvas text
+  nodes is still not done (still tracked in the bullet above — it's the
+  same underlying work as database cells).
 - **Timeline / calendar / chart (bar/line/pie) views for databases.**
   New view types alongside table/board/gallery in `DbViews.jsx` +
   `dbState.js` — each is a real feature on the scale of the existing
@@ -528,3 +527,70 @@ what they do — it's not a rule to relitigate per file.
 outside what a code change can do; regenerate the icons and rename the
 repo separately if the "V" mark or the `vault-drive-pwa` slug need to go
 too.
+
+---
+
+## 11. Changelog — canvas bug-fix pass (dots/groups/grid/connect)
+
+One pass out of the 5 items deferred in section 8 (`changes.patch`). The
+other 4 (markdown-in-cell/card editing, popup→inline conversion, graph
+revamp, database timeline/calendar/chart views) are **not** touched here —
+see below for why each was left for its own pass.
+
+**Fixed, all in `features/canvas/`:**
+- **Groups were rendering with plain-card styling** (opaque background,
+  solid border, box-shadow) instead of the dashed/transparent look —
+  `canvas.css`'s `.canvas-group` rule targeted a class that was never
+  actually applied to the DOM node (`CanvasNode.jsx` only ever added
+  `canvas-node-group`). Root cause of "groups are completely broken."
+- **Dots and the resize handle were clipped to half-circles/half-squares**
+  at a card's edge — they were children of `.canvas-node`, which has
+  `overflow: hidden` (needed to clip note/image content to the rounded
+  corners). Restructured: `.canvas-node` is now a plain position/size
+  wrapper (`overflow: visible`); the border/background/shadow/clipping
+  moved to a new inner `.canvas-node-inner` div. Dots, the resize handle,
+  and the group label are now siblings of `.canvas-node-inner`, not
+  descendants, so none of them get clipped. **If you touch `CanvasNode`
+  again: anything meant to visually hang outside the card (a badge, a
+  handle) goes on the outer node, not inside `.canvas-node-inner`.**
+- **Camera drag didn't move the background dot grid** — `.canvas-surface`'s
+  `background-position`/`background-size` were static CSS. `CanvasView`
+  now sets both inline every render from `viewport.x/y/zoom`, so the grid
+  pans and scales exactly like a node would.
+- **No feedback for "nearby" connection targets while dragging an arrow**
+  — only the card exactly under the pointer got a highlight
+  (`connectTargetId`, unchanged). Added `canvasNodesNear` (`canvasState.js`)
+  — screen-radius-constant (divided by zoom) distance-to-rect check — and
+  a `nearbyConnectIds` set in `CanvasView`, recomputed every pointer-move
+  during a connect drag. Any card in that set gets `connectHighlight`,
+  which reveals its 4 dots (same dot-rendering path as hover/selected)
+  even before the pointer is exactly over it, so the user can see and
+  drag onto a precise anchor point on a card that's merely close by.
+
+**Mobile:** dot/resize-handle hit areas now grow via a `(pointer: coarse)`
+media query (an invisible `::after` halo, `inset: -11px`) instead of the
+old `max-width: 720px` rule — correctly targets touchscreens regardless of
+viewport width (e.g. a touch laptop or tablet in landscape), and doesn't
+change the visible dot size, only what you can land a tap on. This is a
+real improvement but not the full "make mobile friendly" ask — panning,
+pinch-zoom, and touch-vs-pan-mode selection already worked pre-existing;
+what's **not** addressed here is the interaction between a single-finger
+drag and *scrolling inside* a card's content (a long note embed, an
+overflowing text card) — `canvas-surface` claims all touch gestures
+(`touch-action: none`) so the app can own pan/select/drag itself, which
+means a touch-drag starting inside a scrollable card body pans the canvas
+rather than scrolling the card. Fixing that needs a deliberate per-region
+touch-action policy (probably `pan-y` on scrollable inner content plus
+JS-level gesture disambiguation), which is real interaction-design work,
+not a one-line fix — worth its own pass.
+
+**Deliberately not done in this pass (unchanged from section 8):**
+- Canvas text cards still use a plain `<textarea>` for editing, not a
+  scoped markdown editor with coloring/autocomplete "just like a note, but
+  inside the card." Same underlying architecture change as full markdown
+  editing in database cells (embedding a real CodeMirror instance per
+  card/cell) — not attempted here, don't half-do it as a side effect of
+  the bug-fix pass above.
+- Site-wide popup → inline conversion, the graph-editor revamp, and
+  timeline/calendar/chart database views: untouched, still each their own
+  pass — see section 8 for scope notes on each.

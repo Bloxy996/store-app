@@ -124,6 +124,7 @@ const CanvasNode = React.memo(function CanvasNode({
   hovered,
   editing,
   connectTarget,
+  connectHighlight,
   allFilesById,
   handlers,
   linkIndex,
@@ -135,56 +136,68 @@ const CanvasNode = React.memo(function CanvasNode({
   onCommitEdit
 }) {
   const isGroup = node.type === 'group';
+  // Outer wrapper is position/size ONLY (overflow: visible) — the border,
+  // background, shadow and rounded-corner clipping live one level down on
+  // `.canvas-node-inner`. Dots and the resize handle are siblings of that
+  // inner box, not children of it, specifically so the inner box's
+  // `overflow: hidden` (needed to clip note/image content to the rounded
+  // corners) never also clips the half-outside-the-edge dots/handle.
   const style = { left: node.x, top: node.y, width: node.width, height: node.height };
-  if (node.color) style.borderColor = node.color;
+  const innerStyle = node.color ? { borderColor: node.color } : undefined;
+  const showDots = !isGroup && (selected || hovered || connectHighlight) && !editing;
   return (
     <div
-      className={`canvas-node canvas-node-${node.type} ${selected ? 'selected' : ''} ${connectTarget ? 'connect-target' : ''}`}
+      className={`canvas-node canvas-node-${node.type} ${isGroup ? 'canvas-group' : ''} ${selected ? 'selected' : ''} ${connectTarget ? 'connect-target' : ''}`}
       style={style}
       onPointerEnter={() => onHoverChange(node.id)}
       onPointerLeave={() => onHoverChange(null)}
       onDoubleClick={(e) => onDoubleClick(e, node)}
     >
       {isGroup ? (
-        <div className="canvas-group-label" style={node.color ? { color: node.color } : undefined} onPointerDown={(e) => onPointerDownBody(e, node)}>
-          {node.label || 'Group'}
-        </div>
+        <>
+          <div className="canvas-node-inner" style={innerStyle} />
+          <div className="canvas-group-label" style={node.color ? { color: node.color } : undefined} onPointerDown={(e) => onPointerDownBody(e, node)}>
+            {node.label || 'Group'}
+          </div>
+        </>
       ) : (
-        <div className="canvas-node-body" onPointerDown={(e) => onPointerDownBody(e, node)}>
-          {node.type === 'text' &&
-            (editing ? (
-              <textarea
-                autoFocus
-                className="canvas-text-editor"
-                defaultValue={node.text || ''}
-                placeholder="Type markdown…"
-                onPointerDown={(e) => e.stopPropagation()}
-                onFocus={(e) => {
-                  const v = e.target.value;
-                  e.target.value = '';
-                  e.target.value = v;
-                }}
-                onBlur={(e) => onCommitEdit(node.id, e.target.value)}
-                onKeyDown={(e) => {
-                  e.stopPropagation();
-                  if (e.key === 'Escape') e.target.blur();
-                }}
-              />
-            ) : (
-              <div className="canvas-text-render">
-                {node.text ? renderMarkdownBlocks(node.text, handlers, linkIndex, node.id) : <span className="muted small">Double-click to edit</span>}
-              </div>
-            ))}
-          {node.type === 'file' && <CanvasFileNodeContent node={node} allFilesById={allFilesById} handlers={handlers} linkIndex={linkIndex} />}
-          {node.type === 'link' && (
-            <a className="canvas-link-card" href={node.url} target="_blank" rel="noreferrer" draggable={false}>
-              <IconLink2 size={14} />
-              <span>{node.url}</span>
-            </a>
-          )}
+        <div className="canvas-node-inner" style={innerStyle}>
+          <div className="canvas-node-body" onPointerDown={(e) => onPointerDownBody(e, node)}>
+            {node.type === 'text' &&
+              (editing ? (
+                <textarea
+                  autoFocus
+                  className="canvas-text-editor"
+                  defaultValue={node.text || ''}
+                  placeholder="Type markdown…"
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onFocus={(e) => {
+                    const v = e.target.value;
+                    e.target.value = '';
+                    e.target.value = v;
+                  }}
+                  onBlur={(e) => onCommitEdit(node.id, e.target.value)}
+                  onKeyDown={(e) => {
+                    e.stopPropagation();
+                    if (e.key === 'Escape') e.target.blur();
+                  }}
+                />
+              ) : (
+                <div className="canvas-text-render">
+                  {node.text ? renderMarkdownBlocks(node.text, handlers, linkIndex, node.id) : <span className="muted small">Double-click to edit</span>}
+                </div>
+              ))}
+            {node.type === 'file' && <CanvasFileNodeContent node={node} allFilesById={allFilesById} handlers={handlers} linkIndex={linkIndex} />}
+            {node.type === 'link' && (
+              <a className="canvas-link-card" href={node.url} target="_blank" rel="noreferrer" draggable={false}>
+                <IconLink2 size={14} />
+                <span>{node.url}</span>
+              </a>
+            )}
+          </div>
         </div>
       )}
-      {!isGroup && (selected || hovered) && !editing && (
+      {showDots && (
         <>
           <span className="canvas-dot canvas-dot-top" onPointerDown={(e) => onPointerDownDot(e, node, 'top')} />
           <span className="canvas-dot canvas-dot-right" onPointerDown={(e) => onPointerDownDot(e, node, 'right')} />
