@@ -4,7 +4,7 @@ import { IconLoader, IconTrash } from '../../components/icons.jsx';
 import { CanvasFilePickerModal } from './CanvasFilePickerModal.jsx';
 import { CanvasEdgesLayer, CanvasNode } from './CanvasNode.jsx';
 import { CanvasToolbar } from './CanvasToolbar.jsx';
-import { CANVAS_COLORS, CANVAS_CONNECT_NEAR_PX, CANVAS_MIN_H, CANVAS_MIN_W, CANVAS_MOVE_THRESHOLD, CANVAS_ZOOM_MAX, CANVAS_ZOOM_MIN, canvasHitTest, canvasNearestSide, canvasNodeRect, canvasNodesNear, canvasOppositeSide, canvasSideAnchor, parseCanvasContent, serializeCanvasState } from './canvasState.js';
+import { CANVAS_COLORS, CANVAS_CONNECT_NEAR_PX, CANVAS_GRID_SIZE, CANVAS_MIN_H, CANVAS_MIN_W, CANVAS_MOVE_THRESHOLD, CANVAS_ZOOM_MAX, CANVAS_ZOOM_MIN, canvasHitTest, canvasNearestSide, canvasNodeRect, canvasNodesNear, canvasOppositeSide, canvasSideAnchor, canvasSnap, parseCanvasContent, serializeCanvasState } from './canvasState.js';
 import { clamp } from '../../lib/mathUtils.js';
 import { uid } from '../../lib/paneTree.js';
 import { opensInEditorPane } from '../../lib/vaultConfig.js';
@@ -25,6 +25,9 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
   const [filePickerOpen, setFilePickerOpen] = useState(false);
   const [spaceDown, setSpaceDown] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
+  // Off by default: nothing snaps unless the user turns this on from the
+  // toolbar. See CanvasToolbar's grid-snap button.
+  const [snapEnabled, setSnapEnabled] = useState(false);
 
   const containerRef = useRef(null);
   const dragRef = useRef(null);
@@ -199,8 +202,14 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
         };
         return;
       }
-      const panMode = e.pointerType === 'touch' || e.button === 1 || spaceDown;
-      if (panMode) {
+      // Plain click-and-drag on empty canvas pans by default — this used to
+      // require the middle mouse button, which has no equivalent on a
+      // trackpad. Middle-click and space+drag still work too (muscle
+      // memory / mouse users), and two-finger trackpad scroll already pans
+      // via the wheel handler below. Box-select now needs Shift held, the
+      // same modifier already used to multi-select individual cards.
+      const marqueeMode = e.button === 0 && e.shiftKey && !spaceDown;
+      if (!marqueeMode) {
         setIsPanning(true);
         dragRef.current = { mode: 'pan', startClient: { x: e.clientX, y: e.clientY }, startViewport: viewport };
       } else {
@@ -381,7 +390,23 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
     } else if (drag.mode === 'move' || drag.mode === 'resize') {
       if (drag.moved && pendingOverridesRef.current) {
         const overrides = pendingOverridesRef.current;
-        commit((s) => ({ ...s, nodes: s.nodes.map((n) => (overrides.has(n.id) ? { ...n, ...overrides.get(n.id) } : n)) }));
+        // Snap on commit only (not on every live-preview frame), so the
+        // card still glides smoothly under the pointer while dragging and
+        // only jumps to the grid once at drop — same feel as Obsidian's
+        // canvas snap.
+        commit((s) => ({
+          ...s,
+          nodes: s.nodes.map((n) => {
+            if (!overrides.has(n.id)) return n;
+            const patch = overrides.get(n.id);
+            const snapped = { ...patch };
+            if ('x' in snapped) snapped.x = canvasSnap(snapped.x, snapEnabled);
+            if ('y' in snapped) snapped.y = canvasSnap(snapped.y, snapEnabled);
+            if ('width' in snapped) snapped.width = canvasSnap(snapped.width, snapEnabled);
+            if ('height' in snapped) snapped.height = canvasSnap(snapped.height, snapEnabled);
+            return { ...n, ...snapped };
+          })
+        }));
       }
       setLiveOverrides(null);
       pendingOverridesRef.current = null;
@@ -509,6 +534,8 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
         onAddFile={() => setFilePickerOpen(true)}
         onAddLink={addLinkNodeAtCenter}
         onAddGroup={addGroupAtCenter}
+        snapEnabled={snapEnabled}
+        onToggleSnap={() => setSnapEnabled((v) => !v)}
       />
       <div
         className={`canvas-surface ${isPanning || spaceDown ? 'panning' : ''}`}

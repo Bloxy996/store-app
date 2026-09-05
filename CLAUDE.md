@@ -664,3 +664,109 @@ real note editor unmodified:
   one source of truth for how markdown gets authored in this app). (Markdown-in-card editing
   for canvas text nodes, listed as deferred here originally, is now done
   — see section 12.)
+
+---
+
+## 13. Changelog — DB crash fix, remembered sign-in, canvas panning/snap
+
+Fixes and additions made in one pass (see `changes.patch`). Four larger,
+explicitly-requested items were **scoped out of this pass** and are listed
+at the end rather than half-done — see "Deferred" below.
+
+**Fixed (real bugs, not just missing features):**
+- Opening a `.base` database threw `Minified React error #310` ("Rendered
+  more hooks than during the previous render") and crashed the pane.
+  Cause: `DatabaseView`'s wikilink-row-target `useEffect` was declared
+  *after* an `if (loading) return <div className="db-loading">…</div>`
+  early return. While a file is loading, that return happens before the
+  effect is ever reached, so the loading render calls fewer hooks than the
+  loaded render that follows it — React requires the same hooks, in the
+  same order, on every render of a component, no exceptions. Fixed by
+  moving the effect above the early return (guarded internally by
+  `if (loading) return`) and factoring the row-title calculation both it
+  and the render body need into a shared `rowTitleFallback()` helper
+  (section 3.4 — one calculation, not two copies that could drift).
+  **If you add another hook to `DatabaseView`, it must go above the
+  `if (loading)` return, full stop** — this is the one file in the app
+  where that early return makes the usual "just add a hook" instinct
+  unsafe.
+- Google sign-in previously had to happen every time the app was opened:
+  `useAuth.js` kept the Drive access token in `sessionStorage`, which the
+  browser clears whenever the tab/app closes, and tracked no expiry.
+  `useGoogleAuth` now stores `{ token, expiresAt }` in `localStorage` (a
+  token past its `expiresAt` is treated as absent, same as before) and, on
+  load, if there's no live stored token, fires one silent
+  `requestAccessToken({ prompt: 'none' })` before ever showing a "Sign in"
+  button. Google grants this without any UI as long as the browser still
+  has an active Google session and the person previously consented — same
+  remembered feel as the vault folder choice, just re-validated once per
+  load instead of persisted forever (an access token itself can't be kept
+  forever; only the underlying consent can be silently re-used).
+
+**Changed (canvas UX, both explicitly requested):**
+- Panning the canvas no longer requires the middle mouse button, which has
+  no real equivalent on a trackpad. Plain click-and-drag on the empty
+  canvas background now pans by default; box/marquee-select moved to
+  Shift+drag on the background instead. Middle-click and space+drag still
+  pan too (unchanged, for anyone's existing muscle memory), and two-finger
+  trackpad scroll already panned via the existing wheel handler.
+- Grid snap is a **new, opt-in** feature, not a fix to existing forced
+  snapping — there was no snap-to-grid code anywhere in `CanvasView.jsx`
+  before this pass; positions were always raw floats. Added
+  `CANVAS_GRID_SIZE`/`canvasSnap()` in `canvasState.js` and a toolbar
+  toggle (`CanvasToolbar`'s new grid icon button, `.icon-btn.active` style
+  added to `sidebar.css` since that's where the shared `.icon-btn` base
+  rule lives) wired to `CanvasView`'s `snapEnabled` state, **default
+  off**. Snapping is applied once on drop (inside `commit`), not on every
+  live-drag frame, so dragging still feels smooth and only the final
+  position/size jumps to the grid — matches how Obsidian's own canvas snap
+  feels rather than snapping the live ghost position every frame.
+- `HelpModal.jsx`'s Canvas entry updated to describe both changes (section
+  6 — keep this in sync going forward same as always).
+
+**Deferred (explicitly requested, each is its own follow-up pass, not
+bundled into this bugfix-sized patch):**
+1. **Site-wide popup removal → inline menus.** Every `DropdownMenu`/modal
+   usage across `features/` and `components/DropdownMenu.jsx` needs
+   auditing case-by-case (some floating menus, like the view-settings
+   popover in `DatabaseView.jsx`'s `DbViewTab`, can become inline
+   expand/collapse sections; others, like `DbRowDetailModal`, are closer
+   to full pages and need a different inline pattern, e.g. a slide-over
+   panel). Needs a design pass per popup type before touching code, not a
+   mechanical find-replace.
+2. **Graph editor revamp, Obsidian-style.** Current `features/graph/`
+   (`useForceGraph.js` + `GraphViewModal.jsx`) is a single modal with a
+   basic force simulation. Matching Obsidian's graph view means: local vs.
+   global graph modes, per-node/edge styling by tag/folder, an in-graph
+   search/filter bar, adjustable force-simulation parameters (link
+   distance/strength, repulsion, gravity/center-force) exposed as UI
+   controls, and (per the user's suggestion) treating it as its own
+   "file"/pane kind rather than a modal — likely means extending the
+   `file.kind` switch in `EditorContent.jsx` (section 3.6) with a virtual
+   `graph` kind that opens in a normal tab instead of `GraphViewModal`,
+   which also touches `PaneNode.jsx`/tab-bar plumbing. Sizeable — treat as
+   its own multi-file pass with real research into Obsidian's actual graph
+   settings panel before writing code.
+3. **Timeline / calendar / chart views for `.base` databases.** Today
+   `DbViews.jsx` has table/board/gallery. Notion-style timeline, calendar,
+   and chart (bar/line/pie) views are each a new view type: new entries in
+   `DB_VIEW_TYPE_ICONS`/the add-view menu (`DatabaseView.jsx`), a new
+   renderer per type in `DbViews.jsx` (or split into sibling files per
+   section 3.7 once that file grows), and — for chart specifically — a new
+   aggregation step (group/sum/count by column) that doesn't exist in
+   `dbState.js` yet. Timeline/calendar also need a date-column requirement
+   check similar to board's select-column requirement. Real feature work,
+   not a bugfix.
+4. **App versioning + auto-update.** There's currently no version string
+   surfaced anywhere and no update-check mechanism. Needs: a build-time
+   version stamp (e.g. git SHA or `package.json` version injected via
+   Vite `define`), a way to detect a new deployed build is available
+   (`vite-plugin-pwa`'s `registerType: 'autoUpdate'` / `needRefresh`
+   callback is the natural hook, since the PWA infra already exists per
+   section 4 — check current `vite.config.js` PWA config before assuming
+   how it's registered), and UI (likely a `StatusBar` notice or toast) to
+   prompt/apply the reload. Should respect section 3.1/4 — no widening of
+   `globPatterns`/`runtimeCaching` to make this work.
+
+Pick which of these four to tackle next; each deserves its own reviewed
+pass rather than being rushed alongside the others.

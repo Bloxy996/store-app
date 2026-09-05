@@ -7,6 +7,16 @@ import { DbBoardView, DbGalleryView, DbTableView } from './DbViews.jsx';
 import { DB_OPTION_COLORS, dbId, dbMakeRow, parseDatabaseContent, serializeDatabaseState } from './dbState.js';
 
 
+// Shared by the wikilink-target effect (runs before hooks are conditionally
+// skipped, see DatabaseView) and the in-render `rowTitle` used by the view
+// renderers — one calculation, per section 3.4 of CLAUDE.md.
+function rowTitleFallback(columns, row) {
+  const firstTextColumnId = (columns.find((c) => c.type === 'text') || columns[0])?.id;
+  const v = firstTextColumnId ? row.values[firstTextColumnId] : null;
+  return (v && String(v).trim()) || 'Untitled';
+}
+
+
 // --- View tabs / title -------------------------------------------------------
 
 function DbTitleField({ title, onRename }) {
@@ -218,6 +228,28 @@ function DatabaseView({ file, content, onChange, handlers, linkIndex, loading, i
     [onChange]
   );
 
+  // Arrived here via a `[[Database.base#Row Title]]` link click — open that
+  // row's detail modal, same as clicking the row directly. Matched by title
+  // (case-insensitive, first match) rather than a stored id: consistent
+  // with how every other wikilink in this app resolves by name, and needs
+  // no new persisted identifier on rows. Deliberately not keyed on
+  // `state.rows` — re-matching on every keystroke elsewhere in this
+  // database would re-open the row mid-edit.
+  //
+  // MUST run before the `loading` early return below: this hook has to be
+  // called on every render regardless of `loading`, or the hook count
+  // differs between the loading-skeleton render and the first real render
+  // and React throws "Rendered more hooks than during the previous render"
+  // (minified error #310) the moment a database file finishes loading.
+  useEffect(() => {
+    if (loading || !initialRowTarget) return;
+    const target = initialRowTarget.trim().toLowerCase();
+    const match = state.rows.find((r) => rowTitleFallback(state.columns, r).toLowerCase() === target);
+    if (match) setOpenRowId(match.id);
+    onConsumeRowTarget?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialRowTarget, loading]);
+
   if (loading) {
     return (
       <div className="db-loading">
@@ -305,29 +337,9 @@ function DatabaseView({ file, content, onChange, handlers, linkIndex, loading, i
   const setActiveView = (viewId) => commit((s) => ({ ...s, activeViewId: viewId }));
   const renameTitle = (title) => commit((s) => ({ ...s, title }));
 
-  const firstTextColumnId = (state.columns.find((c) => c.type === 'text') || state.columns[0])?.id;
-  const rowTitle = (row) => {
-    const v = firstTextColumnId ? row.values[firstTextColumnId] : null;
-    return (v && String(v).trim()) || 'Untitled';
-  };
+  const rowTitle = (row) => rowTitleFallback(state.columns, row);
 
   const openRow = state.rows.find((r) => r.id === openRowId) || null;
-
-  // Arrived here via a `[[Database.base#Row Title]]` link click — open that
-  // row's detail modal, same as clicking the row directly. Matched by title
-  // (case-insensitive, first match) rather than a stored id: consistent
-  // with how every other wikilink in this app resolves by name, and needs
-  // no new persisted identifier on rows. Deliberately not keyed on
-  // `state.rows` — re-matching on every keystroke elsewhere in this
-  // database would re-open the row mid-edit.
-  useEffect(() => {
-    if (!initialRowTarget) return;
-    const target = initialRowTarget.trim().toLowerCase();
-    const match = state.rows.find((r) => rowTitle(r).toLowerCase() === target);
-    if (match) setOpenRowId(match.id);
-    onConsumeRowTarget?.();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialRowTarget]);
 
   return (
     <div className="db-view">

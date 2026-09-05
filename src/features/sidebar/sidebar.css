@@ -194,6 +194,11 @@
   color: var(--text-normal);
 }
 
+.icon-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
 .mobile-only {
   display: none;
 }

@@ -513,6 +513,15 @@ const IconZoomOut = (p) => (
   </Svg>
 );
 
+const IconGrid = (p) => (
+  <Svg {...p}>
+    <line x1="3" y1="9" x2="21" y2="9" />
+    <line x1="3" y1="15" x2="21" y2="15" />
+    <line x1="9" y1="3" x2="9" y2="21" />
+    <line x1="15" y1="3" x2="15" y2="21" />
+  </Svg>
+);
+
 const IconFrame = (p) => (
   <Svg {...p}>
     <line x1="4" y1="2" x2="4" y2="22" />
@@ -549,4 +558,4 @@ const IconExpand = (p) => (
 
 const ASSET_KIND_ICONS = { video: IconVideo, audio: IconAudio, file: IconFile, database: IconDatabase, canvas: IconCanvasKind };
 
-export { Svg, IconChevronRight, IconChevronDown, IconMenu, IconListTree, IconPalette, IconPlus, IconGraph, IconMaximize, IconFilePlus, IconFolderPlus, IconUpload, IconMoreVertical, IconEdit, IconTrash, IconX, IconPanelLeft, IconSearch, IconTag, IconStar, IconStarFilled, IconRefresh, IconLogOut, IconFolder, IconDrive, IconSplitVertical, IconSplitHorizontal, IconEye, IconArrowLeft, IconArrowRight, IconSettings, IconHelp, IconSliders, IconInfo, IconImageMissing, IconCheck, IconVideo, IconAudio, IconFile, IconDownload, IconDatabase, IconTable, IconKanban, IconLayoutGrid, IconCalendar, IconHash, IconType, IconAlignLeft, IconCheckSquare, IconChevronsUpDown, IconGripVertical, IconPaperclip, IconLink2, IconTags, IconLoader, IconCommand, IconAlertTriangle, IconCanvasKind, IconZoomIn, IconZoomOut, IconFrame, IconStickyNote, IconImage, IconExpand, ASSET_KIND_ICONS };
+export { Svg, IconChevronRight, IconChevronDown, IconMenu, IconListTree, IconPalette, IconPlus, IconGraph, IconMaximize, IconFilePlus, IconFolderPlus, IconUpload, IconMoreVertical, IconEdit, IconTrash, IconX, IconPanelLeft, IconSearch, IconTag, IconStar, IconStarFilled, IconRefresh, IconLogOut, IconFolder, IconDrive, IconSplitVertical, IconSplitHorizontal, IconEye, IconArrowLeft, IconArrowRight, IconSettings, IconHelp, IconSliders, IconInfo, IconImageMissing, IconCheck, IconVideo, IconAudio, IconFile, IconDownload, IconDatabase, IconTable, IconKanban, IconLayoutGrid, IconCalendar, IconHash, IconType, IconAlignLeft, IconCheckSquare, IconChevronsUpDown, IconGripVertical, IconPaperclip, IconLink2, IconTags, IconLoader, IconCommand, IconAlertTriangle, IconCanvasKind, IconZoomIn, IconZoomOut, IconFrame, IconStickyNote, IconImage, IconExpand, IconGrid, ASSET_KIND_ICONS };

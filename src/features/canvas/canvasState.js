@@ -35,6 +35,14 @@ const CANVAS_ZOOM_MAX = 3;
 
 const CANVAS_MOVE_THRESHOLD = 3; // world px before a pointerdown counts as a drag, not a click
 
+// Optional grid snap (off by default — see CanvasView's `snapEnabled` state
+// and the toolbar toggle; nothing snaps unless the user turns it on).
+const CANVAS_GRID_SIZE = 20;
+
+function canvasSnap(value, enabled) {
+  return enabled ? Math.round(value / CANVAS_GRID_SIZE) * CANVAS_GRID_SIZE : value;
+}
+
 
 function makeDefaultCanvasState() {
   return { nodes: [], edges: [] };
@@ -155,4 +163,4 @@ function canvasEdgePath(from, fromSide, to, toSide) {
 // reveal while dragging a connection — see canvasNodesNear.
 const CANVAS_CONNECT_NEAR_PX = 70;
 
-export { CANVAS_MIN_W, CANVAS_MIN_H, CANVAS_COLORS, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX, CANVAS_MOVE_THRESHOLD, CANVAS_CONNECT_NEAR_PX, makeDefaultCanvasState, parseCanvasContent, serializeCanvasState, canvasNodeRect, canvasSideAnchor, canvasOppositeSide, canvasNearestSide, canvasHitTest, canvasNodesNear, canvasEdgePath };
+export { CANVAS_MIN_W, CANVAS_MIN_H, CANVAS_COLORS, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX, CANVAS_MOVE_THRESHOLD, CANVAS_CONNECT_NEAR_PX, CANVAS_GRID_SIZE, makeDefaultCanvasState, parseCanvasContent, serializeCanvasState, canvasNodeRect, canvasSideAnchor, canvasOppositeSide, canvasNearestSide, canvasHitTest, canvasNodesNear, canvasEdgePath, canvasSnap };

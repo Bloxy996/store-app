@@ -1,7 +1,7 @@
-import { IconFile, IconFrame, IconLink2, IconMaximize, IconStickyNote, IconZoomIn, IconZoomOut } from '../../components/icons.jsx';
+import { IconFile, IconFrame, IconGrid, IconLink2, IconMaximize, IconStickyNote, IconZoomIn, IconZoomOut } from '../../components/icons.jsx';
 
 
-function CanvasToolbar({ zoom, onZoomIn, onZoomOut, onZoomReset, onFitToContent, onAddText, onAddFile, onAddLink, onAddGroup }) {
+function CanvasToolbar({ zoom, onZoomIn, onZoomOut, onZoomReset, onFitToContent, onAddText, onAddFile, onAddLink, onAddGroup, snapEnabled, onToggleSnap }) {
   return (
     <div className="canvas-toolbar">
       <div className="canvas-toolbar-group">
@@ -16,6 +16,14 @@ function CanvasToolbar({ zoom, onZoomIn, onZoomOut, onZoomReset, onFitToContent,
         </button>
         <button className="icon-btn" title="Add group" onClick={onAddGroup}>
           <IconFrame size={15} />
+        </button>
+        <button
+          className={`icon-btn ${snapEnabled ? 'active' : ''}`}
+          title={snapEnabled ? 'Snap to grid: on' : 'Snap to grid: off'}
+          aria-pressed={snapEnabled}
+          onClick={onToggleSnap}
+        >
+          <IconGrid size={15} />
         </button>
       </div>
       <div className="canvas-toolbar-group">

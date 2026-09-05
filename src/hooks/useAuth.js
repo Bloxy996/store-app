@@ -8,8 +8,29 @@ import { CLIENT_ID, DRIVE_SCOPE } from '../lib/vaultConfig.js';
 // ---------------------------------------------------------------------------
 // Auth hook — Google Identity Services token client
 // ---------------------------------------------------------------------------
+// Access tokens are stored with an expiry so a stale one (Google tokens
+// last ~1hr) is never handed to driveApi.js as if it were still valid.
+function readStoredToken() {
+  try {
+    const raw = localStorage.getItem('vault_access_token');
+    if (!raw) return '';
+    const { token, expiresAt } = JSON.parse(raw);
+    if (!token || !expiresAt || Date.now() >= expiresAt) return '';
+    return token;
+  } catch {
+    return '';
+  }
+}
+
+function storeToken(token, expiresInSeconds) {
+  // 60s safety margin so nothing treats a token as valid in the last
+  // moment before Google would have expired it anyway.
+  const expiresAt = Date.now() + Math.max(0, (expiresInSeconds || 3600) - 60) * 1000;
+  localStorage.setItem('vault_access_token', JSON.stringify({ token, expiresAt }));
+}
+
 function useGoogleAuth() {
-  const [token, setToken] = useState(() => sessionStorage.getItem('vault_access_token') || '');
+  const [token, setToken] = useState(() => readStoredToken());
   const [tokenClient, setTokenClient] = useState(null);
   const [gisReady, setGisReady] = useState(false);
 
@@ -26,13 +47,24 @@ function useGoogleAuth() {
         scope: DRIVE_SCOPE,
         callback: (resp) => {
           if (resp && resp.access_token) {
-            sessionStorage.setItem('vault_access_token', resp.access_token);
+            storeToken(resp.access_token, resp.expires_in);
             setToken(resp.access_token);
           }
         }
       });
       setTokenClient(client);
       setGisReady(true);
+      // Remember-me: if we don't already have a live token (either never
+      // signed in this browser, or the stored one expired), try a silent
+      // re-auth before falling back to asking the user to click "Sign in".
+      // Google will grant this without any UI as long as the person
+      // previously consented and still has an active Google session in
+      // this browser — same idea as the vault folder being remembered,
+      // just re-checked once per app load instead of persisted forever
+      // (access tokens can't be persisted forever; only the *consent* can).
+      if (!readStoredToken()) {
+        client.requestAccessToken({ prompt: 'none' });
+      }
     })();
     return () => {
       cancelled = true;
@@ -48,7 +80,7 @@ function useGoogleAuth() {
     if (token && window.google?.accounts?.oauth2?.revoke) {
       window.google.accounts.oauth2.revoke(token, () => {});
     }
-    sessionStorage.removeItem('vault_access_token');
+    localStorage.removeItem('vault_access_token');
     releaseImageUrlCache();
     releaseSearchIndex();
     setToken('');
