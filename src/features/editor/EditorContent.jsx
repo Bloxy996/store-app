@@ -18,7 +18,7 @@ const DatabaseView = lazy(() => import('../database/DatabaseView.jsx').then((m) 
 const CanvasView = lazy(() => import('../canvas/CanvasView.jsx').then((m) => ({ default: m.CanvasView })));
 
 
-function EditorContent({ file, content, onChange, linkIndex, phantomRecords, handlers, mode, loadingNote, backlinkIndex, allFiles, getBody, isActivePane }) {
+function EditorContent({ file, content, onChange, linkIndex, phantomRecords, handlers, mode, loadingNote, backlinkIndex, allFiles, getBody, isActivePane, pendingRowOpen, onConsumeRowOpen }) {
   // Heading fold state (reading-view only), keyed by heading id, reset per
   // note so collapsing a section in one note doesn't leak into another.
   const [collapsedHeadings, setCollapsedHeadings] = useState(() => new Set());
@@ -137,6 +137,8 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
           handlers={handlers}
           linkIndex={linkIndex}
           loading={loadingNote}
+          initialRowTarget={pendingRowOpen?.fileId === file.id ? pendingRowOpen.rowTarget : null}
+          onConsumeRowTarget={onConsumeRowOpen}
         />
       </Suspense>
     );

@@ -419,10 +419,6 @@ the code looks the way it does now, not just what changed.
 
 **Deliberately deferred (each is its own follow-up, not a partial job
 buried in this one):**
-- **Database row-linking** (`[[Some.base#RowTitle]]`-style deep links to
-  a specific row). Needs new resolution logic in `linkGraph.js` +
-  `renderInline`, plus `DatabaseView` accepting an "open and scroll to
-  this row" navigation target — more than a text-syntax change.
 - **Full markdown editing inside database cells and canvas cards**
   (coloring/formatting/autocomplete "just like a note, but inside the
   cell/card"). This means embedding a real CodeMirror instance per
@@ -451,3 +447,44 @@ buried in this one):**
 
 Tackle these in separate passes; don't half-implement one alongside
 unrelated work.
+
+---
+
+## 9. Changelog — database row-linking
+
+**Added:** `[[Database.base#Row Title]]` deep-links to a specific row.
+- The `[[Target#fragment]]` syntax already existed textually (used for
+  note headings, though heading navigation itself was never wired up) —
+  `renderInline` (`lib/markdownRender.jsx`) now captures the fragment
+  instead of discarding it, and passes it to `handlers.onOpenById(id, {
+  rowTarget })` when the resolved file is kind `'database'`. Kept out of
+  `resolveLinkTarget`/`linkGraph.js` on purpose: fragment handling is a
+  rendering/navigation concern, not a link-resolution one — the file
+  still resolves exactly as it did before.
+- **Match key is the row's title (first text column), not a stored row
+  id** — same "resolve by name" philosophy as every other link in this
+  app (see `linkGraph.js`'s header comment). First match wins if two rows
+  share a title; there's no row-id syntax. If that becomes a real problem
+  for a large vault, revisit — don't add a parallel id-based syntax
+  without a concrete case for it.
+- New state: `App.jsx`'s `pendingRowOpen` (`{ fileId, rowTarget }`),
+  threaded through `PaneNode`/`LeafPane` → `EditorContent` →
+  `DatabaseView` as plain props — **deliberately not put inside the
+  memoized `handlers` object**, which would churn its identity on every
+  row-link click and re-trigger the exact `handlers`-in-deps bug fixed in
+  section 8 (`EditorContent`'s selection/nav effects). `DatabaseView`
+  reads `initialRowTarget`, opens the matching row's detail modal via the
+  existing `setOpenRowId`, then calls `onConsumeRowTarget` — effect is
+  keyed only on `[initialRowTarget]`, not `state.rows`, so it doesn't
+  re-fire and re-open the row while the user is mid-edit elsewhere in the
+  same database.
+- `HelpModal.jsx` documents the new syntax (section 6).
+
+**Not done (still applies from the list above):** autocomplete doesn't
+suggest row titles after typing `[[Database.base#` — it just stops
+suggesting file names at that point, same as it already did for
+`#heading`. Worth adding once row-linking sees real use, not bundled in
+here since it's a separate, smaller piece (extend
+`wikilinkCompletion.js`'s wiki-match branch to detect a `#` in the
+already-typed target and switch its candidate pool to that database's row
+titles).

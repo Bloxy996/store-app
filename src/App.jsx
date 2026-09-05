@@ -829,6 +829,12 @@ export default function App() {
   // selection-scoped word/char counts instead of the whole note's — null
   // when nothing's selected.
   const [editorSelectionText, setEditorSelectionText] = useState(null);
+  // Set by a `[[Database.base#Row Title]]` link click (see onOpenById below)
+  // and consumed by the matching DatabaseView once it's mounted/updated —
+  // kept outside `handlers` on purpose, so a row-link click doesn't churn
+  // the memoized `handlers` identity (see EditorContent.jsx's selection
+  // effects for why that churn is worth avoiding).
+  const [pendingRowOpen, setPendingRowOpen] = useState(null);
 
   // Bridge for the Outline panel: the currently-active pane's EditorContent
   // registers its scroll-to-heading function here (see the comment in
@@ -840,7 +846,10 @@ export default function App() {
   const handlers = useMemo(
     () => ({
       token,
-      onOpenById: (id) => openFileInPane(activePaneId, id),
+      onOpenById: (id, opts) => {
+        openFileInPane(activePaneId, id);
+        if (opts?.rowTarget) setPendingRowOpen({ fileId: id, rowTarget: opts.rowTarget });
+      },
       onCreateOrOpenByName: (name) => openNoteByName(name),
       onOpenImage: (file) => openFileInPane(activePaneId, file.id),
       onOpenAsset: (file) => openFileInPane(activePaneId, file.id),
@@ -1148,6 +1157,8 @@ export default function App() {
             onToggleBookmark={toggleBookmark}
             onResizeSplit={resizeSplit}
             onToggleDock={() => setMobileDockOpen((v) => !v)}
+            pendingRowOpen={pendingRowOpen}
+            onConsumeRowOpen={() => setPendingRowOpen(null)}
           />
         </div>
       </div>

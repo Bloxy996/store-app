@@ -38,6 +38,7 @@ const HELP_MARKDOWN = [
   { syntax: '++underline++', desc: 'Underlines text.' },
   { syntax: '[[Note Name]]', desc: 'Link to another note. Start typing after [[ for autocomplete; unmatched names become "phantom" links you can create by clicking. Works in a note\'s body and in frontmatter property values (e.g. related: [[Other Note]]).' },
   { syntax: '[[image.png]] / [[clip.mp4]] / [[song.mp3]]', desc: 'Embed an image, video, or audio file inline by filename.' },
+  { syntax: '[[Database.base#Row Title]]', desc: "Deep-link to one row of a database — opens the file and that row's detail panel directly. Matched by the row's title (its first text column), same as any other wikilink." },
   { syntax: '#tag or #parent/child', desc: 'Tag a note. Autocomplete suggests existing tags as you type; nested tags (parent/child) group and roll up counts in the Tags panel. Works both in the note body and as a tags: frontmatter property.' },
   { syntax: '> [!tip] Title', desc: 'Callout block. Recognized types: note, info, abstract, summary, tip, hint, success, check, done, question, help, faq, warning, caution, attention, danger, error, failure, bug, quote, example.' },
   { syntax: '| a | b |\\n|---|---|\\n| 1 | 2 |', desc: 'Tables, standard markdown pipe syntax.' },

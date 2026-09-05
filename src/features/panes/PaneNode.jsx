@@ -89,7 +89,9 @@ function LeafPane({
   getBody,
   bookmarks,
   onToggleBookmark,
-  onToggleDock
+  onToggleDock,
+  pendingRowOpen,
+  onConsumeRowOpen
 }) {
   const activeTab = leaf.tabs.find((t) => t.id === leaf.activeTabId) || null;
   const file = activeTab ? filesById.get(activeTab.fileId) : null;
@@ -140,6 +142,8 @@ function LeafPane({
           allFiles={allFiles}
           getBody={getBody}
           isActivePane={isActivePane}
+          pendingRowOpen={pendingRowOpen}
+          onConsumeRowOpen={onConsumeRowOpen}
         />
       </div>
     </div>

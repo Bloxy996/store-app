@@ -197,7 +197,7 @@ function DbAddViewButton({ onAdd }) {
 
 // --- Top-level database pane -------------------------------------------------
 
-function DatabaseView({ file, content, onChange, handlers, linkIndex, loading }) {
+function DatabaseView({ file, content, onChange, handlers, linkIndex, loading, initialRowTarget, onConsumeRowTarget }) {
   // Parsed/edited locally (like a form), not re-derived from `content` on
   // every render — LeafPane remounts this component (key={file.id}) on file
   // switch, so `content` is only ever read here at mount. Every mutation
@@ -312,6 +312,22 @@ function DatabaseView({ file, content, onChange, handlers, linkIndex, loading })
   };
 
   const openRow = state.rows.find((r) => r.id === openRowId) || null;
+
+  // Arrived here via a `[[Database.base#Row Title]]` link click — open that
+  // row's detail modal, same as clicking the row directly. Matched by title
+  // (case-insensitive, first match) rather than a stored id: consistent
+  // with how every other wikilink in this app resolves by name, and needs
+  // no new persisted identifier on rows. Deliberately not keyed on
+  // `state.rows` — re-matching on every keystroke elsewhere in this
+  // database would re-open the row mid-edit.
+  useEffect(() => {
+    if (!initialRowTarget) return;
+    const target = initialRowTarget.trim().toLowerCase();
+    const match = state.rows.find((r) => rowTitle(r).toLowerCase() === target);
+    if (match) setOpenRowId(match.id);
+    onConsumeRowTarget?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialRowTarget]);
 
   return (
     <div className="db-view">

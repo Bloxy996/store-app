@@ -46,7 +46,13 @@ function renderInline(text, keyPrefix, handlers, linkIndex) {
       const core = token.startsWith('!') ? token.slice(1) : token;
       const inner = core.slice(2, -2);
       const [rawTargetAndHeading, rawAlias] = inner.split('|');
-      const rawTarget = rawTargetAndHeading.replace(/#.*$/, '').trim();
+      const hashIdx = rawTargetAndHeading.indexOf('#');
+      const rawTarget = (hashIdx === -1 ? rawTargetAndHeading : rawTargetAndHeading.slice(0, hashIdx)).trim();
+      // For a database target, `#Row Title` is a deep link to that specific
+      // row (see DatabaseView's initialRowTarget) — same `[[Target#frag]]`
+      // syntax as a heading link, just resolved by DatabaseView instead of
+      // by a heading id. Ignored for every other file kind.
+      const rowTarget = hashIdx === -1 ? null : rawTargetAndHeading.slice(hashIdx + 1).trim() || null;
       const label = (rawAlias || rawTargetAndHeading).trim();
       const resolution = resolveLinkTarget(rawTarget, linkIndex);
 
@@ -83,8 +89,8 @@ function renderInline(text, keyPrefix, handlers, linkIndex) {
           <span
             key={key}
             className="wikilink"
-            onClick={() => handlers.onOpenById(resolution.file.id)}
-            title={`Open ${resolution.file.baseName}`}
+            onClick={() => handlers.onOpenById(resolution.file.id, rowTarget ? { rowTarget } : undefined)}
+            title={rowTarget ? `Open ${resolution.file.baseName} \u2192 ${rowTarget}` : `Open ${resolution.file.baseName}`}
           >
             {label}
           </span>
