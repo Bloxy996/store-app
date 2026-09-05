@@ -2,9 +2,10 @@ import { useEffect } from 'react';
 
 
 // ---------------------------------------------------------------------------
-// Generic dropdown menu — trigger button + floating panel, closes on
-// outside click or Escape. Backs the merged "add item" button, per-row
-// "⋮" menus, and the tab context menu.
+// Generic outside-click/touch dismissal. Backs every inline menu/panel that
+// replaced the old portaled `DropdownMenu` component (the sidebar "add"
+// menu, file-tree row menus, the tab context menu), plus `DbPopover` and
+// the accent color picker.
 // ---------------------------------------------------------------------------
 // Accepts either a single ref or an array of refs — a click/touch is only
 // "outside" if it falls outside every ref's subtree. Used so a menu rendered

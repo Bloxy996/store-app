@@ -81,8 +81,48 @@
   background: var(--bg-3);
   color: var(--text-normal);
 }
-.tab-menu-wrap {
-  display: inline-flex;
+.tab-menu-btn.active {
+  opacity: 1;
+  background: var(--bg-3);
+  color: var(--text-normal);
+}
+.tab-menu-panel-inline {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+}
+.tab-menu-panel-label {
+  color: var(--text-faint);
+  margin-right: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
+}
+.tab-menu-panel-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border-radius: var(--radius-sm);
+  color: var(--text-normal);
+}
+.tab-menu-panel-item:hover {
+  background: var(--bg-2);
+}
+.tab-menu-panel-item svg {
+  opacity: 0.85;
+}
+.tab-menu-panel-divider {
+  width: 1px;
+  height: 16px;
+  background: var(--border);
+  margin: 0 2px;
 }
 .tab-new {
   width: 28px;

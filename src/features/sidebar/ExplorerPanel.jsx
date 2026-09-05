@@ -1,48 +1,79 @@
 import React, { useRef, useState } from 'react';
 
-import { DropdownMenu, MenuDivider, MenuItem } from '../../components/DropdownMenu.jsx';
 import { ASSET_KIND_ICONS, IconCanvasKind, IconChevronDown, IconChevronRight, IconDatabase, IconEdit, IconFilePlus, IconFolderPlus, IconMoreVertical, IconPlus, IconStar, IconStarFilled, IconTrash, IconUpload } from '../../components/icons.jsx';
+import { useClickOutside } from '../../hooks/useClickOutside.js';
 import { opensInEditorPane } from '../../lib/vaultConfig.js';
 
 
 // ---------------------------------------------------------------------------
 // File explorer — tree view, drag-and-drop reorganization, and the merged
-// "add item" dropdown (New note / New folder / Upload files) that replaces
+// "add item" menu (New note / New folder / Upload files) that replaces
 // the old separate +note / +folder buttons.
+//
+// Both the header's "add" menu and each row's "..." menu used to be a
+// portaled `DropdownMenu`. Neither has the horizontal-scroll clipping
+// problem the tab bar / database view-tabs had, but they're still popups,
+// so both are now inline: the add menu opens a panel below the whole
+// header row (outside `.side-panel-body`'s scroll area, so it's never
+// clipped), and each row's menu opens a small panel directly below that
+// one row, as a plain sibling in the vertical tree list — the tree already
+// scrolls vertically and already varies row-to-row (folders show children
+// below them), so one row temporarily growing to show its own menu is a
+// harmless extension of that, not a new layout hazard. Deliberately NOT a
+// single shared panel like `DbViewPanel`/`TabBar`'s tab menu: those anchor
+// to one fixed-position row, but a file tree can have hundreds of rows at
+// arbitrary scroll positions, so a global "one panel, moved to wherever
+// was last clicked" would have to either float (a popup again) or yank
+// the scroll position around. A per-row local toggle avoids both.
 // ---------------------------------------------------------------------------
 const DND_MIME = 'application/x-vault-node';
 
 
-function AddMenu({ onNewNote, onNewDatabase, onNewCanvas, onNewFolder, onUploadFiles, canUpload, align = 'left' }) {
-  const fileInputRef = useRef(null);
+function AddMenuButton({ active, onToggle }) {
   return (
-    <DropdownMenu
-      align={align}
-      trigger={(toggle) => (
-        <button className="icon-btn" onClick={toggle} title="New note, canvas, database, folder, or upload" aria-label="Add">
-          <IconPlus size={16} />
-        </button>
-      )}
-    >
-      <MenuItem icon={<IconFilePlus size={15} />} onClick={onNewNote}>
-        New note
-      </MenuItem>
-      <MenuItem icon={<IconCanvasKind size={15} />} onClick={onNewCanvas}>
-        New canvas
-      </MenuItem>
-      <MenuItem icon={<IconDatabase size={15} />} onClick={onNewDatabase}>
-        New database
-      </MenuItem>
-      <MenuItem icon={<IconFolderPlus size={15} />} onClick={onNewFolder}>
-        New folder
-      </MenuItem>
-      <MenuItem
-        icon={<IconUpload size={15} />}
+    <button className={`icon-btn ${active ? 'active' : ''}`} onClick={onToggle} title="New note, canvas, database, folder, or upload" aria-label="Add">
+      <IconPlus size={16} />
+    </button>
+  );
+}
+
+
+// Rendered by ExplorerPanel as a full-width block below the whole header
+// row — not anchored under the button itself — so it pushes the tree down
+// in normal flow instead of floating over it, matching the DbViewPanel /
+// TabBar-menu-panel convention established for other former popups.
+function AddMenuPanel({ onNewNote, onNewDatabase, onNewCanvas, onNewFolder, onUploadFiles, canUpload, onClose }) {
+  const fileInputRef = useRef(null);
+  const run = (fn) => {
+    fn();
+    onClose();
+  };
+  return (
+    <div className="add-menu-panel-inline">
+      <button className="menu-item" onClick={() => run(onNewNote)}>
+        <IconFilePlus size={15} />
+        <span>New note</span>
+      </button>
+      <button className="menu-item" onClick={() => run(onNewCanvas)}>
+        <IconCanvasKind size={15} />
+        <span>New canvas</span>
+      </button>
+      <button className="menu-item" onClick={() => run(onNewDatabase)}>
+        <IconDatabase size={15} />
+        <span>New database</span>
+      </button>
+      <button className="menu-item" onClick={() => run(onNewFolder)}>
+        <IconFolderPlus size={15} />
+        <span>New folder</span>
+      </button>
+      <button
+        className="menu-item"
         disabled={!canUpload}
-        onClick={() => (canUpload ? fileInputRef.current?.click() : null)}
+        onClick={() => run(() => (canUpload ? fileInputRef.current?.click() : null))}
       >
-        Upload files{!canUpload ? ' (needs Google sign-in)' : ''}
-      </MenuItem>
+        <IconUpload size={15} />
+        <span>Upload files{!canUpload ? ' (needs Google sign-in)' : ''}</span>
+      </button>
       <input
         ref={fileInputRef}
         type="file"
@@ -53,63 +84,70 @@ function AddMenu({ onNewNote, onNewDatabase, onNewCanvas, onNewFolder, onUploadF
           e.target.value = '';
         }}
       />
-    </DropdownMenu>
+    </div>
   );
 }
 
 
-function TreeItemMenu({ isFolder, canUpload, onNewNote, onNewDatabase, onNewCanvas, onNewFolder, onUploadFiles, onRename, onToggleBookmark, isBookmarked, onDelete }) {
+// The inline panel for one row's "..." menu — rendered by TreeNode as a
+// sibling directly below that row, never portaled.
+function TreeItemMenuPanel({ isFolder, canUpload, onNewNote, onNewDatabase, onNewCanvas, onNewFolder, onUploadFiles, onRename, onToggleBookmark, isBookmarked, onDelete, onClose }) {
   const fileInputRef = useRef(null);
+  const run = (fn) => {
+    fn();
+    onClose();
+  };
   return (
-    <DropdownMenu
-      align="right"
-      trigger={(toggle) => (
-        <button className="tree-menu-btn" onClick={toggle} aria-label="More actions">
-          <IconMoreVertical size={14} />
+    <div className="tree-menu-panel-inline">
+      {isFolder && (
+        <button className="menu-item" onClick={() => run(onNewNote)}>
+          <IconFilePlus size={14} />
+          <span>New note</span>
         </button>
       )}
-    >
       {isFolder && (
-        <MenuItem icon={<IconFilePlus size={15} />} onClick={onNewNote}>
-          New note
-        </MenuItem>
+        <button className="menu-item" onClick={() => run(onNewCanvas)}>
+          <IconCanvasKind size={14} />
+          <span>New canvas</span>
+        </button>
       )}
       {isFolder && (
-        <MenuItem icon={<IconCanvasKind size={15} />} onClick={onNewCanvas}>
-          New canvas
-        </MenuItem>
+        <button className="menu-item" onClick={() => run(onNewDatabase)}>
+          <IconDatabase size={14} />
+          <span>New database</span>
+        </button>
       )}
       {isFolder && (
-        <MenuItem icon={<IconDatabase size={15} />} onClick={onNewDatabase}>
-          New database
-        </MenuItem>
+        <button className="menu-item" onClick={() => run(onNewFolder)}>
+          <IconFolderPlus size={14} />
+          <span>New folder</span>
+        </button>
       )}
       {isFolder && (
-        <MenuItem icon={<IconFolderPlus size={15} />} onClick={onNewFolder}>
-          New folder
-        </MenuItem>
-      )}
-      {isFolder && (
-        <MenuItem
-          icon={<IconUpload size={15} />}
+        <button
+          className="menu-item"
           disabled={!canUpload}
-          onClick={() => (canUpload ? fileInputRef.current?.click() : null)}
+          onClick={() => run(() => (canUpload ? fileInputRef.current?.click() : null))}
         >
-          Upload files{!canUpload ? ' (needs Google sign-in)' : ''}
-        </MenuItem>
+          <IconUpload size={14} />
+          <span>Upload files{!canUpload ? ' (needs Google sign-in)' : ''}</span>
+        </button>
       )}
-      {isFolder && <MenuDivider />}
+      {isFolder && <span className="tree-menu-panel-divider" />}
       {!isFolder && (
-        <MenuItem icon={isBookmarked ? <IconStarFilled size={15} /> : <IconStar size={15} />} onClick={onToggleBookmark}>
-          {isBookmarked ? 'Remove bookmark' : 'Bookmark'}
-        </MenuItem>
+        <button className="menu-item" onClick={() => run(onToggleBookmark)}>
+          {isBookmarked ? <IconStarFilled size={14} /> : <IconStar size={14} />}
+          <span>{isBookmarked ? 'Remove bookmark' : 'Bookmark'}</span>
+        </button>
       )}
-      <MenuItem icon={<IconEdit size={15} />} onClick={onRename}>
-        Rename
-      </MenuItem>
-      <MenuItem icon={<IconTrash size={15} />} danger onClick={onDelete}>
-        Delete
-      </MenuItem>
+      <button className="menu-item" onClick={() => run(onRename)}>
+        <IconEdit size={14} />
+        <span>Rename</span>
+      </button>
+      <button className="menu-item danger" onClick={() => run(onDelete)}>
+        <IconTrash size={14} />
+        <span>Delete</span>
+      </button>
       {isFolder && (
         <input
           ref={fileInputRef}
@@ -122,7 +160,7 @@ function TreeItemMenu({ isFolder, canUpload, onNewNote, onNewDatabase, onNewCanv
           }}
         />
       )}
-    </DropdownMenu>
+    </div>
   );
 }
 
@@ -157,6 +195,9 @@ const TreeNode = React.memo(function TreeNodeImpl({
 }) {
   const indent = { paddingLeft: 6 + depth * 16 };
   const isDragOver = dragState.overId === node.id;
+  const [menuOpen, setMenuOpen] = useState(false);
+  const rowWrapRef = useRef(null);
+  useClickOutside([rowWrapRef], () => setMenuOpen(false));
 
   const handleDragStart = (e) => {
     e.stopPropagation();
@@ -171,33 +212,48 @@ const TreeNode = React.memo(function TreeNodeImpl({
     const isBookmarked = bookmarks.has(node.id);
     const AssetIcon = ASSET_KIND_ICONS[node.kind] || null;
     return (
-      <div className={`tree-row ${isDragOver ? 'drag-over' : ''}`}>
-        <button
-          className={`tree-item tree-file ${currentIds.has(node.id) ? 'active' : ''}`}
-          style={indent}
-          draggable
-          onDragStart={handleDragStart}
-          onDragEnd={handleDragEnd}
-          onClick={(e) => (isAsset ? onOpenImage(node, e) : onOpenFile(node.id, e))}
-        >
-          {isBookmarked && <IconStarFilled className="bookmark-dot" size={11} />}
-          {AssetIcon && <AssetIcon className="tree-kind-icon" size={13} />}
-          <span className="tree-label">{isAsset ? node.name : node.name.replace(/\.[^.]+$/i, '')}</span>
-        </button>
-        <TreeItemMenu
-          isFolder={false}
-          isBookmarked={isBookmarked}
-          onToggleBookmark={() => onToggleBookmark(node.id)}
-          onRename={() => onRename(node)}
-          onDelete={() => onDelete(node)}
-        />
+      <div ref={rowWrapRef}>
+        <div className={`tree-row ${isDragOver ? 'drag-over' : ''}`}>
+          <button
+            className={`tree-item tree-file ${currentIds.has(node.id) ? 'active' : ''}`}
+            style={indent}
+            draggable
+            onDragStart={handleDragStart}
+            onDragEnd={handleDragEnd}
+            onClick={(e) => (isAsset ? onOpenImage(node, e) : onOpenFile(node.id, e))}
+          >
+            {isBookmarked && <IconStarFilled className="bookmark-dot" size={11} />}
+            {AssetIcon && <AssetIcon className="tree-kind-icon" size={13} />}
+            <span className="tree-label">{isAsset ? node.name : node.name.replace(/\.[^.]+$/i, '')}</span>
+          </button>
+          <button
+            className={`tree-menu-btn ${menuOpen ? 'active' : ''}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              setMenuOpen((v) => !v);
+            }}
+            aria-label="More actions"
+          >
+            <IconMoreVertical size={14} />
+          </button>
+        </div>
+        {menuOpen && (
+          <TreeItemMenuPanel
+            isFolder={false}
+            isBookmarked={isBookmarked}
+            onToggleBookmark={() => onToggleBookmark(node.id)}
+            onRename={() => onRename(node)}
+            onDelete={() => onDelete(node)}
+            onClose={() => setMenuOpen(false)}
+          />
+        )}
       </div>
     );
   }
 
   const isOpen = expanded.has(node.id);
   return (
-    <div>
+    <div ref={rowWrapRef}>
       <div
         className={`tree-row ${isDragOver ? 'drag-over' : ''}`}
         onDragOver={(e) => {
@@ -226,7 +282,19 @@ const TreeNode = React.memo(function TreeNodeImpl({
           <span className="tree-caret">{isOpen ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}</span>
           <span className="tree-label">{node.name}</span>
         </button>
-        <TreeItemMenu
+        <button
+          className={`tree-menu-btn ${menuOpen ? 'active' : ''}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            setMenuOpen((v) => !v);
+          }}
+          aria-label="More actions"
+        >
+          <IconMoreVertical size={14} />
+        </button>
+      </div>
+      {menuOpen && (
+        <TreeItemMenuPanel
           isFolder
           canUpload={canUpload}
           onNewNote={() => onCreateNote(node.id)}
@@ -236,8 +304,9 @@ const TreeNode = React.memo(function TreeNodeImpl({
           onUploadFiles={(files) => onUploadFiles(node.id, files)}
           onRename={() => onRename(node)}
           onDelete={() => onDelete(node)}
+          onClose={() => setMenuOpen(false)}
         />
-      </div>
+      )}
       {isOpen &&
         node.children.map((child) => (
           <TreeNode
@@ -303,6 +372,9 @@ const ExplorerPanel = React.memo(function ExplorerPanel({
 }) {
   const [expanded, setExpanded] = useState(new Set());
   const [dragState, setDragState] = useState({ draggingId: null, overId: null });
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const headerWrapRef = useRef(null);
+  useClickOutside([headerWrapRef], () => setAddMenuOpen(false));
   const toggleExpand = (id) =>
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -314,24 +386,30 @@ const ExplorerPanel = React.memo(function ExplorerPanel({
 
   return (
     <div className="side-panel">
-      <div className="side-panel-header">
-        <span className="side-panel-title">Files</span>
-        <div className="side-panel-actions">
-          <AddMenu
+      <div ref={headerWrapRef}>
+        <div className="side-panel-header">
+          <span className="side-panel-title">Files</span>
+          <div className="side-panel-actions">
+            <AddMenuButton active={addMenuOpen} onToggle={() => setAddMenuOpen((v) => !v)} />
+            <button className="icon-btn" title="Expand all" onClick={expandAll}>
+              <IconChevronDown size={15} />
+            </button>
+            <button className="icon-btn" title="Collapse all" onClick={collapseAll}>
+              <IconChevronRight size={15} />
+            </button>
+          </div>
+        </div>
+        {addMenuOpen && (
+          <AddMenuPanel
             onNewNote={() => onCreateNote(vaultRootId)}
             onNewDatabase={() => onCreateDatabase(vaultRootId)}
             onNewCanvas={() => onCreateCanvas(vaultRootId)}
             onNewFolder={() => onCreateFolder(vaultRootId)}
             onUploadFiles={(files) => onUploadFiles(vaultRootId, files)}
             canUpload={canUpload}
+            onClose={() => setAddMenuOpen(false)}
           />
-          <button className="icon-btn" title="Expand all" onClick={expandAll}>
-            <IconChevronDown size={15} />
-          </button>
-          <button className="icon-btn" title="Collapse all" onClick={collapseAll}>
-            <IconChevronRight size={15} />
-          </button>
-        </div>
+        )}
       </div>
       <div
         className="side-panel-body file-tree"
@@ -381,4 +459,4 @@ const ExplorerPanel = React.memo(function ExplorerPanel({
   );
 });
 
-export { DND_MIME, AddMenu, TreeItemMenu, TreeNode, collectAllFolderIds, ExplorerPanel };
+export { DND_MIME, AddMenuButton, AddMenuPanel, TreeItemMenuPanel, TreeNode, collectAllFolderIds, ExplorerPanel };

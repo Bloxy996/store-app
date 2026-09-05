@@ -1,40 +1,15 @@
 /* ---------------------------------------------------------------------------
-   Dropdown menus — the merged Add button, per-row "more" menu, tab menu,
-   search options
+   Shared menu-item/search-options styles. The `DropdownMenu` component
+   (portaled floating menu) that originally owned this file was removed —
+   every one of its 4 usages (the sidebar "add" menu, each file-tree row's
+   "..." menu, the tab context menu, the search options button) has been
+   converted to an inline panel (see CLAUDE.md's popup→inline changelog
+   sections). `.menu-item`/`.menu-item.danger` and the `.search-options-*`
+   rules below are still genuinely shared across those inline panels and
+   `SearchPanel`, so this file stays (kept at the same path/import position
+   in `styles/index.css` so cascade order is undisturbed) as a small shared
+   stylesheet rather than being deleted or duplicated per feature.
 --------------------------------------------------------------------------- */
-.dropdown-wrap {
-  position: relative;
-  display: inline-flex;
-}
-.dropdown-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  z-index: 80;
-  background: #232323;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-  min-width: 190px;
-  padding: 4px;
-  display: flex;
-  flex-direction: column;
-}
-.dropdown-menu.align-left {
-  left: 0;
-}
-.dropdown-menu.align-right {
-  right: 0;
-}
-/* Portal-rendered menus are positioned in JS via inline top/left/right
-   (fixed to the viewport, computed from the trigger's live bounding rect),
-   so they're never clipped by a scrolling ancestor like the tab bar. z-index
-   sits above the mobile drawer (120) but below modals (200+), since a menu
-   shouldn't outlive a modal opening over it. */
-.dropdown-menu.portal {
-  position: fixed;
-  z-index: 150;
-}
-
 .menu-item {
   display: flex;
   align-items: center;
@@ -56,16 +31,7 @@
   flex-shrink: 0;
   opacity: 0.85;
 }
-.menu-divider {
-  height: 1px;
-  background: var(--border);
-  margin: 4px 2px;
-}
 
-.search-options-menu {
-  padding: 6px 4px;
-  min-width: 230px;
-}
 .search-options-title {
   display: flex;
   align-items: center;

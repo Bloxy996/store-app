@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
-import { DropdownMenu } from '../../components/DropdownMenu.jsx';
 import { IconChevronDown, IconChevronRight, IconInfo, IconLoader, IconSearch, IconSliders, IconX } from '../../components/icons.jsx';
+import { useClickOutside } from '../../hooks/useClickOutside.js';
 import { runVaultSearch } from '../../lib/search.js';
 
 
@@ -24,8 +24,11 @@ const SearchPanel = React.memo(function SearchPanel({ query, setQuery, filesMeta
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [collapsed, setCollapsed] = useState(new Set());
   const [showHelp, setShowHelp] = useState(false);
+  const [showOptions, setShowOptions] = useState(false);
   const [sortDesc, setSortDesc] = useState(false);
   const inputRef = useRef(null);
+  const optionsWrapRef = useRef(null);
+  useClickOutside([optionsWrapRef], () => setShowOptions(false));
 
   // The heavy work here is runVaultSearch scanning every note body in the
   // vault — expensive enough on a large vault that running it on every
@@ -64,36 +67,38 @@ const SearchPanel = React.memo(function SearchPanel({ query, setQuery, filesMeta
 
   return (
     <div className="side-panel search-panel">
-      <div className="search-bar">
-        <IconSearch className="search-bar-icon" size={15} />
-        <input
-          ref={inputRef}
-          className="search-bar-input"
-          placeholder="Search…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
-        {query && (
-          <button className="search-bar-clear" onClick={() => setQuery('')} aria-label="Clear search">
-            <IconX size={13} />
-          </button>
-        )}
-        <button
-          className={`search-bar-case ${caseSensitive ? 'active' : ''}`}
-          onClick={() => setCaseSensitive((v) => !v)}
-          title="Match case"
-        >
-          Aa
-        </button>
-        <DropdownMenu
-          align="right"
-          trigger={(toggle) => (
-            <button className="icon-btn" onClick={toggle} title="Search options">
-              <IconSliders size={15} />
+      <div className="search-bar-wrap" ref={optionsWrapRef}>
+        <div className="search-bar">
+          <IconSearch className="search-bar-icon" size={15} />
+          <input
+            ref={inputRef}
+            className="search-bar-input"
+            placeholder="Search…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          {query && (
+            <button className="search-bar-clear" onClick={() => setQuery('')} aria-label="Clear search">
+              <IconX size={13} />
             </button>
           )}
-        >
-          <div className="search-options-menu">
+          <button
+            className={`search-bar-case ${caseSensitive ? 'active' : ''}`}
+            onClick={() => setCaseSensitive((v) => !v)}
+            title="Match case"
+          >
+            Aa
+          </button>
+          <button
+            className={`icon-btn ${showOptions ? 'active' : ''}`}
+            onClick={() => setShowOptions((v) => !v)}
+            title="Search options"
+          >
+            <IconSliders size={15} />
+          </button>
+        </div>
+        {showOptions && (
+          <div className="search-options-menu-inline">
             <div className="search-options-title">
               Search options
               <IconInfo size={13} onClick={() => setShowHelp((v) => !v)} />
@@ -105,7 +110,7 @@ const SearchPanel = React.memo(function SearchPanel({ query, setQuery, filesMeta
               </div>
             ))}
           </div>
-        </DropdownMenu>
+        )}
       </div>
 
       {indexing.building && (

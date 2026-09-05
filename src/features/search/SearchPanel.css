@@ -48,6 +48,19 @@
   color: var(--accent-hover);
   background: var(--accent-soft);
 }
+.search-bar-wrap {
+  margin: 0 10px 8px;
+}
+.search-bar-wrap .search-bar {
+  margin: 6px 0 0;
+}
+.search-options-menu-inline {
+  margin-top: 4px;
+  padding: 6px 4px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
 
 .indexing-banner {
   display: flex;

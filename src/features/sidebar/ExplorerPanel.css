@@ -89,6 +89,34 @@
   background: var(--bg-3);
   color: var(--text-normal);
 }
+.tree-menu-btn.active {
+  opacity: 1;
+  background: var(--bg-3);
+  color: var(--text-normal);
+}
+.tree-menu-panel-inline {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+  padding: 4px 8px 4px 12px;
+  background: var(--bg-1);
+  border-radius: var(--radius-sm);
+  margin: 1px 0 3px;
+}
+.tree-menu-panel-divider {
+  width: 1px;
+  height: 16px;
+  background: var(--border);
+  margin: 0 4px;
+}
+.add-menu-panel-inline {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+  padding: 6px 12px 8px;
+}
 
 .root-drop-zone {
   height: 36px;

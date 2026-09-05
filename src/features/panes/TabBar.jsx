@@ -1,7 +1,8 @@
 import { history } from '@codemirror/commands';
+import { useRef, useState } from 'react';
 
-import { DropdownMenu, MenuDivider, MenuItem } from '../../components/DropdownMenu.jsx';
 import { IconArrowLeft, IconArrowRight, IconEdit, IconEye, IconMoreVertical, IconPanelLeft, IconPlus, IconSplitHorizontal, IconSplitVertical, IconStar, IconStarFilled, IconX } from '../../components/icons.jsx';
+import { useClickOutside } from '../../hooks/useClickOutside.js';
 import { opensInEditorPane } from '../../lib/vaultConfig.js';
 
 
@@ -10,75 +11,116 @@ import { opensInEditorPane } from '../../lib/vaultConfig.js';
 // split controls) — replaces the old global Split/Edit/Preview buttons.
 // Each pane now toggles Edit <-> Preview independently, and "split" means
 // an actual second pane rather than a side-by-side textarea/preview.
+//
+// The per-tab "..." menu used to be a `DropdownMenu` (portaled, fixed-
+// positioned under the tab). `.tab-bar-scroll` scrolls horizontally
+// (`overflow-x: auto`) exactly like `.db-view-tabs` did — a panel anchored
+// under one tab would clip as that tab scrolled toward the row's edge, the
+// same hazard CLAUDE.md documents for the database view tabs. Same fix:
+// one shared inline panel rendered below the whole `.tab-bar` row (outside
+// `.tab-bar-scroll`), not portaled. Only one tab's menu can be open at a
+// time, tracked here as `menuTabId`.
 // ---------------------------------------------------------------------------
 function TabBar({ leaf, filesById, buffers, isActivePane, onSelectTab, onCloseTab, onNewTab, onSplitTab, onCloseOthers, onCloseAll }) {
+  const [menuTabId, setMenuTabId] = useState(null);
+  const wrapRef = useRef(null);
+  useClickOutside([wrapRef], () => setMenuTabId(null));
+
+  const menuTab = menuTabId ? leaf.tabs.find((t) => t.id === menuTabId) : null;
+  const menuFile = menuTab ? filesById.get(menuTab.fileId) : null;
+
   return (
-    <div className={`tab-bar ${isActivePane ? '' : 'inactive'}`}>
-      <div className="tab-bar-scroll">
-        {leaf.tabs.map((tab) => {
-          const file = filesById.get(tab.fileId);
-          const buf = buffers[tab.fileId];
-          const label = file ? file.name.replace(/\.[^.]+$/i, '') : 'Untitled';
-          return (
-            <div
-              key={tab.id}
-              className={`tab ${tab.id === leaf.activeTabId ? 'active' : ''}`}
-              onClick={() => onSelectTab(tab.id)}
-              onMouseDown={(e) => {
-                if (e.button === 1) {
-                  e.preventDefault();
-                  onCloseTab(tab.id);
-                }
-              }}
-            >
-              <span className="tab-label">{label}</span>
-              {buf?.dirty && <span className="tab-dirty-dot" />}
-              <button
-                className="tab-close"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onCloseTab(tab.id);
+    <div ref={wrapRef}>
+      <div className={`tab-bar ${isActivePane ? '' : 'inactive'}`}>
+        <div className="tab-bar-scroll">
+          {leaf.tabs.map((tab) => {
+            const file = filesById.get(tab.fileId);
+            const buf = buffers[tab.fileId];
+            const label = file ? file.name.replace(/\.[^.]+$/i, '') : 'Untitled';
+            return (
+              <div
+                key={tab.id}
+                className={`tab ${tab.id === leaf.activeTabId ? 'active' : ''}`}
+                onClick={() => onSelectTab(tab.id)}
+                onMouseDown={(e) => {
+                  if (e.button === 1) {
+                    e.preventDefault();
+                    onCloseTab(tab.id);
+                  }
                 }}
-                aria-label="Close tab"
               >
-                <IconX size={12} />
-              </button>
-              <DropdownMenu
-                className="tab-menu-wrap"
-                trigger={(toggle) => (
-                  <button
-                    className="tab-menu-btn"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toggle();
-                    }}
-                    aria-label="Tab options"
-                  >
-                    <IconMoreVertical size={12} />
-                  </button>
-                )}
-              >
-                <MenuItem icon={<IconSplitVertical size={15} />} onClick={() => onSplitTab(tab.id, 'row')}>
-                  Split right
-                </MenuItem>
-                <MenuItem icon={<IconSplitHorizontal size={15} />} onClick={() => onSplitTab(tab.id, 'column')}>
-                  Split down
-                </MenuItem>
-                <MenuDivider />
-                <MenuItem icon={<IconX size={15} />} onClick={() => onCloseOthers(tab.id)}>
-                  Close others
-                </MenuItem>
-                <MenuItem icon={<IconX size={15} />} onClick={onCloseAll}>
-                  Close all
-                </MenuItem>
-              </DropdownMenu>
-            </div>
-          );
-        })}
+                <span className="tab-label">{label}</span>
+                {buf?.dirty && <span className="tab-dirty-dot" />}
+                <button
+                  className="tab-close"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onCloseTab(tab.id);
+                  }}
+                  aria-label="Close tab"
+                >
+                  <IconX size={12} />
+                </button>
+                <button
+                  className={`tab-menu-btn ${menuTabId === tab.id ? 'active' : ''}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMenuTabId((v) => (v === tab.id ? null : tab.id));
+                  }}
+                  aria-label="Tab options"
+                >
+                  <IconMoreVertical size={12} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+        <button className="tab-new" onClick={onNewTab} title="New tab" aria-label="New tab">
+          <IconPlus size={14} />
+        </button>
       </div>
-      <button className="tab-new" onClick={onNewTab} title="New tab" aria-label="New tab">
-        <IconPlus size={14} />
-      </button>
+      {menuTab && (
+        <div className="tab-menu-panel-inline">
+          <span className="tab-menu-panel-label">{menuFile ? menuFile.name.replace(/\.[^.]+$/i, '') : 'Untitled'}</span>
+          <button
+            className="tab-menu-panel-item"
+            onClick={() => {
+              onSplitTab(menuTab.id, 'row');
+              setMenuTabId(null);
+            }}
+          >
+            <IconSplitVertical size={14} /> Split right
+          </button>
+          <button
+            className="tab-menu-panel-item"
+            onClick={() => {
+              onSplitTab(menuTab.id, 'column');
+              setMenuTabId(null);
+            }}
+          >
+            <IconSplitHorizontal size={14} /> Split down
+          </button>
+          <span className="tab-menu-panel-divider" />
+          <button
+            className="tab-menu-panel-item"
+            onClick={() => {
+              onCloseOthers(menuTab.id);
+              setMenuTabId(null);
+            }}
+          >
+            <IconX size={14} /> Close others
+          </button>
+          <button
+            className="tab-menu-panel-item"
+            onClick={() => {
+              onCloseAll();
+              setMenuTabId(null);
+            }}
+          >
+            <IconX size={14} /> Close all
+          </button>
+        </div>
+      )}
     </div>
   );
 }

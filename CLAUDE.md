@@ -131,13 +131,23 @@ treatment: one new file in `lib/`, imported everywhere it's needed, not
 copy-pasted.
 
 ### 3.5 Shared UI, not per-feature styling
-`components/` (`DropdownMenu`, `icons.jsx`'s 60+ `Icon*` set, `StatusBar`,
+`components/` (`icons.jsx`'s 60+ `Icon*` set, `StatusBar`,
 `PropertiesPanel`, `ResizeHandle`, `LinkEmbeds`, `InlineMentions`) are the
 building blocks. **All icons live in `components/icons.jsx`** — don't
 inline a new `<svg>` in a feature file; add it there and import it, so
-there's one place to keep stroke-width/size/viewBox consistent. Same for
-dropdown menus: extend `DropdownMenu`/`MenuItem` rather than hand-rolling a
-new floating menu.
+there's one place to keep stroke-width/size/viewBox consistent. For a
+floating/toggleable menu, don't hand-roll a new one-off implementation:
+follow the inline-panel pattern established across the popup→inline
+changelog (sections 15–17) — a local `open`/`menuId` boolean plus a plain
+block rendered in normal document flow, closed via `useClickOutside` — or,
+if the trigger's scroll position is genuinely unpredictable (arbitrary row
+in an `overflow: auto` container), `DbPopover` (`features/database/
+DbCells.jsx`) is the one portal-based escape hatch left in the app.
+`components/DropdownMenu.css` still holds the shared `.menu-item`/
+`.search-options-*` classes those inline panels use, but the
+`DropdownMenu` *component* was deleted once its last usage was converted
+(section 17) — don't resurrect it for a new case without a concrete reason
+inline panels/`DbPopover` don't cover.
 
 ### 3.6 Kind-aware, not kind-forked
 A note pane's file can be a plain markdown note, a `.base` database, or a
@@ -257,7 +267,7 @@ src/
 
   components/                       — Generic, reusable View pieces (3.5). No feature-specific logic.
     icons.jsx                       — every <Icon*/> in the app, plus Svg wrapper and ASSET_KIND_ICONS
-    DropdownMenu.jsx / .css         — the shared floating menu (+ MenuItem, MenuDivider)
+    DropdownMenu.css                — shared .menu-item/.search-options-* styles (component deleted, section 17)
     ActivityBar.jsx / .css          — left-most icon ribbon (switch sidebar panel)
     StatusBar.jsx / .css            — footer: word count, sync status, selection info
     PropertiesPanel.jsx / .css      — frontmatter property editor
@@ -869,3 +879,150 @@ mechanical change):**
   specifically is already slated to be replaced outright by the graph
   revamp (item 2), so converting its current modal shell first would be
   wasted work.
+
+---
+
+## 16. Changelog — popup→inline pass 2: tab context menu
+
+Second slice of item 1 (section 13/15). Converts the one usage section 15
+explicitly predicted would need the same fix: **`TabBar.jsx`'s per-tab
+"..." menu**. It was a `DropdownMenu` (portaled, fixed-positioned under the
+tab's `IconMoreVertical` trigger). `.tab-bar-scroll` scrolls horizontally
+(`overflow-x: auto`) exactly like `.db-view-tabs` did, so a menu anchored
+under one tab clipped as that tab scrolled toward the row's edge — same
+hazard, same fix: one shared inline panel (`.tab-menu-panel-inline`)
+rendered below the whole `.tab-bar` row, outside `.tab-bar-scroll`, never
+portaled. `TabBar` now owns `menuTabId` (which tab's menu is open, or
+`null`) instead of each tab having its own `DropdownMenu` instance;
+`useClickOutside` on a wrapper ref around both the tab row and the panel
+closes it. `TabBar.jsx` no longer imports `DropdownMenu` — 3 of its 4
+usages remain (`ExplorerPanel` x2, `SearchPanel`), each still deferred for
+the reasons already given in section 15.
+
+**Not done in this pass (unchanged from section 15's remaining list):**
+`ExplorerPanel`'s two context menus, `SearchPanel`'s options menu, the
+`DbPopover` cell-level popovers, and every full-page modal. Also
+untouched: the graph-editor revamp and database timeline/calendar/chart
+views (items 2 and 3 below) — each still its own pass.
+
+---
+
+## 17. Changelog — popup→inline pass 3: search options, explorer add-menu, tree row menus
+
+Third slice of item 1. Converts every remaining `DropdownMenu` usage, which
+means **the `DropdownMenu` component itself has now been deleted** —
+`components/DropdownMenu.jsx` is gone. Section 3.5's advice to "extend
+`DropdownMenu`/`MenuItem` rather than hand-rolling a new floating menu" no
+longer applies to a portal component that doesn't exist; for a new
+"floating" menu going forward, follow one of the two inline patterns below
+instead (or `DbPopover` in `DbCells.jsx`, if you genuinely need a portal —
+see section 18's `DbPopover` note for when that's still justified).
+`components/DropdownMenu.css` **stays** (same import position in
+`styles/index.css`, cascade order undisturbed) but now only holds the
+still-shared `.menu-item`/`.menu-item.danger`/`.search-options-*` rules
+that the new inline panels below and `SearchPanel` still use — the
+`.dropdown-wrap`/`.dropdown-menu`/`.menu-divider` rules that only the
+deleted component used were removed with it.
+
+**Converted:**
+- **`SearchPanel.jsx`**'s search-options button (`IconSliders`) now toggles
+  a local `showOptions` boolean and renders `.search-options-menu-inline`
+  directly below `.search-bar` — genuinely in flow, `useClickOutside` on a
+  wrapper around both. Same `SEARCH_HELP` content as before, unchanged.
+- **`ExplorerPanel.jsx`**'s header "+" add menu: split into `AddMenuButton`
+  (just the trigger, state now owned by `ExplorerPanel`) and `AddMenuPanel`
+  (the actual options), with the panel rendered as a full-width block
+  **below the whole `.side-panel-header` row** — not tucked under the
+  button — matching the `DbViewPanel`/`TabBar`-menu-panel convention of
+  pushing content down rather than floating over it. `useClickOutside`
+  wraps the header + panel together.
+- **`ExplorerPanel.jsx`**'s per-row "..." menu (`TreeItemMenu` before this
+  pass): each `TreeNode` now owns its own local `menuOpen` boolean and
+  renders `TreeItemMenuPanel` as a plain sibling **immediately below that
+  row**, not a shared/global panel. This was a deliberate departure from
+  the "one shared panel" pattern used everywhere else in this changelog:
+  a file tree can have hundreds of rows at arbitrary scroll offsets, so
+  there's no single fixed place to anchor one shared panel without either
+  floating (a popup again) or fighting the tree's scroll position. A
+  purely local per-row toggle sidesteps both — it's a harmless variation
+  on the same "folders show children below them" flow the tree already
+  has. **One caveat if you touch `TreeNode` again:** the panel is rendered
+  as a sibling *outside* `.tree-row`, never a child of it — `.tree-row` has
+  `content-visibility: auto` + `contain-intrinsic-size: 0 28px` for
+  large-vault scroll performance (section 4), and stuffing a
+  variable-height panel inside that row would fight the browser's cached
+  intrinsic size for off-screen rows. Keep it a sibling.
+
+**Result:** all 4 `DropdownMenu` usages named across sections 13/15/16 are
+now converted; item 1 from section 13's original deferred list is
+**functionally complete for the "small floating menu" category**. What's
+still open, unchanged from section 16: `DbCells.jsx`'s `DbPopover`-based
+cell popovers (attachment picker, dense select/multi-select — a different,
+harder layout problem, arbitrary scroll position inside `.db-table-scroll`)
+and every full-page modal (`PaletteModal`, `GraphViewModal`,
+`DbRowDetailModal`, `DbManageColumnsModal`, `OnboardingFlow`,
+`CanvasFilePickerModal`, the image viewer) — the latter group was always
+scoped as its own kind of redesign (slide-over panel, not an inline
+expand), not a mechanical popup-to-inline swap, and `GraphViewModal`
+specifically is slated for outright replacement by item 2 below rather
+than converted in place.
+
+---
+
+## 18. Scoping notes — graph revamp & database chart/timeline/calendar views
+
+Not implemented yet; recorded here so the next pass starts from a plan
+instead of a blank slate. Both are sizeable (multi-file, new interaction
+design) and were intentionally not rushed alongside the popup→inline slice
+above.
+
+**Item 2 — Obsidian-style graph revamp** (`features/graph/`). Obsidian's
+actual graph view (both "local" and full "Graph view") is built from:
+a force simulation with user-adjustable link distance/strength, central
+"repel" force, and gravity toward center; a **Groups** panel that colors
+nodes matching a search query; **Filters** for tags/attachments/orphans and
+a "existing files only" toggle; per-node sizing by link count; and — the
+part the user specifically asked about — hover-highlight of a node's
+immediate neighbors while dimming the rest. Concretely, this pass should:
+1. Replace `GraphViewModal.jsx`'s modal shell with a real pane/tab: extend
+   `EditorContent.jsx`'s `file.kind` switch (section 3.6) with a virtual
+   `'graph'` kind, and give `App.jsx`/`PaneNode.jsx` a way to open a graph
+   tab that isn't backed by a Drive file id (a synthetic `{ kind: 'graph' }`
+   pseudo-file, matching how `TabBar`/`Breadcrumb` already branch on
+   `opensInEditorPane`).
+2. Rework `useForceGraph.js` to expose tunable force params (not hardcoded
+   constants) and a `localNodeId` mode that BFS-limits the rendered set to
+   N hops from one note, mirroring Obsidian's local-graph-per-note view.
+3. New `GraphControls` panel (inline sidebar within the graph pane, not a
+   popup — consistent with item 1's direction): filters, groups
+   (tag/folder → color), and force sliders.
+4. Node styling by tag/folder color and radius-by-degree; edge styling
+   stays simple (Obsidian's are unstyled lines).
+Keep `useForceGraph.js`'s simulation itself framework-agnostic (pure
+function of nodes/edges/params → positions) so the pane and any future
+embed (e.g. a note's local-graph inline block) can share it.
+
+**Item 3 — Timeline / calendar / chart views for `.base` databases**
+(`features/database/`, alongside existing table/board/gallery). Notion's
+versions:
+- **Calendar**: requires a date column (same "pick a required column"
+  pattern board already has for its select group-by column, see
+  `DB_VIEW_TYPE_ICONS`/`DbViewPanel`'s settings panel); renders a month
+  grid, each row's card placed on the day its date column falls on.
+- **Timeline**: a horizontal Gantt-style lane per row between a start and
+  end date column (two date-column requirement, not one) — this is the one
+  genuinely new layout primitive, nothing existing in `DbViews.jsx` is
+  close to it.
+- **Chart (bar/line/pie)**: needs a real aggregation step that doesn't
+  exist in `dbState.js` yet — group rows by one column, then
+  count/sum/average another numeric column. This should land as a new
+  pure function there (section 3.4: one source of truth), not computed
+  inline inside a chart component, so a future "chart block in a note"
+  feature could reuse it.
+Each of the three is a new entry in `DB_VIEW_TYPE_ICONS` and the add-view
+panel (now inline, section 15/16 — don't regress that to a popup), plus its
+own renderer file under `features/database/` once `DbViews.jsx` would
+otherwise cross the section 3.7 line. Do these one view type at a time,
+not all three in one pass — they don't share much beyond the date-column-
+requirement UI, and chart specifically depends on the new `dbState.js`
+aggregation helper landing first.
