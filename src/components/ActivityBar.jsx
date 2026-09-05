@@ -35,10 +35,10 @@ const ActivityBar = React.memo(function ActivityBar({ activeView, onSetView, onO
         <button className="activity-btn" onClick={onOpenCommandPalette} title="Command palette (⌘K)">
           <IconCommand size={18} />
         </button>
-        <button className="activity-btn" onClick={onSync} title="Sync vault" disabled={syncing}>
+        <button className="activity-btn" onClick={onSync} title="Sync store" disabled={syncing}>
           {syncing ? <IconLoader size={18} /> : <IconRefresh size={18} />}
         </button>
-        <button className="activity-btn" onClick={onChangeFolder} title={`Vault: ${folderName || ''} — change folder`}>
+        <button className="activity-btn" onClick={onChangeFolder} title={`store: ${folderName || ''} — change folder`}>
           <IconFolder size={18} />
         </button>
         <button className="activity-btn" onClick={onSignOut} title="Sign out">

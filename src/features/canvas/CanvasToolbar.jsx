@@ -8,7 +8,7 @@ function CanvasToolbar({ zoom, onZoomIn, onZoomOut, onZoomReset, onFitToContent,
         <button className="icon-btn" title="Add text card" onClick={onAddText}>
           <IconStickyNote size={15} />
         </button>
-        <button className="icon-btn" title="Embed a vault file" onClick={onAddFile}>
+        <button className="icon-btn" title="Embed a store file" onClick={onAddFile}>
           <IconFile size={15} />
         </button>
         <button className="icon-btn" title="Add web link card" onClick={onAddLink}>

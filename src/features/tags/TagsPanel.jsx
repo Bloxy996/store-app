@@ -26,7 +26,7 @@ const TagsPanel = React.memo(function TagsPanel({ filesMeta, getBody, onOpenTag,
       {indexing.building && (
         <div className="indexing-banner">
           <IconLoader size={13} />
-          Indexing vault… {indexing.progress.loaded}/{indexing.progress.total}
+          Indexing store… {indexing.progress.loaded}/{indexing.progress.total}
         </div>
       )}
       <div className="side-panel-body tag-list">

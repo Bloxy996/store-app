@@ -374,7 +374,7 @@ const ExplorerPanel = React.memo(function ExplorerPanel({
             setDragState={setDragState}
           />
         ))}
-        {tree.length === 0 && <p className="muted small empty-hint">Empty vault — use + to add a note.</p>}
+        {tree.length === 0 && <p className="muted small empty-hint">Empty store — use + to add a note.</p>}
         <div className={`root-drop-zone ${dragState.overId === vaultRootId ? 'drag-over' : ''}`} />
       </div>
     </div>

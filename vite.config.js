@@ -2,7 +2,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
-// Vault — Google Drive-backed markdown notebook.
+// store — Google Drive-backed file store.
 // PWA config enforces app-shell-only caching: Drive API traffic and note
 // content are explicitly excluded from the service worker's cache (NetworkOnly),
 // satisfying the 0MB permanent local note storage constraint.
@@ -24,9 +24,9 @@ export default defineConfig({
       injectRegister: 'auto',
       includeAssets: ['icon-192.png', 'icon-512.png', 'icon-512-maskable.png', 'apple-touch-icon.png'],
       manifest: {
-        name: 'Vault',
-        short_name: 'Vault',
-        description: 'A minimalist markdown notebook that reads and writes directly to your Google Drive. No local note storage.',
+        name: 'store',
+        short_name: 'store',
+        description: 'A minimalist file store that reads and writes directly to your Google Drive. Nothing kept locally.',
         theme_color: '#1a1a1e',
         background_color: '#1a1a1e',
         display: 'standalone',

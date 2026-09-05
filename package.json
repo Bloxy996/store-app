@@ -1,9 +1,9 @@
 {
-  "name": "vault-drive-pwa",
+  "name": "store",
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Obsidian-style markdown notebook that reads/writes .md files directly from Google Drive. Zero permanent local note storage.",
+  "description": "A minimalist file store that reads/writes directly to Google Drive. Nothing kept locally.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

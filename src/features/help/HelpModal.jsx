@@ -59,7 +59,7 @@ const HELP_FEATURES = [
   {
     title: 'Query engine',
     desc:
-      'A ```query (or ```dataview) fenced code block runs a small Dataview-style query over the vault and renders live, in both reading view and the editor. ' +
+      'A ```query (or ```dataview) fenced code block runs a small Dataview-style query over the store and renders live, in both reading view and the editor. ' +
       'Every note is a "page": its frontmatter properties, any inline `key:: value` fields in its body, plus a reserved file.* namespace (file.name, file.path, file.folder, file.link, file.tags, file.ctime, file.mtime). ' +
       'Start the block with TABLE [field, field2, …], LIST, or TASK, then add optional FROM/WHERE/SORT/LIMIT lines. ' +
       'FROM filters which notes to consider by #tag or "folder", combined with AND / OR / - (negation). ' +
@@ -71,13 +71,13 @@ const HELP_FEATURES = [
   { title: 'Reading vs. editing view', desc: 'Toggle with the eye icon in a note\'s pane header. Editing view keeps the raw markdown fully editable while still styling it — same fonts and sizes as reading view, just with the syntax characters dimmed instead of hidden.' },
   { title: 'Backlinks', desc: 'Every note tracks what links to it. Linked/unlinked mentions show at the bottom of reading view.' },
   { title: 'Search', desc: 'path:, file:, and tag: filter by location, filename, or tag (tag: also matches nested descendants). line:(a b) and section:(a b) require terms on the same line or under the same heading. [key] or [key:value] matches frontmatter. "exact phrase" for literal text; anything else is a plain term.' },
-  { title: 'Tags panel', desc: 'Every tag in the vault, nested tags shown as an indented tree with counts that roll up to their parent. Click any tag to search it.' },
+  { title: 'Tags panel', desc: 'Every tag in the store, nested tags shown as an indented tree with counts that roll up to their parent. Click any tag to search it.' },
   { title: 'Databases', desc: 'Notion-style structured tables stored as a .base file — table, board, and gallery views, with typed columns (text, select, multi-select, date, image, etc). Click a table column header to sort by it (ascending, then descending, then back to unsorted) for any sortable type.' },
   { title: 'Canvas', desc: 'An infinite, freeform board (.canvas file) for arranging notes, text cards, and images spatially and connecting them with arrows — pan by dragging the background, scroll/pinch to zoom, drag a card\'s edge to draw a connection to another card.' },
   { title: 'Bookmarks', desc: 'Star any note or file to pin it in the Bookmarks panel for quick access.' },
   { title: 'Command palette & quick switcher', desc: '⌘/Ctrl K for commands (new note, split pane, toggle sidebar, etc), ⌘/Ctrl O to jump straight to a note by name.' },
   { title: 'Images & files', desc: 'Open in their own tab just like notes — video/audio get inline players, other files get a download link — rather than a new browser tab.' },
-  { title: 'Graph view', desc: 'The network icon in the activity bar (or ⌘/Ctrl K → "Open graph view") opens a full map of every wikilink in the vault. Drag nodes, scroll to zoom, hover to see a note\'s connections, and click a node to jump straight to it. Toggle attachments and orphans on or off from the toolbar.' }
+  { title: 'Graph view', desc: 'The network icon in the activity bar (or ⌘/Ctrl K → "Open graph view") opens a full map of every wikilink in the store. Drag nodes, scroll to zoom, hover to see a note\'s connections, and click a node to jump straight to it. Toggle attachments and orphans on or off from the toolbar.' }
 ];
 
 

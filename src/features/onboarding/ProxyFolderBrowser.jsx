@@ -60,7 +60,7 @@ function ProxyFolderBrowser({ token, onPick, onCancel, variant = 'inline' }) {
 
   const content = (
     <>
-      {variant === 'modal' && <h3>Select vault folder</h3>}
+      {variant === 'modal' && <h3>Select store folder</h3>}
       <div className="breadcrumb">
         {stack.map((s, i) => (
           <span key={s.id}>

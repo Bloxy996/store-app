@@ -22,7 +22,7 @@ function CanvasFilePickerModal({ files, onPick, onClose }) {
             <IconX size={16} />
           </button>
         </div>
-        <input autoFocus className="canvas-file-picker-input" placeholder="Search vault files…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <input autoFocus className="canvas-file-picker-input" placeholder="Search store files…" value={q} onChange={(e) => setQ(e.target.value)} />
         <div className="canvas-file-picker-list">
           {filtered.map((f) => {
             const Icon = ASSET_KIND_ICONS[f.kind] || IconFile;

@@ -65,7 +65,7 @@ function QueryBlock({ raw, handlers, linkIndex }) {
     const progress = handlers?.vaultIndexProgress;
     return (
       <div className="query-block query-block-loading muted">
-        Indexing vault for queries{progress?.total ? ` — ${progress.loaded}/${progress.total}` : '…'}
+        Indexing store for queries{progress?.total ? ` — ${progress.loaded}/${progress.total}` : '…'}
       </div>
     );
   }

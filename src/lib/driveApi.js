@@ -396,7 +396,7 @@ async function openFolderPicker(token) {
     const builder = new window.google.picker.PickerBuilder()
       .setOAuthToken(token)
       .addView(view)
-      .setTitle('Select your vault folder')
+      .setTitle('Select your store folder')
       .setCallback((data) => {
         if (data.action === window.google.picker.Action.PICKED) {
           const doc = data.docs[0];

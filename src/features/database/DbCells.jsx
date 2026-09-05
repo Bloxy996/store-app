@@ -439,7 +439,7 @@ function DbMultiSelectCell({ value, onChange, column, onCreateOption, dense }) {
               </button>
             )}
             {options.length === 0 && !filter.trim() && (
-              <div className="muted small db-popover-empty">Type to create the vault's first tag here.</div>
+              <div className="muted small db-popover-empty">Type to create the store's first tag here.</div>
             )}
           </div>
         </div>

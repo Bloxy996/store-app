@@ -9,11 +9,11 @@ context, not suggestions to reconsider.
 
 ## 1. What this project is
 
-**Vault** — a markdown notebook that reads and writes `.md` (and `.base`
-database, `.canvas` board) files directly to and from the user's Google
-Drive. It is a client-only React SPA (no backend server, no database of its
-own) that runs entirely in the browser, packaged as an installable PWA and
-deployed as a static site on GitHub Pages.
+**store** (lowercase, always — see section 10) — a file store that reads and
+writes `.md` notes (and `.base` database, `.canvas` board) files directly to
+and from the user's Google Drive. It is a client-only React SPA (no backend
+server, no database of its own) that runs entirely in the browser, packaged
+as an installable PWA and deployed as a static site on GitHub Pages.
 
 The app was originally a single ~10,500-line `App.jsx` + ~4,300-line
 `App.css`. It has since been restructured into the module layout described
@@ -488,3 +488,43 @@ here since it's a separate, smaller piece (extend
 `wikilinkCompletion.js`'s wiki-match branch to detect a `#` in the
 already-typed target and switch its candidate pool to that database's row
 titles).
+
+
+---
+
+## 10. Rebrand — "store"
+
+The product name is **store**, lowercase everywhere — page title, PWA
+manifest `name`/`short_name`, `package.json` `name`, onboarding heading,
+and every UI string that named the product or the user's Drive folder as
+"Vault" (`Sync vault now` → `Sync store now`, `Empty vault…` →
+`Empty store…`, the Google Picker dialog title, etc.). The previous
+description leaned on "markdown notebook" / "note storage" language —
+per direct request, taglines (manifest description, `index.html` meta
+description, `package.json` description, the onboarding folder-pick
+copy) are now written generically as a file store, not scoped to notes
+specifically; the app still creates/edits notes, databases, and canvases
+exactly as before, only the marketing copy stopped calling that out as
+the whole identity.
+
+**Deliberately NOT renamed — internal identifiers, not branding:**
+`vaultConfig.js`, `useVaultSync`/`useVaultIndex`, `buildVaultTree`,
+`linkGraph.js`'s "vault" comments, the `vaultRootId`/`vault_proxy_url_draft`/
+`vault_access_token`/`vault_accent_color`/`vaultFolder` storage keys, the
+`application/x-vault-node`/`application/x-vault-db-row` internal DnD MIME
+strings, and `driveApi.js`'s `listVaultFiles` proxy action name (a wire
+value the Apps Script proxy backend matches on — renaming it would break
+every already-deployed proxy). None of these are user-visible; renaming
+them is a pure internal-naming refactor across ~15 files with no
+functional benefit and real regression risk (especially the storage keys,
+which would silently drop an existing user's saved folder/token/accent
+choice), so they were left alone. Extend this same rule going forward:
+new user-facing copy says "store"; new internal identifiers can keep
+using "vault" as an implementation word if that's the clearest name for
+what they do — it's not a rule to relitigate per file.
+
+**Not touched:** the actual icon artwork (`public/icon-*.png`,
+`apple-touch-icon.png`) and the GitHub repo's own name/URL — both are
+outside what a code change can do; regenerate the icons and rename the
+repo separately if the "V" mark or the `vault-drive-pwa` slug need to go
+too.

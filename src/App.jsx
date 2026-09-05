@@ -920,7 +920,7 @@ export default function App() {
           if (tab) toggleTabMode(activePaneId, tab.id);
         }
       },
-      { id: 'sync', label: 'Sync vault now', icon: <IconRefresh size={15} />, run: () => sync.syncNow() },
+      { id: 'sync', label: 'Sync store now', icon: <IconRefresh size={15} />, run: () => sync.syncNow() },
       {
         id: 'open-search',
         label: 'Open search',
@@ -959,7 +959,7 @@ export default function App() {
           setPaletteMode('switcher');
         }
       },
-      { id: 'change-folder', label: 'Change vault folder', icon: <IconFolder size={15} />, run: handlePickFolder },
+      { id: 'change-folder', label: 'Change store folder', icon: <IconFolder size={15} />, run: handlePickFolder },
       { id: 'sign-out', label: 'Sign out', icon: <IconLogOut size={15} />, run: signOut }
     ];
   }, [folder, handleCreateNoteIn, handleCreateDatabaseIn, handleCreateCanvasIn, handleCreateFolderIn, activePaneId, splitPane, paneTree, toggleTabMode, sync, handlePickFolder, signOut]);
@@ -1115,7 +1115,7 @@ export default function App() {
               <button className="icon-btn" title="Keyboard shortcuts" onClick={() => setHelpOpen(true)}>
                 <IconHelp size={15} />
               </button>
-              <button className="icon-btn" title="Change vault folder" onClick={handlePickFolder}>
+              <button className="icon-btn" title="Change store folder" onClick={handlePickFolder}>
                 <IconSettings size={15} />
               </button>
             </div>

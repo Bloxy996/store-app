@@ -111,7 +111,7 @@ const SearchPanel = React.memo(function SearchPanel({ query, setQuery, filesMeta
       {indexing.building && (
         <div className="indexing-banner">
           <IconLoader size={13} />
-          Indexing vault… {indexing.progress.loaded}/{indexing.progress.total}
+          Indexing store… {indexing.progress.loaded}/{indexing.progress.total}
         </div>
       )}
 
@@ -150,7 +150,7 @@ const SearchPanel = React.memo(function SearchPanel({ query, setQuery, filesMeta
         </>
       ) : (
         <p className="muted small empty-hint">
-          Type to search across your vault. Try <code>tag:</code>, <code>path:</code>, or plain text.
+          Type to search across your store. Try <code>tag:</code>, <code>path:</code>, or plain text.
         </p>
       )}
     </div>

@@ -11,7 +11,7 @@ function loadingStepProps(progress) {
   const pct = total > 0 ? Math.round((loaded / total) * 100) : null;
   const label =
     phase === 'opening'
-      ? 'Opening your vault…'
+      ? 'Opening your store…'
       : phase === 'listing-folders'
       ? 'Scanning folders…'
       : phase === 'listing-files'
@@ -20,7 +20,7 @@ function loadingStepProps(progress) {
       ? total > 0
         ? `Loading ${loaded} of ${total} notes…`
         : 'Loading notes…'
-      : 'Loading your vault…';
+      : 'Loading your store…';
   return { label, pct };
 }
 
@@ -51,7 +51,7 @@ function OnboardingFlow({
 
   return (
     <div className="center-screen">
-      <h1>Vault</h1>
+      <h1>store</h1>
 
       {step === 'signin' && (
         <>
@@ -88,7 +88,7 @@ function OnboardingFlow({
 
       {step === 'folder' && (
         <>
-          <p className="muted">Pick the Google Drive folder that holds (or will hold) your notes.</p>
+          <p className="muted">Pick the Google Drive folder that holds (or will hold) your files.</p>
           <button className="btn btn-neutral" onClick={onPickFolder}>
             Select Drive folder
           </button>
