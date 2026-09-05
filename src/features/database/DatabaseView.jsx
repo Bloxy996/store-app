@@ -371,6 +371,7 @@ function DatabaseView({ file, content, onChange, handlers, linkIndex, loading, i
           onCreateOption={addOptionAndSetValue}
           dbFile={file}
           handlers={handlers}
+          linkIndex={linkIndex}
           onManageColumns={() => setManagePropsOpen(true)}
         />
       )}

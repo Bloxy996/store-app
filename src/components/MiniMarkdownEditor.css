@@ -1,0 +1,47 @@
+/* MiniMarkdownEditor — embeds inside a db cell or canvas card. Reuses every
+   .cm-* decoration class from CodeMirrorEditor.css (buildInlinePreviewPlugin
+   is the same plugin, unmodified) but needs its own sizing: the full note
+   editor's .cm-editor-host rules assume a whole scrollable pane and clamp
+   padding out to 120px, which is wrong squeezed into a cell/card. These
+   selectors have the same specificity as the ones in CodeMirrorEditor.css
+   (two classes deep) so import order (this file loads after canvas.css in
+   styles/index.css) is what makes them win — don't reorder that import
+   above this file's without re-checking this still overrides correctly. */
+.cm-mini-editor {
+  height: 100%;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex: 1; /* only takes effect when a caller wraps this in `display: flex`
+              (see DbCells.jsx's multiline cell) so it can stretch/fill a
+              container whose own height comes from `min-height` rather
+              than a definite pixel value further up the tree — plain CSS
+              percentage-height resolution doesn't work against a
+              min-height-only parent, flexbox's does. No-op otherwise
+              (e.g. inside canvas.css's .canvas-text-editor, whose parent
+              chain already resolves to a definite pixel height). */
+  cursor: text;
+}
+.cm-mini-editor .cm-editor {
+  height: 100%;
+}
+.cm-mini-editor .cm-scroller {
+  padding: 0;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  color: var(--text-normal);
+  caret-color: var(--text-muted);
+}
+.cm-mini-editor .cm-content {
+  padding: 0;
+}
+.cm-mini-editor .cm-selectionBackground {
+  background: var(--accent-soft) !important;
+}
+.cm-mini-editor .cm-placeholder {
+  color: var(--text-faint);
+}
+.cm-mini-editor .cm-focused {
+  outline: none;
+}

@@ -2,9 +2,11 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { createPortal } from 'react-dom';
 
 import { IconCheck, IconEdit, IconImageMissing, IconLoader, IconPaperclip, IconPlus, IconUpload, IconX } from '../../components/icons.jsx';
+import { MiniMarkdownEditor } from '../../components/MiniMarkdownEditor.jsx';
 import { DB_COLUMN_TYPES } from './dbState.js';
 import { useClickOutside } from '../../hooks/useClickOutside.js';
 import { useDriveImageUrl } from '../../hooks/useDriveImageUrl.js';
+import { renderMarkdownBlocks } from '../../lib/markdownRender.jsx';
 
 
 // A dropdown-style popover, like DropdownMenu, but the panel does NOT close
@@ -99,7 +101,7 @@ function DbPopover({ trigger, children, align = 'left', width, inline = false })
 
 // --- Per-type cell value editors --------------------------------------------
 
-function DbTextCell({ value, onChange, multiline, dense }) {
+function DbTextCell({ value, onChange, multiline, dense, linkIndex, handlers }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value || '');
   const ref = useRef(null);
@@ -107,41 +109,36 @@ function DbTextCell({ value, onChange, multiline, dense }) {
     if (!editing) setDraft(value || '');
   }, [value, editing]);
   useEffect(() => {
-    if (editing) ref.current?.focus();
-  }, [editing]);
-  const commit = () => {
+    if (editing && !multiline) ref.current?.focus();
+  }, [editing, multiline]);
+  const commit = (text) => {
     setEditing(false);
-    if (draft !== (value || '')) onChange(draft || null);
+    if (text !== (value || '')) onChange(text || null);
   };
   if (editing) {
+    // Multiline cells get a real (mini) markdown editor — live
+    // coloring/formatting and [[wikilink]]/#tag autocomplete, same as
+    // editing a note, just scoped to this cell — instead of a plain
+    // <textarea>. Single-line cells (short text properties, row titles)
+    // stay a plain <input>: one line of plain text has nothing markdown
+    // formatting would add, and a full CM instance per cell would be
+    // wasted weight on every row of a table view.
     return multiline ? (
-      <textarea
-        ref={ref}
-        className="db-cell-input db-cell-textarea"
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape') {
-            setDraft(value || '');
-            setEditing(false);
-          }
-        }}
-        rows={dense ? 2 : 6}
-      />
+      <div className="db-cell-input db-cell-textarea" style={{ display: 'flex', minHeight: dense ? 56 : 140 }}>
+        <MiniMarkdownEditor value={draft} onCommit={commit} linkIndex={linkIndex} allTags={handlers?.allTags} placeholderText="Type markdown…" />
+      </div>
     ) : (
       <input
         ref={ref}
         className="db-cell-input"
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
+        onBlur={() => commit(draft)}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
           if (e.key === 'Enter') {
             e.preventDefault();
-            commit();
+            commit(draft);
           }
           if (e.key === 'Escape') {
             setDraft(value || '');
@@ -159,7 +156,7 @@ function DbTextCell({ value, onChange, multiline, dense }) {
         setEditing(true);
       }}
     >
-      {value || ''}
+      {multiline && value ? renderMarkdownBlocks(value, handlers || {}, linkIndex, 'dbcell') : value || ''}
     </div>
   );
 }
@@ -552,12 +549,12 @@ function DbAttachmentCell({ value, onChange, type, dbFile, handlers }) {
 // Single dispatcher used by both the dense table cell and the full-width
 // row-detail panel — same editing UI, just different container CSS (see
 // `dense`).
-function DbCell({ column, value, onChange, dbFile, handlers, dense, onCreateOption }) {
+function DbCell({ column, value, onChange, dbFile, handlers, dense, onCreateOption, linkIndex }) {
   switch (column.type) {
     case 'text':
       return <DbTextCell value={value} onChange={onChange} multiline={false} dense={dense} />;
     case 'text_multiline':
-      return <DbTextCell value={value} onChange={onChange} multiline dense={dense} />;
+      return <DbTextCell value={value} onChange={onChange} multiline dense={dense} linkIndex={linkIndex} handlers={handlers} />;
     case 'number_int':
       return <DbNumberCell value={value} onChange={onChange} integer />;
     case 'number_float':

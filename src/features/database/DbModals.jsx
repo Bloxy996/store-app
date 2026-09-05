@@ -37,6 +37,7 @@ function DbRowDetailModal({ row, columns, onClose, onChangeValue, onDelete, hand
                     onChange={(v) => onChangeValue(col.id, v)}
                     dbFile={dbFile}
                     handlers={handlers}
+                    linkIndex={linkIndex}
                     onCreateOption={(label) => onCreateOption(col.id, row.id, label, col.type === 'multi_select')}
                   />
                 </div>

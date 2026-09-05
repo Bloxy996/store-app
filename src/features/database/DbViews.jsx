@@ -47,7 +47,7 @@ function DbCardPropPreview({ column, value }) {
 // Column-header sort cycles unsorted -> ascending -> descending -> unsorted.
 // `view.sortColumnId`/`view.sortDir` persist to the .base file like any
 // other view setting, so the sort sticks around after reopening the vault.
-function DbTableView({ state, view, onSort, updateRowValue, addRow, deleteRow, onOpenRow, onCreateOption, dbFile, handlers, onManageColumns }) {
+function DbTableView({ state, view, onSort, updateRowValue, addRow, deleteRow, onOpenRow, onCreateOption, dbFile, handlers, linkIndex, onManageColumns }) {
   const sortCol = view.sortColumnId ? state.columns.find((c) => c.id === view.sortColumnId) : null;
   const rows = sortCol
     ? state.rows.slice().sort((a, b) => {
@@ -111,6 +111,7 @@ function DbTableView({ state, view, onSort, updateRowValue, addRow, deleteRow, o
                     onChange={(v) => updateRowValue(row.id, col.id, v)}
                     dbFile={dbFile}
                     handlers={handlers}
+                    linkIndex={linkIndex}
                     dense
                     onCreateOption={(label) => onCreateOption(col.id, row.id, label, col.type === 'multi_select')}
                   />

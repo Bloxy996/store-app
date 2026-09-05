@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 
 import { ImageEmbed } from '../../components/LinkEmbeds.jsx';
 import { IconFile, IconLink2 } from '../../components/icons.jsx';
+import { MiniMarkdownEditor } from '../../components/MiniMarkdownEditor.jsx';
 import { AudioEmbed, VideoEmbed } from '../assets/AssetPane.jsx';
 import { canvasEdgePath, canvasOppositeSide, canvasSideAnchor } from './canvasState.js';
 import { parseFrontmatter } from '../../lib/markdownParse.js';
@@ -165,22 +166,13 @@ const CanvasNode = React.memo(function CanvasNode({
           <div className="canvas-node-body" onPointerDown={(e) => onPointerDownBody(e, node)}>
             {node.type === 'text' &&
               (editing ? (
-                <textarea
-                  autoFocus
+                <MiniMarkdownEditor
                   className="canvas-text-editor"
-                  defaultValue={node.text || ''}
-                  placeholder="Type markdown…"
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onFocus={(e) => {
-                    const v = e.target.value;
-                    e.target.value = '';
-                    e.target.value = v;
-                  }}
-                  onBlur={(e) => onCommitEdit(node.id, e.target.value)}
-                  onKeyDown={(e) => {
-                    e.stopPropagation();
-                    if (e.key === 'Escape') e.target.blur();
-                  }}
+                  value={node.text || ''}
+                  placeholderText="Type markdown…"
+                  linkIndex={linkIndex}
+                  allTags={handlers.allTags}
+                  onCommit={(text) => onCommitEdit(node.id, text)}
                 />
               ) : (
                 <div className="canvas-text-render">

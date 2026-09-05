@@ -419,12 +419,10 @@ the code looks the way it does now, not just what changed.
 
 **Deliberately deferred (each is its own follow-up, not a partial job
 buried in this one):**
-- **Full markdown editing inside database cells and canvas cards**
-  (coloring/formatting/autocomplete "just like a note, but inside the
-  cell/card"). This means embedding a real CodeMirror instance per
-  multiline cell/card rather than a plain `<textarea>`/`contenteditable`
-  — a real architecture change to `DbCells.jsx` and `CanvasNode.jsx`, not
-  a styling tweak.
+- ~~**Full markdown editing inside database cells and canvas cards**~~ —
+  done for multiline cells and canvas text cards, see section 12. Single-
+  line text cells (row titles, short properties) deliberately stay plain
+  `<input>` — see that section for why.
 - **Site-wide popup → inline conversion.** Touches `DropdownMenu`,
   `PaletteModal`, `GraphViewModal`, the image viewer, `DbModals`,
   `OnboardingFlow`, and the canvas file picker — a UI-architecture
@@ -585,12 +583,84 @@ JS-level gesture disambiguation), which is real interaction-design work,
 not a one-line fix — worth its own pass.
 
 **Deliberately not done in this pass (unchanged from section 8):**
-- Canvas text cards still use a plain `<textarea>` for editing, not a
-  scoped markdown editor with coloring/autocomplete "just like a note, but
-  inside the card." Same underlying architecture change as full markdown
-  editing in database cells (embedding a real CodeMirror instance per
-  card/cell) — not attempted here, don't half-do it as a side effect of
-  the bug-fix pass above.
 - Site-wide popup → inline conversion, the graph-editor revamp, and
   timeline/calendar/chart database views: untouched, still each their own
-  pass — see section 8 for scope notes on each.
+  pass — see section 8 for scope notes on each. (Markdown-in-card editing
+  for canvas text nodes, listed as deferred here originally, is now done
+  — see section 12.)
+
+---
+
+## 12. Changelog — markdown editing inside db cells & canvas cards
+
+Second of the 5 items from section 8. New shared component:
+**`components/MiniMarkdownEditor.jsx`** (+ `.css`) — a small CodeMirror 6
+instance for editing markdown in place inside something that isn't a note
+pane. Deliberately not a variant of `CodeMirrorNoteEditor` (that one owns
+a whole pane's undo-history-per-file lifecycle and active-pane focus
+wiring this doesn't need); instead it directly reuses two pieces of the
+real note editor unmodified:
+- `buildInlinePreviewPlugin` (`features/editor/inlinePreviewPlugin.js`) —
+  already a pure function of the document with no note-pane-specific
+  context, so live coloring/formatting (headings, bold/italic/strike/
+  highlight, callouts, wikilinks, tags, tables, ...) works identically.
+- `wikilinkTagCompletionSource` — its `ctx` only needs 3 of the 5 getters
+  the full editor gives it (`getLinkIndex`/`getAllTags`; the other 2,
+  `getHandlers`/`getFoldState`, are unused by that source). **Intentional
+  gap:** `getPhantomRecords` isn't wired up (returns `null`), so
+  `[[wikilink]]` autocomplete here only suggests existing notes, not "new
+  note" phantom suggestions — `phantomRecords` isn't threaded down to
+  `DatabaseView`/`CanvasView` today and adding that plumbing wasn't worth
+  it for an autocomplete nicety; revisit if that gap is actually felt.
+- Commits only on blur/Escape, same as the `<textarea>`/`<input>` it
+  replaces everywhere — never per keystroke, so editing a cell/card
+  doesn't push a Drive save on every character (see section 3.1/4).
+- Reuses every `.cm-*` decoration class from `CodeMirrorEditor.css`
+  (`.cm-bold`, `.cm-heading-*`, `.cm-wikilink`, ...) unmodified — its own
+  `MiniMarkdownEditor.css` only overrides the note-editor's page-sized
+  padding/font to fit a small container, via the same class-specificity +
+  import-order trick `CodeMirrorEditor.css` itself relies on. **If you
+  reorder `styles/index.css`'s imports, keep this one after
+  `canvas.css`** or its overrides stop winning.
+- Not a manually-declared lazy chunk — it doesn't need to be. It's only
+  ever imported from `CanvasNode.jsx` and `DbCells.jsx`, both already
+  inside the lazy `CanvasView`/`DatabaseView` chunks (section 4), so Vite
+  extracts it into its own small shared chunk automatically (verified:
+  `dist/assets/MiniMarkdownEditor-*.js`, ~1.3KB, separate from both).
+
+**Wired up:**
+- `CanvasNode.jsx`: a text card's editing mode now renders
+  `MiniMarkdownEditor` instead of a plain `<textarea>`, passing
+  `handlers.allTags` and the pane's `linkIndex` straight through (both
+  already props on `CanvasNode`, no new plumbing needed there).
+- `DbCells.jsx`'s `DbTextCell`: the `multiline` case (`text_multiline`
+  columns) now renders `MiniMarkdownEditor` in edit mode, and
+  `renderMarkdownBlocks` (not raw text) in display mode, so a multiline
+  cell reads as formatted markdown when you're not actively editing it,
+  matching a note's reading/editing split. **`multiline={false}` (the
+  single-line `text` column type, used for row titles and short
+  properties) intentionally stays a plain `<input>`, unchanged** — one
+  line of plain text has nothing markdown formatting would add, a full CM
+  instance per cell would be wasted weight on every row of a table view,
+  and row titles (`rowTitle()` in `DatabaseView.jsx`) are matched/rendered
+  as plain strings elsewhere (wikilink row-targets, board/gallery card
+  titles) — turning them into markdown would ripple well past this pass.
+- `linkIndex` is now threaded `DatabaseView` → `DbTableView` → `DbCell`
+  (it already reached `DbRowDetailModal`, just needed one more hop to
+  `DbCell` there too). `allTags` needed no new plumbing — it was already
+  riding along inside `handlers` (`handlers.allTags`, set in `App.jsx`)
+  everywhere `DbCell`/`CanvasNode` are called.
+
+**Not done / deliberately left:**
+- Board and gallery database views don't render `text_multiline` cells at
+  all today (`DbCardPropPreview` only handles select/multi_select/date) —
+  nothing to change there, noted so a future pass doesn't assume a gap
+  exists.
+- `[[wikilink]]` autocomplete's phantom/"create new" suggestions (see the
+  `getPhantomRecords` gap above).
+- No toolbar/formatting buttons were added — same as the main note editor,
+  formatting is typed markdown syntax, not a rich-text toolbar. Don't add
+  one here without adding it to the real note editor first (section 3.4:
+  one source of truth for how markdown gets authored in this app). (Markdown-in-card editing
+  for canvas text nodes, listed as deferred here originally, is now done
+  — see section 12.)

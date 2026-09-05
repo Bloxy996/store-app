@@ -28,3 +28,4 @@
 @import 'responsive.css';
 @import '../features/database/database.css';
 @import '../features/canvas/canvas.css';
+@import '../components/MiniMarkdownEditor.css';
