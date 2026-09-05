@@ -4,6 +4,7 @@ import { history } from '@codemirror/commands';
 import { ActivityBar } from './components/ActivityBar.jsx';
 import { ResizeHandle } from './components/ResizeHandle.jsx';
 import { StatusBar } from './components/StatusBar.jsx';
+import { useAppUpdate } from './hooks/useAppUpdate.js';
 import { IconCanvasKind, IconDatabase, IconEye, IconFilePlus, IconFolder, IconFolderPlus, IconGraph, IconHelp, IconLogOut, IconPalette, IconPanelLeft, IconRefresh, IconSearch, IconSettings, IconSplitHorizontal, IconSplitVertical, IconStar, IconTag } from './components/icons.jsx';
 import { AccentColorPicker } from './features/accent/AccentColorPicker.jsx';
 import { useAccentColor } from './features/accent/accentColor.js';
@@ -73,6 +74,7 @@ export default function App() {
   const [folder, setFolder] = useState(null);
   const [folderRestoring, setFolderRestoring] = useState(true);
   const sync = useVaultSync(token, folder);
+  const appUpdate = useAppUpdate();
   const vaultIndex = useVaultIndex(token, sync.filesMeta);
 
   // buffers: fileId -> { content, dirty, saving, loading, loadError }
@@ -1171,6 +1173,9 @@ export default function App() {
         dirty={activeTabForStatus ? !!buffers[activeTabForStatus.fileId]?.dirty : false}
         saving={activeTabForStatus ? !!buffers[activeTabForStatus.fileId]?.saving : false}
         selectionText={editorSelectionText}
+        appVersion={appUpdate.version}
+        updateAvailable={appUpdate.updateAvailable}
+        onApplyUpdate={appUpdate.applyUpdate}
       />
       {paletteMode && (
         <Suspense fallback={null}>

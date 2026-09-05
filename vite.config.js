@@ -1,6 +1,23 @@
 import { defineConfig } from 'vite';
+import { execSync } from 'node:child_process';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
+import pkg from './package.json' with { type: 'json' };
+
+// Build-time version stamp: package.json version + short git SHA (when
+// available — e.g. not inside a source tarball with no .git). Consumed by
+// hooks/useAppUpdate.js and shown in StatusBar. Git errors are swallowed on
+// purpose: a missing SHA degrades to just the package version, never a
+// failed build.
+let commit = '';
+try {
+  commit = execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] })
+    .toString()
+    .trim();
+} catch {
+  // no .git available at build time — fine, version still shows.
+}
+const appVersion = commit ? `${pkg.version}+${commit}` : pkg.version;
 
 // store — Google Drive-backed file store.
 // PWA config enforces app-shell-only caching: Drive API traffic and note
@@ -17,9 +34,20 @@ const base = process.env.GITHUB_ACTIONS && repoName && !isUserOrgPage ? `/${repo
 
 export default defineConfig({
   base,
+  define: {
+    // Read via import.meta.env.__APP_VERSION__ would require the VITE_
+    // prefix, so this is exposed as a plain global instead — see
+    // hooks/useAppUpdate.js.
+    __APP_VERSION__: JSON.stringify(appVersion)
+  },
   plugins: [
     react(),
     VitePWA({
+      // 'autoUpdate' already made the service worker itself replace the
+      // cached app shell in the background with no prompt. It did NOT
+      // reload the open tab to activate that new shell — see
+      // hooks/useAppUpdate.js, which now surfaces that moment to the user
+      // instead of leaving it silent.
       registerType: 'autoUpdate',
       injectRegister: 'auto',
       includeAssets: ['icon-192.png', 'icon-512.png', 'icon-512-maskable.png', 'apple-touch-icon.png'],

@@ -77,7 +77,8 @@ const HELP_FEATURES = [
   { title: 'Bookmarks', desc: 'Star any note or file to pin it in the Bookmarks panel for quick access.' },
   { title: 'Command palette & quick switcher', desc: '⌘/Ctrl K for commands (new note, split pane, toggle sidebar, etc), ⌘/Ctrl O to jump straight to a note by name.' },
   { title: 'Images & files', desc: 'Open in their own tab just like notes — video/audio get inline players, other files get a download link — rather than a new browser tab.' },
-  { title: 'Graph view', desc: 'The network icon in the activity bar (or ⌘/Ctrl K → "Open graph view") opens a full map of every wikilink in the store. Drag nodes, scroll to zoom, hover to see a note\'s connections, and click a node to jump straight to it. Toggle attachments and orphans on or off from the toolbar.' }
+  { title: 'Graph view', desc: 'The network icon in the activity bar (or ⌘/Ctrl K → "Open graph view") opens a full map of every wikilink in the store. Drag nodes, scroll to zoom, hover to see a note\'s connections, and click a node to jump straight to it. Toggle attachments and orphans on or off from the toolbar.' },
+  { title: 'Version & updates', desc: 'The current version shows in the bottom-right status bar. When a new build has finished downloading in the background, that spot switches to an "Update available" link — click it to reload and switch to the new version whenever you\\'re ready (never happens automatically mid-session).' }
 ];
 
 

@@ -42,6 +42,26 @@
   background: #e0b95f;
   animation: pulse-dot 1s ease-in-out infinite;
 }
+.status-version {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.status-update-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.status-update-btn:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
 @keyframes pulse-dot {
   0%,
   100% {

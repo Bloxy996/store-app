@@ -757,16 +757,55 @@ bundled into this bugfix-sized patch):**
    `dbState.js` yet. Timeline/calendar also need a date-column requirement
    check similar to board's select-column requirement. Real feature work,
    not a bugfix.
-4. **App versioning + auto-update.** There's currently no version string
-   surfaced anywhere and no update-check mechanism. Needs: a build-time
-   version stamp (e.g. git SHA or `package.json` version injected via
-   Vite `define`), a way to detect a new deployed build is available
-   (`vite-plugin-pwa`'s `registerType: 'autoUpdate'` / `needRefresh`
-   callback is the natural hook, since the PWA infra already exists per
-   section 4 — check current `vite.config.js` PWA config before assuming
-   how it's registered), and UI (likely a `StatusBar` notice or toast) to
-   prompt/apply the reload. Should respect section 3.1/4 — no widening of
-   `globPatterns`/`runtimeCaching` to make this work.
+4. ~~**App versioning + auto-update.**~~ — done, see section 14.
 
 Pick which of these four to tackle next; each deserves its own reviewed
 pass rather than being rushed alongside the others.
+
+---
+
+## 14. Changelog — app versioning + auto-update (item 4 of section 13)
+
+One of the four items deferred in section 13, done as its own pass (see
+`changes.patch`). Items 1–3 from that list (site-wide popup→inline
+conversion, the Obsidian-style graph revamp, and database
+timeline/calendar/chart views) are **still not done** — each remains its
+own real pass, not bundled in here. Same for `useForceGraph`/
+`GraphViewModal.jsx`: unchanged by this patch.
+
+**Added:**
+- **Build-time version stamp** (`vite.config.js`): `package.json`'s
+  `version` plus a short git SHA (`1.0.0+78bb833`), exposed as the
+  `__APP_VERSION__` global via Vite's `define`. Falls back to just the bare
+  version if `git rev-parse` fails (e.g. building from a source tarball
+  with no `.git`) — never fails the build over a missing SHA.
+- **`hooks/useAppUpdate.js`**: wraps `vite-plugin-pwa`'s
+  `virtual:pwa-register/react` (`useRegisterSW`). `registerType: 'autoUpdate'`
+  already downloaded a new service worker silently in the background; this
+  hook is what surfaces the moment it's ready (`needRefresh`) instead of
+  leaving it invisible until some future full reload. No polling timer was
+  added — the browser already re-checks the SW file on normal page loads,
+  which is enough for an app that's occasionally reopened, and a background
+  poll would cut against the NetworkOnly-for-Drive spirit of section 3.1/4
+  for no real benefit.
+- **`StatusBar`**: shows `v{version}` in the bottom-right on the far right,
+  next to the existing sync dot. When an update is ready, that spot
+  becomes an inline "Update available" text button (not a modal/popup —
+  consistent with the direction item 1 in section 13 wants everything else
+  to move) that calls `updateServiceWorker(true)`, reloading the tab once
+  the new worker takes control. Nothing reloads automatically mid-session;
+  the user decides when.
+- `HelpModal.jsx` documents the status-bar version/update control (section
+  6).
+
+**Deliberately not done:**
+- No "what's new" changelog surfaced in-app — the version string plus this
+  file's changelog sections are considered enough for now; add a
+  release-notes popover later only if that's actually requested (and if it
+  is, make it inline per item 1, not a new modal).
+- No forced/timed update — some PWAs auto-reload a few seconds after
+  `needRefresh` fires. Deliberately left as a manual click: this app holds
+  in-memory-only state per section 3.1 (open buffers, unsaved edits before
+  the Drive save round-trip), so a surprise reload could discard something
+  the user hasn't finished typing. Don't add auto-reload without also
+  solving that data-loss window.

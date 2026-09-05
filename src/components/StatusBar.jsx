@@ -1,4 +1,4 @@
-import { IconAlertTriangle, IconCheck, IconLoader } from './icons.jsx';
+import { IconAlertTriangle, IconCheck, IconLoader, IconRefresh } from './icons.jsx';
 import { parseFrontmatter } from '../lib/markdownParse.js';
 
 
@@ -7,7 +7,7 @@ import { parseFrontmatter } from '../lib/markdownParse.js';
 // word count, character count, backlink count, property count, plus a
 // small live sync indicator on the far right.
 // ---------------------------------------------------------------------------
-function StatusBar({ file, content, backlinkCount, syncing, syncError, dirty, saving, selectionText }) {
+function StatusBar({ file, content, backlinkCount, syncing, syncError, dirty, saving, selectionText, appVersion, updateAvailable, onApplyUpdate }) {
   const { properties, body } = parseFrontmatter(content || '');
   const hasSelection = !!selectionText && selectionText.trim().length > 0;
   const countSource = hasSelection ? selectionText : body;
@@ -38,6 +38,16 @@ function StatusBar({ file, content, backlinkCount, syncing, syncError, dirty, sa
           </span>
         )}
         <span className={`status-sync-dot ${syncing ? 'syncing' : ''}`} title={syncing ? 'Syncing…' : 'Synced with Drive'} />
+        {updateAvailable ? (
+          // Inline control, not a modal/popup — clicking reloads once the
+          // waiting service worker takes over (see hooks/useAppUpdate.js).
+          <button type="button" className="status-update-btn" onClick={onApplyUpdate} title="A new version has finished downloading in the background">
+            <IconRefresh size={12} />
+            Update available
+          </button>
+        ) : (
+          appVersion && <span className="status-version" title="App version">v{appVersion}</span>
+        )}
       </div>
     </footer>
   );
