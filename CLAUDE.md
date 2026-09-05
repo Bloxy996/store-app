@@ -1106,3 +1106,50 @@ drag surface. See `changes.patch`.
   other user config is, not hardcoded to `GUIDE.md`'s specific types) so
   it's genuinely customizable rather than a hardcoded reimplementation of
   today's five note types.
+
+---
+
+## 20. Changelog — database calendar view (item 3, first slice)
+
+Smallest well-scoped piece of the item-3 database-views batch from section
+18: **Calendar**, done first because (unlike Timeline's two-date-column
+Gantt-lane math, or Chart's not-yet-built `dbState.js` aggregation step) it
+needed no new data-model primitive — just the same "pick a required column"
+pattern Board already established for its group-by Select column.
+
+**Added:**
+- `features/database/DbCalendarView.jsx` (new file, per section 3.7 — adding
+  this to `DbViews.jsx` would have pushed it past ~450 lines): a month grid
+  (42 cells, always 6 full weeks so the grid never reflows height between
+  months), rows placed on the day their date column's value falls on.
+  Requires a `date`-typed column (`view.dateColumnId`); `DbDateColumnPicker`
+  inside the same file mirrors `DbBoardView`'s `DbGroupByPicker` prompt when
+  none is picked yet. Clicking a row chip opens its row-detail modal like
+  every other view; each day cell has a hover `+` (always visible on touch
+  — see the mobile CSS block) that creates a new row preset with that day's
+  date, mirroring Board's "add card in this column" pattern. Reuses
+  `DbCardPropPreview` from `DbViews.jsx` for one select/multi-select
+  preview chip per row card, same as Board/Gallery cards.
+- `DatabaseView.jsx`: `calendar` added to `DB_VIEW_TYPE_ICONS` and the
+  add-view type list; `DbViewPanel`'s settings mode grew a "Date property"
+  section (same shape as Gallery's "Cover" section) that only shows for
+  `view.type === 'calendar'`; `addView('calendar', ...)` defaults
+  `dateColumnId` to the vault's first `date` column the same way `board`/
+  `gallery` default their required column; `deleteColumn` now also clears
+  `dateColumnId` off any view when its date column is deleted (joining the
+  existing `groupByColumnId`/`coverColumnId`/`sortColumnId` resets there).
+- `database.css`: new `.db-cal-*` rules following the existing token/
+  spacing conventions from the Board section right above them; a small
+  mobile override shrinks row height and makes the per-day `+` always
+  visible instead of hover-only (there's no hover on touch).
+- `HelpModal.jsx`'s Databases entry now mentions Calendar and its Date-
+  property requirement (section 6).
+
+**Not done (deliberately, same reasoning section 18 already gave):**
+Timeline (needs the two-date-column Gantt-lane layout, a genuinely new
+primitive) and Chart (needs the `dbState.js` group-by/aggregate helper to
+land first, so a future chart-block-in-a-note feature can reuse it) are
+still open, one view type at a time as section 18 specified. Everything
+else from the six-item request in section 19 — popup/modal remainder,
+graph revamp, offline support, frontmatter autocomplete — is unchanged
+from that entry.

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
-import { IconCheck, IconChevronDown, IconDatabase, IconKanban, IconLayoutGrid, IconLoader, IconPlus, IconSliders, IconTable, IconTrash } from '../../components/icons.jsx';
+import { IconCalendar, IconCheck, IconChevronDown, IconDatabase, IconKanban, IconLayoutGrid, IconLoader, IconPlus, IconSliders, IconTable, IconTrash } from '../../components/icons.jsx';
+import { DbCalendarView } from './DbCalendarView.jsx';
 import { DbManageColumnsModal, DbRowDetailModal } from './DbModals.jsx';
 import { DbBoardView, DbGalleryView, DbTableView } from './DbViews.jsx';
 import { DB_OPTION_COLORS, dbId, dbMakeRow, parseDatabaseContent, serializeDatabaseState } from './dbState.js';
@@ -40,7 +41,7 @@ function DbTitleField({ title, onRename }) {
 }
 
 
-const DB_VIEW_TYPE_ICONS = { table: IconTable, board: IconKanban, gallery: IconLayoutGrid };
+const DB_VIEW_TYPE_ICONS = { table: IconTable, board: IconKanban, gallery: IconLayoutGrid, calendar: IconCalendar };
 
 
 // A view's settings and "add view" used to each be their own `DbPopover`
@@ -87,7 +88,7 @@ function DbAddViewButton({ panelOpen, onToggle }) {
 
 // The inline panel itself — settings for one view, or the add-view form.
 // Rendered once by DatabaseView, below `.db-view-tabs`, never portaled.
-function DbViewPanel({ mode, view, columns, onRename, onChangeGroupBy, onChangeCover, onDelete, onAdd, onClose, canDelete }) {
+function DbViewPanel({ mode, view, columns, onRename, onChangeGroupBy, onChangeCover, onChangeDateColumn, onDelete, onAdd, onClose, canDelete }) {
   const [addName, setAddName] = useState('');
   const [renameDraft, setRenameDraft] = useState(view?.name || '');
   useEffect(() => setRenameDraft(view?.name || ''), [view]);
@@ -109,7 +110,8 @@ function DbViewPanel({ mode, view, columns, onRename, onChangeGroupBy, onChangeC
           {[
             { type: 'table', label: 'Table', icon: IconTable },
             { type: 'board', label: 'Board', icon: IconKanban },
-            { type: 'gallery', label: 'Gallery', icon: IconLayoutGrid }
+            { type: 'gallery', label: 'Gallery', icon: IconLayoutGrid },
+            { type: 'calendar', label: 'Calendar', icon: IconCalendar }
           ].map((opt) => (
             <button
               key={opt.type}
@@ -170,6 +172,19 @@ function DbViewPanel({ mode, view, columns, onRename, onChangeGroupBy, onChangeC
                 .map((c) => (
                   <button key={c.id} className="db-popover-item" onClick={() => onChangeCover(c.id)}>
                     {c.name} {c.id === view.coverColumnId && <IconCheck size={12} />}
+                  </button>
+                ))}
+            </>
+          )}
+          {view.type === 'calendar' && (
+            <>
+              <span className="db-popover-section-label">Date property</span>
+              {columns.filter((c) => c.type === 'date').length === 0 && <span className="muted small">No Date properties yet.</span>}
+              {columns
+                .filter((c) => c.type === 'date')
+                .map((c) => (
+                  <button key={c.id} className="db-popover-item" onClick={() => onChangeDateColumn(c.id)}>
+                    {c.name} {c.id === view.dateColumnId && <IconCheck size={12} />}
                   </button>
                 ))}
             </>
@@ -268,9 +283,11 @@ function DatabaseView({ file, content, onChange, handlers, linkIndex, loading, i
           ? { ...v, groupByColumnId: null }
           : v.coverColumnId === colId
             ? { ...v, coverColumnId: null }
-            : v.sortColumnId === colId
-              ? { ...v, sortColumnId: null, sortDir: null }
-              : v
+            : v.dateColumnId === colId
+              ? { ...v, dateColumnId: null }
+              : v.sortColumnId === colId
+                ? { ...v, sortColumnId: null, sortDir: null }
+                : v
       )
     }));
   const reorderColumn = (colId, dir) =>
@@ -317,6 +334,7 @@ function DatabaseView({ file, content, onChange, handlers, linkIndex, loading, i
       const view = { id: dbId('view'), name, type };
       if (type === 'board') view.groupByColumnId = s.columns.find((c) => c.type === 'select')?.id || null;
       if (type === 'gallery') view.coverColumnId = s.columns.find((c) => c.type === 'image')?.id || null;
+      if (type === 'calendar') view.dateColumnId = s.columns.find((c) => c.type === 'date')?.id || null;
       return { ...s, views: [...s.views, view], activeViewId: view.id };
     });
   const updateView = (viewId, patch) => commit((s) => ({ ...s, views: s.views.map((v) => (v.id === viewId ? { ...v, ...patch } : v)) }));
@@ -371,6 +389,7 @@ function DatabaseView({ file, content, onChange, handlers, linkIndex, loading, i
           onRename={(name) => updateView(viewPanel.viewId, { name })}
           onChangeGroupBy={(colId) => updateView(viewPanel.viewId, { groupByColumnId: colId })}
           onChangeCover={(colId) => updateView(viewPanel.viewId, { coverColumnId: colId })}
+          onChangeDateColumn={(colId) => updateView(viewPanel.viewId, { dateColumnId: colId })}
           onDelete={() => deleteView(viewPanel.viewId)}
           onAdd={addView}
           onClose={() => setViewPanel(null)}
@@ -408,6 +427,16 @@ function DatabaseView({ file, content, onChange, handlers, linkIndex, loading, i
       )}
       {activeView.type === 'gallery' && (
         <DbGalleryView state={state} view={activeView} onOpenRow={setOpenRowId} rowTitle={rowTitle} addRow={() => addRow()} handlers={handlers} />
+      )}
+      {activeView.type === 'calendar' && (
+        <DbCalendarView
+          state={state}
+          view={activeView}
+          onOpenRow={setOpenRowId}
+          rowTitle={rowTitle}
+          addRow={addRow}
+          onChangeDateColumn={(colId) => updateView(activeView.id, { dateColumnId: colId })}
+        />
       )}
 
       {managePropsOpen && (

@@ -1129,6 +1129,167 @@
   background: var(--accent-hover);
 }
 
+/* Calendar view -------------------------------------------------------------- */
+.db-calendar {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 12px 0 20px;
+}
+.db-cal-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 0 10px;
+}
+.db-cal-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: var(--bg-0);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.db-cal-nav:hover {
+  background: var(--bg-2);
+  color: var(--text-normal);
+}
+.db-cal-month-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-normal);
+  min-width: 140px;
+}
+.db-cal-today {
+  margin-left: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-soft);
+  background: transparent;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  cursor: pointer;
+}
+.db-cal-today:hover {
+  background: var(--bg-2);
+  color: var(--text-normal);
+}
+.db-cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+}
+.db-cal-weekdays {
+  border-bottom: 1px solid var(--border-soft);
+  padding-bottom: 6px;
+  margin-bottom: 4px;
+}
+.db-cal-weekday {
+  font-size: 11px;
+  color: var(--text-faint);
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.db-cal-days {
+  flex: 1;
+  grid-auto-rows: minmax(84px, 1fr);
+  gap: 1px;
+  background: var(--border-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.db-cal-cell {
+  background: var(--bg-1);
+  padding: 4px 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  overflow: hidden;
+}
+.db-cal-cell.outside {
+  background: var(--bg-0);
+}
+.db-cal-cell.outside .db-cal-daynum {
+  color: var(--text-faint);
+}
+.db-cal-cell.today .db-cal-daynum {
+  background: var(--accent);
+  color: var(--bg-0);
+}
+.db-cal-cell-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.db-cal-daynum {
+  font-size: 11px;
+  color: var(--text-muted);
+  min-width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+}
+.db-cal-cell-add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0;
+}
+.db-cal-cell:hover .db-cal-cell-add {
+  opacity: 1;
+}
+.db-cal-cell-add:hover {
+  background: var(--bg-3);
+  color: var(--text-normal);
+}
+.db-cal-cell-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.db-cal-row-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  border: none;
+  background: var(--bg-2);
+  border-radius: var(--radius-sm);
+  padding: 2px 5px;
+  font-size: 11px;
+  color: var(--text-normal);
+  cursor: pointer;
+  text-align: left;
+}
+.db-cal-row-chip:hover {
+  background: var(--bg-3);
+}
+.db-cal-row-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
 /* Mobile ---------------------------------------------------------------------- */
 @media (max-width: 760px) {
   .db-view {
@@ -1146,5 +1307,15 @@
   }
   .db-row-prop {
     grid-template-columns: 1fr;
+  }
+  .db-cal-days {
+    grid-auto-rows: minmax(56px, 1fr);
+  }
+  .db-cal-row-chip {
+    font-size: 10px;
+  }
+  .db-cal-cell-add {
+    /* No hover on touch — keep it reachable without needing one. */
+    opacity: 1;
   }
 }
