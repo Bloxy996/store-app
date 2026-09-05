@@ -13,8 +13,13 @@ import { opensInEditorPane } from './vaultConfig.js';
 // ---------------------------------------------------------------------------
 function renderInline(text, keyPrefix, handlers, linkIndex) {
   const nodes = [];
+  // Group 7 (bold __), 8 (highlight ==), 9 (underline ++), 10 (strike ~~),
+  // 11 (italic _) round out the inline marks the editor already dims —
+  // reading view used to silently drop all five, so `==text==`, `++text++`,
+  // `~~text~~`, `__text__`, and `_text_` rendered as bare punctuation
+  // instead of styled text.
   const re =
-    /(!?\[\[[^[\]]+\]\])|(\*\*[^*]+\*\*)|(`[^`]+`)|(\[[^[\]]+\]\([^()\s]+\))|(\*[^*]+\*)|((?:^|[\s(])#[A-Za-z][A-Za-z0-9_\-/]*)/g;
+    /(!?\[\[[^[\]]+\]\])|(\*\*[^*]+\*\*)|(`[^`]+`)|(\[[^[\]]+\]\([^()\s]+\))|(\*[^*\s][^*]*\*)|((?:^|[\s(])#[A-Za-z][A-Za-z0-9_\-/]*)|(__[^_]+__)|(==[^=]+==)|(\+\+[^+]+\+\+)|(~~[^~]+~~)|(_[^_\s][^_]*_)/g;
   let lastIndex = 0;
   let match;
   let i = 0;
@@ -111,7 +116,7 @@ function renderInline(text, keyPrefix, handlers, linkIndex) {
           </span>
         );
       }
-    } else if (token.startsWith('**')) {
+    } else if (token.startsWith('**') || token.startsWith('__')) {
       nodes.push(<strong key={key}>{token.slice(2, -2)}</strong>);
     } else if (token.startsWith('`')) {
       nodes.push(<code key={key}>{token.slice(1, -1)}</code>);
@@ -122,6 +127,16 @@ function renderInline(text, keyPrefix, handlers, linkIndex) {
           {m[1]}
         </a>
       );
+    } else if (token.startsWith('==')) {
+      nodes.push(
+        <mark key={key} className="md-highlight">
+          {token.slice(2, -2)}
+        </mark>
+      );
+    } else if (token.startsWith('++')) {
+      nodes.push(<u key={key}>{token.slice(2, -2)}</u>);
+    } else if (token.startsWith('~~')) {
+      nodes.push(<del key={key}>{token.slice(2, -2)}</del>);
     } else if (token.startsWith('#')) {
       const tagName = token.slice(1);
       nodes.push(
@@ -135,6 +150,8 @@ function renderInline(text, keyPrefix, handlers, linkIndex) {
         </span>
       );
     } else if (token.startsWith('*')) {
+      nodes.push(<em key={key}>{token.slice(1, -1)}</em>);
+    } else if (token.startsWith('_')) {
       nodes.push(<em key={key}>{token.slice(1, -1)}</em>);
     }
     lastIndex = tokenStart + token.length;
@@ -390,17 +407,23 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldSt
     // lists, same as CommonMark.
     const groups = [];
     for (const n of nodes) {
-      const tag = n.type === 'ol' ? 'ol' : 'ul';
+      const tag = n.type === 'ol' || n.type === 'letter' ? 'ol' : 'ul';
       const last = groups[groups.length - 1];
       if (last && last.tag === tag) last.nodes.push(n);
       else groups.push({ tag, nodes: [n] });
     }
     return groups.map((g, gi) => (
-      <g.tag key={`${keyBase2}-g${gi}`}>
+      // For ol/letter groups the marker text comes verbatim from the
+      // source line (so "01)", "02)" leading zeros and "a)"/"A." letter
+      // case are preserved exactly, rather than being re-numbered by the
+      // browser's native <ol> counter), so native numbering is turned off
+      // and the marker is rendered explicitly instead.
+      <g.tag key={`${keyBase2}-g${gi}`} style={g.tag === 'ol' ? { listStyle: 'none', paddingLeft: '1.4em' } : undefined}>
         {g.nodes.map((n, ni) => {
           const itemKey = `${keyBase2}-g${gi}-${ni}`;
           return (
             <li key={ni} className={n.type === 'task' ? 'task-line-item' : undefined}>
+              {n.marker && <span className="list-marker">{n.marker}</span>}
               {n.type === 'task' ? (
                 <label className="task-line">
                   <input type="checkbox" checked={n.checked} readOnly />
@@ -484,10 +507,11 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldSt
     const fence = /^```/.test(line.trim());
     const heading = line.match(/^(#{1,6})\s+(.*)$/);
     const quote = line.match(/^>\s?(.*)$/);
-    const ul = line.match(/^\s*[-*]\s+(.*)$/);
-    const ol = line.match(/^\s*\d+\.\s+(.*)$/);
+    const ul = line.match(/^\s*[-*+]\s+(.*)$/);
+    const ol = line.match(/^\s*(\d+)([.)])\s+(.*)$/);
+    const letterList = !ol && line.match(/^\s*([A-Za-z])([.)])\s+(.*)$/);
     const hr = /^(-{3,}|\*{3,})$/.test(line.trim());
-    const taskUl = line.match(/^\s*[-*]\s+\[( |x|X)\]\s+(.*)$/);
+    const taskUl = line.match(/^\s*[-*+]\s+\[( |x|X)\]\s+(.*)$/);
     const toggleOpen = line.match(/^\+\+\+\s?(.*)$/);
     const columnsOpen = line.trim().match(/^:::columns-([234])\s*$/);
     const tabsOpen = line.trim().match(/^:::tabs\s*$/);
@@ -697,7 +721,10 @@ function renderMarkdownBlocks(content, handlers, linkIndex, keyBase = '', foldSt
       listBuffer.push({ type: 'ul', indent: indentLevel(line), text: ul[1] });
     } else if (ol) {
       flushQuote();
-      listBuffer.push({ type: 'ol', indent: indentLevel(line), text: ol[1] });
+      listBuffer.push({ type: 'ol', indent: indentLevel(line), text: ol[3], marker: `${ol[1]}${ol[2]}` });
+    } else if (letterList) {
+      flushQuote();
+      listBuffer.push({ type: 'letter', indent: indentLevel(line), text: letterList[3], marker: `${letterList[1]}${letterList[2]}` });
     } else if (line.trim() === '') {
       flushList();
       flushQuote();

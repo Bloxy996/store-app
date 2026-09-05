@@ -63,3 +63,29 @@
 .note-title-input::placeholder {
   color: var(--text-faint);
 }
+
+/* Reading-view inline marks that used to have no styling at all:
+   ==highlight== now uses the accent color (same family as text selection
+   and drag-over highlighting) instead of a hardcoded yellow, and ++underline++
+   is a small addition alongside the pre-existing bold/italic/strike. */
+.md-highlight {
+  background: var(--accent-soft);
+  color: var(--text-normal);
+  border-radius: 2px;
+  padding: 0 0.1em;
+}
+.editor-preview u {
+  text-decoration-color: var(--text-faint);
+}
+
+/* Ordered/lettered list markers (1. / 01) / a) / A.) are rendered
+   explicitly rather than via the browser's native <ol> counter, so
+   leading zeros and letter case survive exactly as typed. See
+   renderMarkdownBlocks in markdownRender.jsx. */
+.list-marker {
+  display: inline-block;
+  min-width: 1.6em;
+  margin-right: 0.3em;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}

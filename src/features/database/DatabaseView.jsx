@@ -240,7 +240,13 @@ function DatabaseView({ file, content, onChange, handlers, linkIndex, loading })
         return { ...r, values: v };
       }),
       views: s.views.map((v) =>
-        v.groupByColumnId === colId ? { ...v, groupByColumnId: null } : v.coverColumnId === colId ? { ...v, coverColumnId: null } : v
+        v.groupByColumnId === colId
+          ? { ...v, groupByColumnId: null }
+          : v.coverColumnId === colId
+            ? { ...v, coverColumnId: null }
+            : v.sortColumnId === colId
+              ? { ...v, sortColumnId: null, sortDir: null }
+              : v
       )
     }));
   const reorderColumn = (colId, dir) =>
@@ -340,6 +346,8 @@ function DatabaseView({ file, content, onChange, handlers, linkIndex, loading })
       {activeView.type === 'table' && (
         <DbTableView
           state={state}
+          view={activeView}
+          onSort={(colId, dir) => updateView(activeView.id, { sortColumnId: colId, sortDir: dir })}
           updateRowValue={updateRowValue}
           addRow={() => addRow()}
           deleteRow={deleteRow}

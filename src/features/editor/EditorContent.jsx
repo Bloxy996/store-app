@@ -62,9 +62,22 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
   // there's an actual editor selection to reflect — clear it whenever we
   // leave edit mode or switch notes, so the status bar doesn't keep
   // showing counts for a selection that no longer exists on screen.
+  //
+  // `handlers` is a plain object rebuilt (new identity) on lots of
+  // unrelated App-level state changes (typing, vault-index progress,
+  // sync ticks, ...). It used to sit directly in these effects' deps —
+  // which meant nearly any keystroke or background tick re-ran the
+  // effect, and its cleanup (`onEditorSelectionChange(null)`) fired in
+  // between, instantly wiping out a just-set selection count back to the
+  // whole-note number. Stashing the latest handlers in a ref and keying
+  // the effects only on `file?.id`/`mode` fixes that: the count now stays
+  // until the file/mode actually changes or the selection itself clears.
+  const handlersRef = useRef(handlers);
+  handlersRef.current = handlers;
+
   useEffect(() => {
-    return () => handlers.onEditorSelectionChange?.(null);
-  }, [file?.id, mode, handlers]);
+    return () => handlersRef.current.onEditorSelectionChange?.(null);
+  }, [file?.id, mode]);
 
   // Reading view has no CodeMirror to report selection changes for it, so
   // mirror the same status-bar behavior here off the browser's native
@@ -78,14 +91,14 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
       const sel = window.getSelection();
       const text = sel && sel.rangeCount && !sel.isCollapsed ? sel.toString() : '';
       if (text.trim() && previewRef.current && previewRef.current.contains(sel.anchorNode)) {
-        handlers.onEditorSelectionChange?.(text);
+        handlersRef.current.onEditorSelectionChange?.(text);
       } else {
-        handlers.onEditorSelectionChange?.(null);
+        handlersRef.current.onEditorSelectionChange?.(null);
       }
     };
     document.addEventListener('selectionchange', onSelectionChange);
     return () => document.removeEventListener('selectionchange', onSelectionChange);
-  }, [mode, file?.id, handlers]);
+  }, [mode, file?.id]);
 
   // Table-of-contents navigation bridge — registers a scroll-to-heading
   // function for this pane while it's the active one, so the Outline panel
@@ -191,7 +204,7 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
       ) : (
         <div className="editor-preview" ref={previewRef}>
           <NoteTitleField file={file} onRename={handlers.onRenameFile} />
-          <PropertiesPanel properties={properties} handlers={handlers} />
+          <PropertiesPanel properties={properties} handlers={handlers} linkIndex={linkIndex} />
           {renderMarkdownBlocks(body, readingHandlers, linkIndex, '', foldState)}
           <InlineMentions
             file={linkIndex.records.find((r) => r.id === file.id) || file}

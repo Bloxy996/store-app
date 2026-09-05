@@ -99,8 +99,13 @@
 }
 .cm-highlight {
   color: var(--text-normal);
-  background: rgba(230, 200, 80, 0.35);
+  background: var(--accent-soft);
   border-radius: 2px;
+}
+.cm-underline {
+  color: var(--text-normal);
+  text-decoration: underline;
+  text-decoration-color: var(--text-faint);
 }
 .cm-editable-column,
 .cm-editable-tab-body {

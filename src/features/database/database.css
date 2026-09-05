@@ -322,6 +322,23 @@
   vertical-align: -1px;
   color: var(--text-faint);
 }
+.db-th-sortable {
+  cursor: pointer;
+  user-select: none;
+}
+.db-th-sortable:hover {
+  color: var(--text-normal);
+  background: var(--bg-2);
+}
+.db-th-sort-arrow {
+  margin-left: 4px;
+  vertical-align: -2px;
+  color: var(--accent);
+  transition: transform 0.1s ease;
+}
+.db-th-sort-arrow.asc {
+  transform: rotate(180deg);
+}
 .db-th-add {
   border-bottom: 1px solid var(--border);
   width: 32px;

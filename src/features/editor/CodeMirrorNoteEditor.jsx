@@ -50,7 +50,7 @@ function CodeMirrorNoteEditor({ fileId, content, onChange, linkIndex, phantomRec
         drawSelection(),
         EditorView.lineWrapping,
         cmPlaceholder(
-          'Start writing… [[Note Name]] to link, #tag to tag, > [!tip] for callouts, | tables |, +++ toggles +++, :::columns-2 for columns, :::tabs for a tab block.'
+          'Start writing… [[Note Name]] to link, #tag to tag, > [!tip] for callouts, | tables |, +++ toggles +++, :::columns-2 for columns, :::tabs for a tab block, ==highlight==, ++underline++.'
         ),
         autocompletion({ override: [wikilinkTagCompletionSource(ctx)], activateOnTyping: true }),
         buildInlinePreviewPlugin(),

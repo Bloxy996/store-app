@@ -41,6 +41,44 @@ const DB_COLUMN_TYPES = {
 
 const DB_ATTACHMENT_TYPES = new Set(['image', 'video', 'audio', 'file']);
 
+// Sorting only makes sense for types with an unambiguous, sensible
+// ordering — plain scalars, dates, checkboxes, single-select, and URLs
+// (sorted as plain strings). Multi-select and the attachment types
+// (image/video/audio/file, which each hold an array of file references)
+// are deliberately excluded from the sortable set: "ascending" isn't a
+// well-defined idea for a set of tags or a list of attachments.
+const DB_SORTABLE_TYPES = new Set(['text', 'text_multiline', 'number_int', 'number_float', 'select', 'date', 'checkbox', 'url']);
+
+// Comparator for a single column's values, used by the table view's
+// column-header sort. `select` sorts by option label (not id/insertion
+// order) since that's what the user actually sees; everything else
+// compares its own natural type. Nullish/empty values always sort last
+// regardless of direction, matching Notion/Airtable convention rather
+// than flip-flopping to the top on descending sort.
+function compareDbValues(column, a, b) {
+  const isEmpty = (v) => v === null || v === undefined || v === '';
+  const aEmpty = isEmpty(a);
+  const bEmpty = isEmpty(b);
+  if (aEmpty && bEmpty) return 0;
+  if (aEmpty) return 1;
+  if (bEmpty) return -1;
+
+  if (column.type === 'number_int' || column.type === 'number_float') {
+    return Number(a) - Number(b);
+  }
+  if (column.type === 'checkbox') {
+    return (a ? 1 : 0) - (b ? 1 : 0);
+  }
+  if (column.type === 'date') {
+    return new Date(a).getTime() - new Date(b).getTime();
+  }
+  if (column.type === 'select') {
+    const label = (v) => (column.options || []).find((o) => o.id === v)?.label || '';
+    return label(a).localeCompare(label(b));
+  }
+  return String(a).localeCompare(String(b));
+}
+
 const DB_OPTION_COLORS = ['#8875e0', '#e0685f', '#e0a63d', '#6fcf97', '#4fa3e0', '#e07fc0', '#b0b0b0', '#5fc9c9'];
 
 
@@ -125,4 +163,4 @@ function serializeDatabaseState(state) {
   return JSON.stringify(state, null, 2);
 }
 
-export { DB_ROW_DND_MIME, dbId, DB_COLUMN_TYPES, DB_ATTACHMENT_TYPES, DB_OPTION_COLORS, dbEmptyValue, dbMakeRow, makeDefaultDatabaseState, parseDatabaseContent, serializeDatabaseState };
+export { DB_ROW_DND_MIME, dbId, DB_COLUMN_TYPES, DB_ATTACHMENT_TYPES, DB_SORTABLE_TYPES, compareDbValues, DB_OPTION_COLORS, dbEmptyValue, dbMakeRow, makeDefaultDatabaseState, parseDatabaseContent, serializeDatabaseState };

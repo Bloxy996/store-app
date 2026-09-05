@@ -358,3 +358,96 @@ not as a deferred follow-up.
   leave a comment rather than a silent oversized file.
 - If you add a new optional/heavy feature, default to lazy-loading it
   (section 4) rather than adding it to the main bundle.
+
+---
+
+## 8. Changelog — 2026 linking/editing/highlight/sort patch
+
+Fixes and additions made in one pass (see `changes.patch`), plus what's
+deliberately left for a follow-up. Read this before touching editor
+inline-mark handling, `PropertiesPanel`, `EditorContent`'s selection
+effects, or database table sorting — the reasoning below explains *why*
+the code looks the way it does now, not just what changed.
+
+**Fixed (real bugs, not just missing features):**
+- `PropertiesPanel` rendered `[[wikilink]]` frontmatter values (e.g.
+  `related: [[Other Note]]`) as inert text — never resolved/clickable.
+  Now parses each comma-split value the same way the note body does.
+- Reading view's `renderInline` (`lib/markdownRender.jsx`) had no cases
+  for `==highlight==`, `~~strike~~`, `__bold__`, or single-`_` italic —
+  they rendered as literal punctuation. All four now render, plus a new
+  `++underline++` syntax. `==highlight==` uses `var(--accent-soft)`
+  (matches text-selection / drag-over color) instead of hardcoded yellow,
+  in both the editor (`.cm-highlight`) and reading view (`.md-highlight`).
+- Selection-scoped word/char count in the status bar: `EditorContent`'s
+  selection-tracking effects had `handlers` in their dependency array.
+  `handlers` (built with `useMemo` in `App.jsx`) gets a new identity on
+  most unrelated re-renders (typing, vault-index progress, sync ticks),
+  so the effect's cleanup — which nulls the selection — fired almost
+  immediately after any real selection, snapping the count back to the
+  whole-note numbers. Fixed by keeping `handlers` in a ref and keying the
+  effects only on `file?.id`/`mode`. **If you add anything else to those
+  effects, don't put `handlers` (or any object rebuilt by that `useMemo`)
+  back in the dependency array** — reach into `handlersRef.current`
+  inside the effect body instead.
+- List soft-wrap in the editor only accounted for leading whitespace, so
+  a wrapped line of a bullet/checkbox/numbered item fell back to column 0
+  instead of lining up under the item's text. `inlinePreviewPlugin.js`'s
+  `listPrefixLen` now measures the full marker prefix (indent + marker +
+  following space) for bullet, checkbox, ordered, and lettered lines.
+
+**Added:**
+- Ordered lists now accept `1)` as well as `1.`, and preserve a leading
+  zero (`01)`, `02)`, …) exactly as typed rather than renumbering it —
+  both `inlinePreviewPlugin.js` (editor dimming) and `markdownRender.jsx`
+  (reading view) parse this the same way.
+- Lettered lists: `a) item` / `A. item` (either case, either delimiter).
+  Reading view renders these (and ordered lists) with an explicit marker
+  span (`.list-marker`) rather than the browser's native `<ol>` counter,
+  specifically so leading zeros and letter case survive — don't switch
+  this back to a bare `<ol>` without re-solving that.
+- Database table view: click a sortable column header to cycle
+  unsorted → ascending → descending → unsorted. Sort state
+  (`sortColumnId`/`sortDir`) lives on the view object, same persistence
+  path as `groupByColumnId`. Sortability is type-gated via
+  `DB_SORTABLE_TYPES` in `dbState.js` — multi-select and the attachment
+  types (image/video/audio/file) are excluded on purpose, not an
+  oversight; extend that set rather than sorting everything.
+- `HelpModal.jsx` updated for all of the above, plus previously-missing
+  documentation for existing features (Canvas had no Features-tab entry
+  at all).
+
+**Deliberately deferred (each is its own follow-up, not a partial job
+buried in this one):**
+- **Database row-linking** (`[[Some.base#RowTitle]]`-style deep links to
+  a specific row). Needs new resolution logic in `linkGraph.js` +
+  `renderInline`, plus `DatabaseView` accepting an "open and scroll to
+  this row" navigation target — more than a text-syntax change.
+- **Full markdown editing inside database cells and canvas cards**
+  (coloring/formatting/autocomplete "just like a note, but inside the
+  cell/card"). This means embedding a real CodeMirror instance per
+  multiline cell/card rather than a plain `<textarea>`/`contenteditable`
+  — a real architecture change to `DbCells.jsx` and `CanvasNode.jsx`, not
+  a styling tweak.
+- **Site-wide popup → inline conversion.** Touches `DropdownMenu`,
+  `PaletteModal`, `GraphViewModal`, the image viewer, `DbModals`,
+  `OnboardingFlow`, and the canvas file picker — a UI-architecture
+  change across most of `features/`, not a single-file fix.
+- **Graph view revamp** (more Obsidian-like force graph). Current
+  `features/graph/useForceGraph.js` + `GraphViewModal.jsx` are a
+  reasonable starting point but need real research/rework (force
+  parameters, local-neighborhood view, node sizing by connection count,
+  filters) rather than incremental tweaks.
+- **Canvas fixes**: connection-point dots clipped at card edges, no
+  "nearby connectable targets" highlight while dragging an arrow, broken
+  groups, camera drag not moving the background dot grid, mobile
+  support. All in `CanvasNode.jsx`/`CanvasView.jsx`/`canvas.css` — several
+  distinct bugs, worth separating into their own fixes rather than one
+  large risky diff.
+- **Timeline / calendar / chart (bar/line/pie) views for databases.**
+  New view types alongside table/board/gallery in `DbViews.jsx` +
+  `dbState.js` — each is a real feature on the scale of the existing
+  board/gallery views, not a small addition.
+
+Tackle these in separate passes; don't half-implement one alongside
+unrelated work.

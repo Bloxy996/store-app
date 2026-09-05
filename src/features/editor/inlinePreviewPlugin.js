@@ -11,12 +11,31 @@ import { isTableSeparatorRow } from '../../lib/markdownRender.jsx';
 // in reading view, via renderMarkdownBlocks); every bit of markdown syntax
 // always stays visible here, just dimmed, the same way a heading's leading
 // '#'s are. Runs only over visible lines.
+// Length (in raw characters, from column 0) of a list line's marker
+// prefix — indent + marker + the whitespace before its text — for lines
+// that are list items; null for anything else. Order matters: a task
+// checkbox line also matches the bullet pattern, so it's checked first.
+// Ordered markers accept both `1.`/`1)` and zero-padded forms like `01)`
+// (any run of digits); lettered markers accept `a)`/`A.` etc.
+function listPrefixLen(text) {
+  const task = /^(\s*[-*+]\s+\[(?: |x|X)\]\s+)/.exec(text);
+  if (task) return task[1].length;
+  const ordered = /^(\s*\d+[.)]\s+)/.exec(text);
+  if (ordered) return ordered[1].length;
+  const lettered = /^(\s*[A-Za-z][.)]\s+)/.exec(text);
+  if (lettered) return lettered[1].length;
+  const bullet = /^(\s*[-*+]\s+)/.exec(text);
+  if (bullet) return bullet[1].length;
+  return null;
+}
+
 function buildInlinePreviewPlugin() {
   const MARK_RULES = [
     { re: /\*\*([^*\n]+)\*\*/g, markLen: 2, cls: 'cm-bold' },
     { re: /__([^_\n]+)__/g, markLen: 2, cls: 'cm-bold' },
     { re: /~~([^~\n]+)~~/g, markLen: 2, cls: 'cm-strike' },
     { re: /==([^=\n]+)==/g, markLen: 2, cls: 'cm-highlight' },
+    { re: /\+\+([^+\n]+)\+\+/g, markLen: 2, cls: 'cm-underline' },
     { re: /`([^`\n]+)`/g, markLen: 1, cls: 'cm-inline-code' },
     { re: /(?<![*_\w])\*([^*\s][^*\n]*?)\*(?!\*)/g, markLen: 1, cls: 'cm-italic' },
     { re: /(?<![\w_])_([^_\s][^_\n]*?)_(?![\w_])/g, markLen: 1, cls: 'cm-italic' }
@@ -89,10 +108,18 @@ function buildInlinePreviewPlugin() {
     // via text-indent, then padding it back out by the same amount, cancels
     // out for the line's own first (real) row but leaves every wrapped row
     // sitting at that padding — i.e. the wrap keeps the line's indent.
-    // Applies uniformly to list items and plain indented lines alike.
+    //
+    // For list items specifically, the hang point isn't just the leading
+    // whitespace — it's wherever the item's actual text starts, past the
+    // marker too (`- `, `- [ ] `, `1. `, `01) `, `a) `, ...), so a wrapped
+    // line of a bullet lines up under the bullet's text instead of under
+    // the bullet character itself. `listPrefixLen` finds that full prefix;
+    // plain indented (non-list) lines fall back to just their whitespace.
+    const prefixLen = listPrefixLen(text);
     const leadingWs = /^[ \t]*/.exec(text)[0];
-    if (leadingWs.length) {
-      const ch = leadingWs.replace(/\t/g, '  ').length;
+    const hangLen = prefixLen != null ? prefixLen : leadingWs.length;
+    if (hangLen) {
+      const ch = text.slice(0, hangLen).replace(/\t/g, '  ').length;
       out.push({ from: line.from, to: line.from, deco: Decoration.line({ attributes: { style: `padding-left: ${ch}ch; text-indent: -${ch}ch;` } }) });
     }
 
@@ -177,14 +204,27 @@ function buildInlinePreviewPlugin() {
       out.push({ from: boxFrom, to: boxFrom + 3, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
     }
 
-    // Unordered list marker (-, *, +) — dim it like other syntax markers.
-    // Skipped for thematic-break lines, which already matched the rule
-    // above and aren't really list items.
-    if (!hr) {
-      const listMarker = /^(\s*)([-*+])(\s+)/.exec(text);
-      if (listMarker) {
-        const markerFrom = line.from + listMarker[1].length;
-        out.push({ from: markerFrom, to: markerFrom + 1, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+    // List markers — dimmed like every other syntax marker. Ordered
+    // (`1.`/`1)`, leading zeros like `01)` allowed) and lettered
+    // (`a)`/`A.`) markers dim the whole marker token; a plain bullet
+    // (-, *, +) just dims the single marker character, as before. Skipped
+    // on thematic-break lines and task lines (the checkbox rule above
+    // already dimmed those markers).
+    if (!hr && !task) {
+      const orderedMarker = /^(\s*)(\d+[.)])(\s+)/.exec(text);
+      const letterMarker = !orderedMarker && /^(\s*)([A-Za-z][.)])(\s+)/.exec(text);
+      if (orderedMarker) {
+        const markerFrom = line.from + orderedMarker[1].length;
+        out.push({ from: markerFrom, to: markerFrom + orderedMarker[2].length, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+      } else if (letterMarker) {
+        const markerFrom = line.from + letterMarker[1].length;
+        out.push({ from: markerFrom, to: markerFrom + letterMarker[2].length, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+      } else {
+        const listMarker = /^(\s*)([-*+])(\s+)/.exec(text);
+        if (listMarker) {
+          const markerFrom = line.from + listMarker[1].length;
+          out.push({ from: markerFrom, to: markerFrom + 1, deco: Decoration.mark({ class: 'cm-mark-dim' }) });
+        }
       }
     }
 

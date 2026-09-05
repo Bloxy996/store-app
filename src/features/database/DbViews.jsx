@@ -1,8 +1,8 @@
 import { useState } from 'react';
 
-import { IconCalendar, IconDatabase, IconExpand, IconPlus, IconTrash, IconX } from '../../components/icons.jsx';
+import { IconCalendar, IconChevronDown, IconDatabase, IconExpand, IconPlus, IconTrash, IconX } from '../../components/icons.jsx';
 import { DbAttachmentThumb, DbCell } from './DbCells.jsx';
-import { DB_COLUMN_TYPES, DB_ROW_DND_MIME } from './dbState.js';
+import { DB_COLUMN_TYPES, DB_ROW_DND_MIME, DB_SORTABLE_TYPES, compareDbValues } from './dbState.js';
 
 
 // --- Card property previews (Board / Gallery) -------------------------------
@@ -44,7 +44,25 @@ function DbCardPropPreview({ column, value }) {
 
 // --- Table view --------------------------------------------------------------
 
-function DbTableView({ state, updateRowValue, addRow, deleteRow, onOpenRow, onCreateOption, dbFile, handlers, onManageColumns }) {
+// Column-header sort cycles unsorted -> ascending -> descending -> unsorted.
+// `view.sortColumnId`/`view.sortDir` persist to the .base file like any
+// other view setting, so the sort sticks around after reopening the vault.
+function DbTableView({ state, view, onSort, updateRowValue, addRow, deleteRow, onOpenRow, onCreateOption, dbFile, handlers, onManageColumns }) {
+  const sortCol = view.sortColumnId ? state.columns.find((c) => c.id === view.sortColumnId) : null;
+  const rows = sortCol
+    ? state.rows.slice().sort((a, b) => {
+        const cmp = compareDbValues(sortCol, a.values[sortCol.id], b.values[sortCol.id]);
+        return view.sortDir === 'desc' ? -cmp : cmp;
+      })
+    : state.rows;
+
+  const cycleSort = (col) => {
+    if (!DB_SORTABLE_TYPES.has(col.type)) return;
+    if (view.sortColumnId !== col.id) onSort(col.id, 'asc');
+    else if (view.sortDir === 'asc') onSort(col.id, 'desc');
+    else onSort(null, null);
+  };
+
   return (
     <div className="db-table-scroll">
       <table className="db-table">
@@ -53,10 +71,20 @@ function DbTableView({ state, updateRowValue, addRow, deleteRow, onOpenRow, onCr
             <th className="db-th-expand" />
             {state.columns.map((col) => {
               const Icon = DB_COLUMN_TYPES[col.type]?.icon;
+              const sortable = DB_SORTABLE_TYPES.has(col.type);
+              const active = view.sortColumnId === col.id;
               return (
-                <th key={col.id} className="db-th">
+                <th
+                  key={col.id}
+                  className={`db-th ${sortable ? 'db-th-sortable' : ''}`}
+                  onClick={sortable ? () => cycleSort(col) : undefined}
+                  title={sortable ? `Sort by ${col.name}` : undefined}
+                >
                   {Icon && <Icon size={12} className="db-th-icon" />}
                   <span>{col.name}</span>
+                  {active && (
+                    <IconChevronDown size={12} className={`db-th-sort-arrow ${view.sortDir === 'asc' ? 'asc' : ''}`} />
+                  )}
                 </th>
               );
             })}
@@ -68,7 +96,7 @@ function DbTableView({ state, updateRowValue, addRow, deleteRow, onOpenRow, onCr
           </tr>
         </thead>
         <tbody>
-          {state.rows.map((row) => (
+          {rows.map((row) => (
             <tr key={row.id} className="db-tr">
               <td className="db-td-expand">
                 <button className="db-expand-btn" onClick={() => onOpenRow(row.id)} title="Open">
