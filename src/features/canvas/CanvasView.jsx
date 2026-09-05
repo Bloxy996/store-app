@@ -238,6 +238,18 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
     (e, node) => {
       if (editingId === node.id) return;
       e.stopPropagation();
+      // Touch-only: without this, iOS/Android still arm their own
+      // scroll/long-press gesture recognizer alongside ours even though
+      // .canvas-surface has touch-action:none, because that ancestor value
+      // isn't reliably honored for a nested hit target on every mobile
+      // WebKit/Blink build. The drag would then follow the finger for the
+      // first few pixels (our pointermove handler), then the browser's own
+      // gesture would win and fire pointercancel, snapping the node back —
+      // exactly the "follows then stops" symptom. preventDefault() here
+      // suppresses that native gesture for this pointer without affecting
+      // the click/dblclick that still follow (see setPointerCapture note
+      // below for why those still work).
+      if (e.pointerType !== 'mouse') e.preventDefault();
       containerRef.current.focus();
       // Capture on the node's own element, not the container: capturing on
       // an ancestor makes the browser retarget the click/dblclick events
@@ -275,6 +287,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
   const beginResize = useCallback(
     (e, node) => {
       e.stopPropagation();
+      if (e.pointerType !== 'mouse') e.preventDefault(); // see beginMove
       e.currentTarget.setPointerCapture(e.pointerId);
       dragRef.current = { mode: 'resize', id: node.id, startW: node.width, startH: node.height, startWorld: screenToWorld(e.clientX, e.clientY), moved: false };
     },
@@ -283,6 +296,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
 
   const beginConnect = useCallback((e, node, side) => {
     e.stopPropagation();
+    if (e.pointerType !== 'mouse') e.preventDefault(); // see beginMove
     e.currentTarget.setPointerCapture(e.pointerId);
     const pt = canvasSideAnchor(node, side);
     dragRef.current = { mode: 'connect', fromNodeId: node.id, fromSide: side, startClient: { x: e.clientX, y: e.clientY } };

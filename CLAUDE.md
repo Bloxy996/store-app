@@ -1026,3 +1026,83 @@ otherwise cross the section 3.7 line. Do these one view type at a time,
 not all three in one pass — they don't share much beyond the date-column-
 requirement UI, and chart specifically depends on the new `dbState.js`
 aggregation helper landing first.
+
+---
+
+## 19. Changelog — mobile canvas drag-cancel fix, and scoping for the remaining 2026 request batch
+
+A user request landed asking for six things in one go: (1) finish the
+popup→inline conversion, (2) the graph revamp, (3) database
+timeline/calendar/chart views, (4) offline support, (5) the mobile canvas
+drag bug below, (6) a customizable frontmatter-autocomplete system. Per the
+request itself, these don't all land in one pass. This entry fixes #5 (a
+real, well-scoped bug) and records where the other five stand so the next
+session doesn't start blank.
+
+**Fixed — mobile canvas drag stopping after a split second
+(`features/canvas/CanvasView.jsx`, `canvas.css`).** Root cause: `beginMove`/
+`beginResize`/`beginConnect` called `e.stopPropagation()` but never
+`e.preventDefault()`, and `touch-action: none` was only set on the
+`.canvas-surface` ancestor, not on `.canvas-node`/`.canvas-dot`/
+`.canvas-resize-handle` themselves. On several mobile WebKit/Blink builds,
+an ancestor's `touch-action` isn't reliably honored for a nested pointerdown
+target, so the OS's own scroll/long-press gesture recognizer stayed armed
+alongside ours: our `pointermove` handler moved the node for the first few
+pixels, then the native gesture won, fired `pointercancel`, and
+`onContainerPointerUp` cleared `dragRef` — the exact "follows the finger for
+a split second, then stops" symptom. Fix is two-part, both needed: (a)
+`e.preventDefault()` for non-mouse pointers in all three begin* handlers,
+guarded with `e.pointerType !== 'mouse'` so it never touches desktop
+click/dblclick behavior; (b) explicit `touch-action: none` (+
+`-webkit-touch-callout: none`, blocking iOS's long-press callout from
+racing the drag too) directly on the node/dot/handle elements rather than
+relying on inheritance from `.canvas-surface`. One carve-out:
+`.canvas-node:has(.canvas-text-editor)` resets both back to normal so
+selecting/scrolling inside `MiniMarkdownEditor` while a text card is being
+edited still works — the lockdown is only needed while the card is an idle
+drag surface. See `changes.patch`.
+
+**Scoping for the other five (unstarted, next-session notes):**
+
+- **Popup→inline, remainder.** Section 18 already tracked this as open
+  before item 1 was even the popup item's original number — re-confirming
+  here: `DbCells.jsx`'s `DbPopover` cell popovers and every full-page modal
+  (`PaletteModal`, `GraphViewModal`, `DbRowDetailModal`,
+  `DbManageColumnsModal`, `OnboardingFlow`, `CanvasFilePickerModal`, image
+  viewer) are still real popups. Modals need a slide-over-panel redesign,
+  not a mechanical swap (sections 15/17 already explain why); do that as
+  its own pass, one modal type at a time. `GraphViewModal` should be done
+  *as part of* item 2 below (it's being replaced, not converted).
+- **Graph revamp and DB timeline/calendar/chart** — plan already written in
+  section 18 above; unchanged, still not started.
+- **Offline support — needs a decision before any code, not just a pass.**
+  The request (make files/folders available offline, à la Google Docs) is
+  in direct tension with section 3.1's non-negotiable "zero local note
+  storage" invariant and the `NetworkOnly` service-worker rule that
+  enforces it — genuine offline editing means *something* durable holds
+  note bytes on-device across reloads, which today's IndexedDB usage
+  (metadata/link-graph cache only) and RAM-only search index deliberately
+  don't do. Before implementing: decide (a) whether 3.1 gets a scoped,
+  explicit exception for user-opted-in offline files only (content stored
+  in IndexedDB, clearly marked as a deliberate exception in 3.1 itself, not
+  quietly worked around), (b) the conflict-resolution story for a file
+  edited offline and also changed on Drive before reconnecting, and (c)
+  per-folder propagation (marking a folder offline must track membership
+  changes — files added/moved/deleted inside it — which means it's a live
+  rule evaluated against the vault tree, not a one-time flag copied onto
+  children). Don't start on the mechanism until those three are answered;
+  this is the one item in the batch that changes an architectural
+  invariant rather than adding a feature within it.
+- **Customizable frontmatter autocomplete.** Maps to existing files:
+  `PropertiesPanel.jsx` (where the property editor already lives),
+  `features/editor/wikilinkCompletion.js` (existing CM6 autocomplete
+  source — a frontmatter-value completion source is the same pattern, not
+  a new mechanism), and a new `lib/frontmatterSchema.js` (section 3.4:
+  one source of truth) holding: base property definitions, per-property
+  value autocomplete lists (editable in a new Settings section), and the
+  value→child-properties map (e.g. `type: game` auto-adding the `game`
+  template's fields) that `GUIDE.md`'s note types describe. Schema itself
+  should be user-data (stored as a note or app-settings file the same way
+  other user config is, not hardcoded to `GUIDE.md`'s specific types) so
+  it's genuinely customizable rather than a hardcoded reimplementation of
+  today's five note types.

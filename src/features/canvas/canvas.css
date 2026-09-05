@@ -84,6 +84,19 @@
 .canvas-node {
   position: absolute;
   user-select: none;
+  /* Explicit, not just inherited from .canvas-surface: some mobile
+     WebKit/Blink builds don't reliably apply an ancestor's touch-action to
+     a nested pointerdown target, which let the OS's own scroll/long-press
+     gesture race our drag (see beginMove's comment in CanvasView.jsx). */
+  touch-action: none;
+  -webkit-touch-callout: none;
+}
+/* ...but once a text card is actually in edit mode, give normal touch
+   behavior back so selecting/scrolling inside the mini editor still works
+   on mobile — only the drag surface (the card while idle) needs none. */
+.canvas-node:has(.canvas-text-editor) {
+  touch-action: auto;
+  -webkit-touch-callout: default;
 }
 .canvas-node-inner {
   height: 100%;
@@ -255,6 +268,7 @@
   border: 2px solid var(--bg-1);
   z-index: 3;
   cursor: crosshair;
+  touch-action: none;
 }
 .canvas-dot-top { top: -6px; left: 50%; transform: translateX(-50%); }
 .canvas-dot-bottom { bottom: -6px; left: 50%; transform: translateX(-50%); }
@@ -272,6 +286,7 @@
   border: 2px solid var(--bg-1);
   cursor: nwse-resize;
   z-index: 3;
+  touch-action: none;
 }
 
 .canvas-marquee {
