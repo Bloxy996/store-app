@@ -726,14 +726,10 @@ at the end rather than half-done — see "Deferred" below.
 
 **Deferred (explicitly requested, each is its own follow-up pass, not
 bundled into this bugfix-sized patch):**
-1. **Site-wide popup removal → inline menus.** Every `DropdownMenu`/modal
-   usage across `features/` and `components/DropdownMenu.jsx` needs
-   auditing case-by-case (some floating menus, like the view-settings
-   popover in `DatabaseView.jsx`'s `DbViewTab`, can become inline
-   expand/collapse sections; others, like `DbRowDetailModal`, are closer
-   to full pages and need a different inline pattern, e.g. a slide-over
-   panel). Needs a design pass per popup type before touching code, not a
-   mechanical find-replace.
+1. ~~**Site-wide popup removal → inline menus.**~~ — started, not
+   finished; see section 15 for what's done (the database view-tabs case)
+   and what's still open (`DropdownMenu.jsx`'s four usages, every
+   full-page modal).
 2. **Graph editor revamp, Obsidian-style.** Current `features/graph/`
    (`useForceGraph.js` + `GraphViewModal.jsx`) is a single modal with a
    basic force simulation. Matching Obsidian's graph view means: local vs.
@@ -809,3 +805,67 @@ own real pass, not bundled in here. Same for `useForceGraph`/
   the Drive save round-trip), so a surprise reload could discard something
   the user hasn't finished typing. Don't add auto-reload without also
   solving that data-loss window.
+
+---
+
+## 15. Changelog — popup→inline pass 1: database view-settings/add-view
+
+First slice of item 1 in section 13 (site-wide popup → inline conversion).
+As that section itself warned, this needs a design pass per popup type, not
+a mechanical find-replace — so this pass covers exactly one clear case
+(the one section 13 named as a good first target) and leaves the rest
+explicitly scoped below, not half-done.
+
+**Converted:** `DatabaseView.jsx`'s two view-tab popovers — `DbViewTab`'s
+settings menu (rename / group-by / cover / delete view) and
+`DbAddViewButton`'s "new view" form. Both used to be a `DbPopover` in its
+default portal+fixed mode, anchored under one tab inside `.db-view-tabs`.
+That container scrolls horizontally (`overflow-x: auto`, which per the CSS
+spec also computes its vertical overflow to `auto`) — the exact clipping
+hazard `DropdownMenu.jsx`'s header comment already documents for the tab
+bar, so a panel anchored *under a specific tab* would get cut off as that
+tab scrolled toward the row's edge. Rather than keep the portal (a real
+popup, floating outside the tab row's own box) or ship a panel that
+silently clips, both now open **one shared inline panel** (`DbViewPanel`,
+new in `DatabaseView.jsx`) rendered once, directly below the whole
+`.db-view-tabs` row — genuinely in document flow, pushes the view body
+down while open, never clipped, and only one can be open at a time
+(`DatabaseView`'s new `viewPanel` state: `{ mode: 'settings', viewId } |
+{ mode: 'add' } | null`). `DbViewTab` and `DbAddViewButton` are now plain
+buttons that toggle that shared state — no `DbPopover` import left in this
+file. CSS: new `.db-view-panel-inline`/`.db-view-panel-row` rules in
+`database.css`; the now-unused `.db-add-view-popover`/
+`.db-view-settings-popover` selectors were removed from the shared rule
+they shared with `.db-select-popover` (which is still a real popover
+elsewhere in this file's family — untouched).
+
+**Not converted in this pass (each is a separate, real design decision,
+same reasoning CLAUDE.md already gave for why this can't be one
+mechanical change):**
+- **`DbPopover`'s other portal usages** (`DbCells.jsx`'s attachment-picker
+  popover, and the two select/multi-select cell popovers when `dense` is
+  true) — these open from inside a table cell, i.e. from *inside*
+  `.db-table-scroll` (`overflow: auto`) at arbitrary scroll positions, not
+  from a single fixed toolbar row. An inline panel there needs actual
+  layout thought (expand the row's height? a fixed side panel keyed to the
+  open cell?) rather than reusing the "one panel below a static row"
+  pattern that worked for the view tabs.
+- **`DropdownMenu.jsx` and its four usages** (`ExplorerPanel`'s new-file
+  and per-file context menus, `TabBar`'s tab context menu,
+  `SearchPanel`'s options menu). `TabBar`'s own tab strip has the identical
+  scrolling-ancestor problem `.db-view-tabs` did, so the same "one shared
+  panel below the row" fix likely applies there too — but `ExplorerPanel`'s
+  per-file context menu opens from an arbitrary row in a vertically
+  scrolling file tree, which doesn't have one fixed place to put an inline
+  panel without either pushing the whole tree down oddly or covering
+  neighboring rows. Needs its own per-case pass, not folded into this one.
+- **The full-page modals** (`PaletteModal`, `GraphViewModal`,
+  `DbRowDetailModal`, `DbManageColumnsModal`, `OnboardingFlow`,
+  `CanvasFilePickerModal`, the image viewer) — unchanged, still
+  `modal.css`'s overlay pattern. CLAUDE.md already called these out as
+  needing a different treatment (a slide-over panel, not an inline
+  expand section) since they're closer to full pages than to a small menu;
+  that's real interaction-design work for its own pass, and `GraphViewModal`
+  specifically is already slated to be replaced outright by the graph
+  revamp (item 2), so converting its current modal shell first would be
+  wasted work.

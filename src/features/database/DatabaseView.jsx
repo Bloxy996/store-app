@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 
-import { IconCheck, IconChevronDown, IconDatabase, IconEdit, IconKanban, IconLayoutGrid, IconLoader, IconPlus, IconSliders, IconTable, IconTrash } from '../../components/icons.jsx';
-import { DbPopover } from './DbCells.jsx';
+import { IconCheck, IconChevronDown, IconDatabase, IconKanban, IconLayoutGrid, IconLoader, IconPlus, IconSliders, IconTable, IconTrash } from '../../components/icons.jsx';
 import { DbManageColumnsModal, DbRowDetailModal } from './DbModals.jsx';
 import { DbBoardView, DbGalleryView, DbTableView } from './DbViews.jsx';
 import { DB_OPTION_COLORS, dbId, dbMakeRow, parseDatabaseContent, serializeDatabaseState } from './dbState.js';
@@ -44,143 +43,69 @@ function DbTitleField({ title, onRename }) {
 const DB_VIEW_TYPE_ICONS = { table: IconTable, board: IconKanban, gallery: IconLayoutGrid };
 
 
-function DbViewTab({ view, active, onSelect, onRename, onDelete, columns, onChangeGroupBy, onChangeCover }) {
+// A view's settings and "add view" used to each be their own `DbPopover`
+// (floating, portaled to the viewport). Both are triggered from inside
+// `.db-view-tabs`, which scrolls horizontally (`overflow-x: auto` — same
+// clipping problem TabBar's tab strip has, see DropdownMenu.jsx's header
+// comment), so a panel anchored *under one tab* would get clipped as soon
+// as that tab scrolls near the row's edge. Instead of keeping the portal
+// escape hatch, both now open one inline panel *below the whole tab row*
+// (`DbViewPanel`, rendered once by `DatabaseView`), outside the scrolling
+// container — genuinely part of the layout (pushes the view content down
+// while open, never clipped), with only one open at a time. `DatabaseView`
+// owns which one via `viewPanel` state.
+function DbViewTab({ view, active, onSelect, panelOpen, onToggleSettings }) {
   const ViewIcon = DB_VIEW_TYPE_ICONS[view.type] || IconTable;
-  const [renaming, setRenaming] = useState(false);
-  const [draft, setDraft] = useState(view.name);
   return (
     <div className={`db-view-tab ${active ? 'active' : ''}`}>
       <button className="db-view-tab-btn" onClick={onSelect}>
         <ViewIcon size={13} />
-        {renaming ? (
-          <input
-            className="db-view-rename-input"
-            autoFocus
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onClick={(e) => e.stopPropagation()}
-            onBlur={() => {
-              setRenaming(false);
-              const t = draft.trim();
-              if (t && t !== view.name) onRename(t);
-              else setDraft(view.name);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') e.currentTarget.blur();
-            }}
-          />
-        ) : (
-          <span>{view.name}</span>
-        )}
+        <span>{view.name}</span>
       </button>
-      <DbPopover
-        trigger={(toggle) => (
-          <button
-            className="db-view-tab-menu"
-            onClick={(e) => {
-              e.stopPropagation();
-              toggle(e);
-            }}
-          >
-            <IconChevronDown size={11} />
-          </button>
-        )}
-        width={200}
+      <button
+        className={`db-view-tab-menu ${panelOpen ? 'active' : ''}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleSettings();
+        }}
       >
-        {(close) => (
-          <div className="db-view-settings-popover">
-            <button
-              className="db-popover-item"
-              onClick={() => {
-                setRenaming(true);
-                close();
-              }}
-            >
-              <IconEdit size={13} /> Rename
-            </button>
-            {view.type === 'board' && (
-              <>
-                <div className="db-popover-section-label">Group by</div>
-                {columns
-                  .filter((c) => c.type === 'select')
-                  .map((c) => (
-                    <button
-                      key={c.id}
-                      className="db-popover-item"
-                      onClick={() => {
-                        onChangeGroupBy(c.id);
-                        close();
-                      }}
-                    >
-                      {c.name} {c.id === view.groupByColumnId && <IconCheck size={12} />}
-                    </button>
-                  ))}
-                {columns.filter((c) => c.type === 'select').length === 0 && (
-                  <div className="muted small db-popover-empty">No Select properties yet.</div>
-                )}
-              </>
-            )}
-            {view.type === 'gallery' && (
-              <>
-                <div className="db-popover-section-label">Cover image</div>
-                <button
-                  className="db-popover-item"
-                  onClick={() => {
-                    onChangeCover(null);
-                    close();
-                  }}
-                >
-                  None {!view.coverColumnId && <IconCheck size={12} />}
-                </button>
-                {columns
-                  .filter((c) => c.type === 'image')
-                  .map((c) => (
-                    <button
-                      key={c.id}
-                      className="db-popover-item"
-                      onClick={() => {
-                        onChangeCover(c.id);
-                        close();
-                      }}
-                    >
-                      {c.name} {c.id === view.coverColumnId && <IconCheck size={12} />}
-                    </button>
-                  ))}
-              </>
-            )}
-            {onDelete && (
-              <button
-                className="db-popover-item danger"
-                onClick={() => {
-                  onDelete();
-                  close();
-                }}
-              >
-                <IconTrash size={13} /> Delete view
-              </button>
-            )}
-          </div>
-        )}
-      </DbPopover>
+        <IconChevronDown size={11} />
+      </button>
     </div>
   );
 }
 
 
-function DbAddViewButton({ onAdd }) {
-  const [name, setName] = useState('');
+function DbAddViewButton({ panelOpen, onToggle }) {
   return (
-    <DbPopover
-      trigger={(toggle) => (
-        <button className="db-add-view-btn" onClick={toggle} title="Add view">
-          <IconPlus size={13} />
-        </button>
-      )}
-      width={200}
-    >
-      {(close) => (
-        <div className="db-add-view-popover">
-          <input className="db-popover-filter" placeholder="View name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+    <button className={`db-add-view-btn ${panelOpen ? 'active' : ''}`} onClick={onToggle} title="Add view">
+      <IconPlus size={13} />
+    </button>
+  );
+}
+
+
+// The inline panel itself — settings for one view, or the add-view form.
+// Rendered once by DatabaseView, below `.db-view-tabs`, never portaled.
+function DbViewPanel({ mode, view, columns, onRename, onChangeGroupBy, onChangeCover, onDelete, onAdd, onClose, canDelete }) {
+  const [addName, setAddName] = useState('');
+  const [renameDraft, setRenameDraft] = useState(view?.name || '');
+  useEffect(() => setRenameDraft(view?.name || ''), [view]);
+
+  if (mode === 'add') {
+    return (
+      <div className="db-view-panel-inline">
+        <div className="db-view-panel-row">
+          <input
+            className="db-popover-filter"
+            placeholder="View name"
+            value={addName}
+            onChange={(e) => setAddName(e.target.value)}
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') onClose();
+            }}
+          />
           {[
             { type: 'table', label: 'Table', icon: IconTable },
             { type: 'board', label: 'Board', icon: IconKanban },
@@ -190,18 +115,82 @@ function DbAddViewButton({ onAdd }) {
               key={opt.type}
               className="db-popover-item"
               onClick={() => {
-                onAdd(opt.type, name.trim() || opt.label);
-                setName('');
-                close();
+                onAdd(opt.type, addName.trim() || opt.label);
+                setAddName('');
+                onClose();
               }}
             >
               <opt.icon size={13} /> {opt.label}
             </button>
           ))}
         </div>
-      )}
-    </DbPopover>
-  );
+      </div>
+    );
+  }
+
+  if (mode === 'settings' && view) {
+    return (
+      <div className="db-view-panel-inline">
+        <div className="db-view-panel-row">
+          <input
+            className="db-popover-filter"
+            value={renameDraft}
+            onChange={(e) => setRenameDraft(e.target.value)}
+            onBlur={() => {
+              const t = renameDraft.trim();
+              if (t && t !== view.name) onRename(t);
+              else setRenameDraft(view.name);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur();
+              if (e.key === 'Escape') onClose();
+            }}
+          />
+          {view.type === 'board' && (
+            <>
+              <span className="db-popover-section-label">Group by</span>
+              {columns.filter((c) => c.type === 'select').length === 0 && <span className="muted small">No Select properties yet.</span>}
+              {columns
+                .filter((c) => c.type === 'select')
+                .map((c) => (
+                  <button key={c.id} className="db-popover-item" onClick={() => onChangeGroupBy(c.id)}>
+                    {c.name} {c.id === view.groupByColumnId && <IconCheck size={12} />}
+                  </button>
+                ))}
+            </>
+          )}
+          {view.type === 'gallery' && (
+            <>
+              <span className="db-popover-section-label">Cover</span>
+              <button className="db-popover-item" onClick={() => onChangeCover(null)}>
+                None {!view.coverColumnId && <IconCheck size={12} />}
+              </button>
+              {columns
+                .filter((c) => c.type === 'image')
+                .map((c) => (
+                  <button key={c.id} className="db-popover-item" onClick={() => onChangeCover(c.id)}>
+                    {c.name} {c.id === view.coverColumnId && <IconCheck size={12} />}
+                  </button>
+                ))}
+            </>
+          )}
+          {canDelete && (
+            <button
+              className="db-popover-item danger"
+              onClick={() => {
+                onDelete();
+                onClose();
+              }}
+            >
+              <IconTrash size={13} /> Delete view
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return null;
 }
 
 
@@ -216,6 +205,9 @@ function DatabaseView({ file, content, onChange, handlers, linkIndex, loading, i
   const [state, setState] = useState(() => parseDatabaseContent(content));
   const [openRowId, setOpenRowId] = useState(null);
   const [managePropsOpen, setManagePropsOpen] = useState(false);
+  // Which inline view panel (see DbViewPanel above) is open, if any:
+  // { mode: 'settings', viewId } | { mode: 'add' } | null.
+  const [viewPanel, setViewPanel] = useState(null);
 
   const commit = useCallback(
     (updater) => {
@@ -354,14 +346,13 @@ function DatabaseView({ file, content, onChange, handlers, linkIndex, loading, i
             view={v}
             active={v.id === activeView.id}
             onSelect={() => setActiveView(v.id)}
-            onRename={(name) => updateView(v.id, { name })}
-            onDelete={state.views.length > 1 ? () => deleteView(v.id) : null}
-            columns={state.columns}
-            onChangeGroupBy={(colId) => updateView(v.id, { groupByColumnId: colId })}
-            onChangeCover={(colId) => updateView(v.id, { coverColumnId: colId })}
+            panelOpen={viewPanel?.mode === 'settings' && viewPanel.viewId === v.id}
+            onToggleSettings={() =>
+              setViewPanel((p) => (p?.mode === 'settings' && p.viewId === v.id ? null : { mode: 'settings', viewId: v.id }))
+            }
           />
         ))}
-        <DbAddViewButton onAdd={addView} />
+        <DbAddViewButton panelOpen={viewPanel?.mode === 'add'} onToggle={() => setViewPanel((p) => (p?.mode === 'add' ? null : { mode: 'add' }))} />
         <div className="db-toolbar-spacer" />
         <button className="db-manage-btn" onClick={() => setManagePropsOpen(true)}>
           <IconSliders size={13} /> Properties
@@ -370,6 +361,21 @@ function DatabaseView({ file, content, onChange, handlers, linkIndex, loading, i
           <IconPlus size={14} /> New
         </button>
       </div>
+
+      {viewPanel && (
+        <DbViewPanel
+          mode={viewPanel.mode}
+          view={viewPanel.mode === 'settings' ? state.views.find((v) => v.id === viewPanel.viewId) : null}
+          columns={state.columns}
+          canDelete={state.views.length > 1}
+          onRename={(name) => updateView(viewPanel.viewId, { name })}
+          onChangeGroupBy={(colId) => updateView(viewPanel.viewId, { groupByColumnId: colId })}
+          onChangeCover={(colId) => updateView(viewPanel.viewId, { coverColumnId: colId })}
+          onDelete={() => deleteView(viewPanel.viewId)}
+          onAdd={addView}
+          onClose={() => setViewPanel(null)}
+        />
+      )}
 
       {activeView.type === 'table' && (
         <DbTableView

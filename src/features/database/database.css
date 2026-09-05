@@ -263,11 +263,44 @@
   flex-direction: column;
   gap: 1px;
 }
-.db-select-popover,
-.db-add-view-popover,
-.db-view-settings-popover {
+.db-select-popover {
   display: flex;
   flex-direction: column;
+}
+
+/* Inline view-settings/add-view panel (DbViewPanel) — replaces what used to
+   be two separate DbPopover overlays anchored under a horizontally-
+   scrolling tab (see DbViewTab's header comment in DatabaseView.jsx for
+   why). Sits in normal flow directly below `.db-view-tabs`, so it's never
+   clipped and pushes the view body down while open instead of floating
+   over it. */
+.db-view-panel-inline {
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-0);
+  padding: 8px 10px;
+  flex-shrink: 0;
+}
+.db-view-panel-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.db-view-panel-row .db-popover-filter {
+  width: 160px;
+  margin-bottom: 0;
+  flex-shrink: 0;
+}
+.db-view-panel-row .db-popover-item {
+  width: auto;
+}
+.db-view-panel-row .db-popover-section-label {
+  padding: 0 2px;
+  flex-basis: 100%;
+}
+.db-view-tab-menu.active,
+.db-add-view-btn.active {
+  color: var(--accent);
 }
 
 /* Option chips --------------------------------------------------------------- */
