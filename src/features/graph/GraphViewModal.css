@@ -48,11 +48,91 @@
   white-space: nowrap;
   cursor: pointer;
 }
+.graph-modal-tools .icon-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
 .graph-canvas-wrap {
   flex: 1;
   position: relative;
   min-height: 0;
   background: var(--bg-0);
+}
+.graph-modal-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.graph-sidebar {
+  flex-shrink: 0;
+  width: 220px;
+  overflow-y: auto;
+  padding: 12px;
+  border-right: 1px solid var(--border-soft);
+  background: var(--bg-1);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.graph-sidebar-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.graph-sidebar-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-faint);
+}
+.graph-slider-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.graph-slider-row input[type='range'] {
+  width: 100%;
+}
+.graph-group-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.graph-group-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.graph-group-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-normal);
+  font-size: 12px;
+  padding: 4px 7px;
+}
+.graph-add-group-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  padding: 5px 8px;
+  cursor: pointer;
+  align-self: flex-start;
+}
+.graph-add-group-btn:hover {
+  color: var(--text-normal);
+  border-color: var(--text-faint);
 }
 .graph-svg {
   width: 100%;
@@ -80,7 +160,7 @@
   opacity: 0.25;
 }
 .graph-node circle {
-  fill: var(--accent);
+  fill: var(--graph-node-color, var(--accent));
   stroke: var(--bg-0);
   stroke-width: 1.5;
 }
@@ -116,6 +196,17 @@
   }
   .graph-search {
     width: 120px;
+  }
+  .graph-modal-body {
+    flex-direction: column;
+  }
+  .graph-sidebar {
+    width: 100%;
+    max-height: 40vh;
+    border-right: none;
+    border-bottom: 1px solid var(--border-soft);
+    flex-direction: row;
+    flex-wrap: wrap;
   }
 }
 @media (max-width: 640px) {

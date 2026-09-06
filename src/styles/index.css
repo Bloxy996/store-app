@@ -29,3 +29,4 @@
 @import '../features/database/database.css';
 @import '../features/canvas/canvas.css';
 @import '../components/MiniMarkdownEditor.css';
+@import '../features/settings/FrontmatterSchemaSettings.css';

@@ -851,25 +851,48 @@
   border-color: var(--text-faint);
 }
 
-/* Row detail modal ----------------------------------------------------------- */
+/* Row detail panel — slide-over from the right edge (Notion "open page"/
+   Linear side-panel treatment), not a centered modal box. Still an overlay
+   (click-outside-to-close, dims the page) but the panel itself docks to the
+   viewport edge and is full-height, which is the actual distinction between
+   a "popup" and a genuine slide-over per CLAUDE.md section 15/17's note that
+   full-page modals need this treatment rather than a mechanical inline
+   swap. */
 .db-row-modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(0, 0, 0, 0.4);
   display: flex;
-  align-items: flex-start;
-  justify-content: center;
+  align-items: stretch;
+  justify-content: flex-end;
   z-index: 500;
-  padding: 40px 20px;
-  overflow-y: auto;
 }
 .db-row-modal {
   background: var(--bg-1);
-  border: 1px solid var(--bg-4);
-  border-radius: var(--radius-lg);
+  border-left: 1px solid var(--bg-4);
   width: 100%;
-  max-width: 560px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  max-width: 480px;
+  height: 100%;
+  box-shadow: -20px 0 60px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  animation: db-row-modal-slide-in 0.18s ease-out;
+}
+@keyframes db-row-modal-slide-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .db-row-modal {
+    animation: none;
+  }
 }
 .db-row-modal-header {
   display: flex;
@@ -877,6 +900,7 @@
   justify-content: space-between;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-soft);
+  flex-shrink: 0;
 }
 .db-row-delete-btn {
   display: flex;
@@ -936,25 +960,34 @@
   margin-top: 6px;
 }
 
-/* Properties (column) manager modal ------------------------------------------ */
+/* Properties (column) manager modal — same slide-over treatment as the row
+   detail panel (section 22): a list of properties you tweak alongside the
+   table, not a one-shot centered dialog. Reuses db-row-modal-slide-in. */
 .db-manage-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(0, 0, 0, 0.4);
   display: flex;
-  align-items: flex-start;
-  justify-content: center;
+  align-items: stretch;
+  justify-content: flex-end;
   z-index: 500;
-  padding: 60px 20px;
-  overflow-y: auto;
 }
 .db-manage-modal {
   background: var(--bg-1);
-  border: 1px solid var(--bg-4);
-  border-radius: var(--radius-lg);
+  border-left: 1px solid var(--bg-4);
   width: 100%;
-  max-width: 480px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  max-width: 420px;
+  height: 100%;
+  box-shadow: -20px 0 60px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  animation: db-row-modal-slide-in 0.18s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .db-manage-modal {
+    animation: none;
+  }
 }
 .db-manage-header {
   display: flex;
@@ -965,9 +998,11 @@
   font-size: 14px;
   font-weight: 600;
   color: var(--text-normal);
+  flex-shrink: 0;
 }
 .db-manage-list {
-  max-height: 360px;
+  max-height: none;
+  flex: 1;
   overflow-y: auto;
   padding: 8px 10px;
   display: flex;
@@ -1098,6 +1133,7 @@
   gap: 6px;
   padding: 10px 16px 14px;
   border-top: 1px solid var(--border-soft);
+  flex-shrink: 0;
 }
 .db-manage-add .db-popover-filter {
   flex: 1;

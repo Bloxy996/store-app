@@ -194,6 +194,7 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
             linkIndex={linkIndex}
             phantomRecords={phantomRecords}
             allTags={handlers.allTags || []}
+            frontmatterSchema={handlers.frontmatterSchema}
             handlers={readingHandlers}
             foldState={foldState}
             isActivePane={isActivePane}

@@ -10,9 +10,17 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 // Positions/velocities/pinned-state live in a ref (not React state) since
 // they update every animation frame; `bump` below is the only piece of
 // this that touches React state, purely to trigger a re-render per tick.
-function useForceGraph(nodeIds, edgeList, width, height) {
+// `forces` mirrors Obsidian's own Forces panel (repel/link/linkDistance/
+// center) — GraphViewModal exposes these as sliders; the defaults below are
+// this function's previous hardcoded constants, unchanged for anyone who
+// never touches the sliders.
+const DEFAULT_FORCES = { repel: 2400, linkStrength: 0.02, linkDistance: 95, center: 0.012 };
+
+function useForceGraph(nodeIds, edgeList, width, height, forces = DEFAULT_FORCES) {
   const stateRef = useRef({ pos: new Map(), vel: new Map(), pinned: new Set() });
   const alphaRef = useRef(1);
+  const forcesRef = useRef(forces);
+  forcesRef.current = forces;
   const rafRef = useRef(null);
   const stepRef = useRef(null);
   const [, bump] = useState(0);
@@ -44,16 +52,13 @@ function useForceGraph(nodeIds, edgeList, width, height) {
   useEffect(() => {
     let cancelled = false;
     const { pos, vel, pinned } = stateRef.current;
-    const REPULSION = 2400;
-    const SPRING = 0.02;
-    const SPRING_LEN = 95;
-    const CENTER_PULL = 0.012;
     const DAMPING = 0.8;
 
     function step() {
       if (cancelled) return;
       if (alphaRef.current > 0.008) {
         const alpha = alphaRef.current;
+        const { repel: REPULSION, linkStrength: SPRING, linkDistance: SPRING_LEN, center: CENTER_PULL } = forcesRef.current;
         // Pairwise repulsion — O(n²), fine at the node counts a single
         // vault's graph realistically reaches; spatial partitioning would
         // be the next lever if that stops being true for very large vaults.
@@ -144,4 +149,4 @@ function useForceGraph(nodeIds, edgeList, width, height) {
   return { pos: stateRef.current.pos, pinned: stateRef.current.pinned, wake };
 }
 
-export { useForceGraph };
+export { useForceGraph, DEFAULT_FORCES };

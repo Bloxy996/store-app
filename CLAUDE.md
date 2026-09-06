@@ -1151,5 +1151,305 @@ primitive) and Chart (needs the `dbState.js` group-by/aggregate helper to
 land first, so a future chart-block-in-a-note feature can reuse it) are
 still open, one view type at a time as section 18 specified. Everything
 else from the six-item request in section 19 — popup/modal remainder,
-graph revamp, offline support, frontmatter autocomplete — is unchanged
-from that entry.
+graph revamp, offline support — is unchanged from that entry.
+
+---
+
+## 21. Changelog — customizable frontmatter autocomplete (item 6)
+
+The last easily-scoped item from section 19's six-item batch (offline
+support remains blocked on the architecture decision described there;
+popup/modal remainder and the graph revamp are unchanged, still their own
+passes).
+
+**Added, matching the plan section 19 already wrote:**
+- **`lib/frontmatterSchema.js`** (new): the customizable model — a list of
+  property definitions, each with an optional `valueOptions` list and an
+  optional `childrenByValue` map (value -> properties that value implies,
+  e.g. `type: game` -> `aliases`). Ships with `DEFAULT_SCHEMA` mirroring
+  every type in GUIDE.md (info/entity/event/game/concept/reference)
+  out of the box, including `category: mechanic` -> `mechanic` per that
+  guide's "Mechanic is only used if the category is mechanic" rule.
+  Persisted to `localStorage` (`vault_frontmatter_schema`), same mechanism
+  and same load/save shape as `useAccentColor` — this is user
+  configuration, not note content, so it doesn't touch section 3.1's
+  Drive-content rule at all. Also exports `frontmatterRangeAt`/`usedKeys`,
+  which locate and parse the leading `---` block by reusing
+  `markdownParse.js`'s existing frontmatter regex (3.4 — one source of
+  truth), and `serialize/parseChildrenByValue`, the compact
+  `value: key=default, key2=default2` text format the Settings panel edits
+  directly instead of raw JSON.
+- **`features/editor/frontmatterCompletion.js`** (new): a CM6
+  `CompletionSource`, same ctx-getter shape as `wikilinkCompletion.js`'s
+  `wikilinkTagCompletionSource` so it drops into the same
+  `autocompletion({ override: [...] })` list (`CodeMirrorNoteEditor.jsx`).
+  Only ever active with the cursor inside the leading `---...---` block.
+  On a bare line, suggests schema property keys not already present in
+  that block; after `key: `, suggests that key's `valueOptions`; picking a
+  value that has `childrenByValue` entries also inserts the implied
+  child-property lines right below, skipping any already present — this
+  is the actual "select `game`, get `aliases` for free" behavior
+  GUIDE.md's workflow needs.
+- **`features/settings/FrontmatterSchemaSettings.jsx` + `.css`** (new): a
+  modal (still `modal.css`'s overlay pattern, like `HelpModal` — a new
+  settings surface isn't the popup→inline item from section 8/13, so it
+  wasn't worth inventing a bespoke inline layout for a first version; fold
+  it into a future modal-redesign pass alongside the others listed in
+  section 19 if that's ever done). Lists every schema property as an
+  editable row (key, comma-separated value options, and the
+  `value: key=default` textarea for child properties), plus "Add property"
+  and "Reset to default". Lazy-loaded from `App.jsx` the same way
+  `HelpModal`/`PaletteModal`/`GraphViewModal` already are (section 4);
+  verified via a real build that it lands in its own ~2.5KB chunk, not the
+  main bundle.
+- **`hooks/useFrontmatterSchema.js`** (new): thin `useState` + persist
+  wrapper, same shape as `useAccentColor`. Threaded into the existing
+  `handlers` object in `App.jsx` (`handlers.frontmatterSchema`) rather than
+  as a new prop down every layer — same pattern `handlers.allTags` already
+  uses to reach `CodeMirrorNoteEditor` through `EditorContent.jsx`.
+- New "Frontmatter properties" icon button (`IconSliders`) in the sidebar
+  footer, next to the existing Accent color / Help / Change folder buttons.
+- `HelpModal.jsx`'s Features tab documents the new autocomplete behavior
+  and where to customize it (section 6).
+
+**Deliberately not done:**
+- No UI for reordering properties or for a richer child-property editor
+  than the compact text format — matches how much surface area GUIDE.md's
+  actual workflow needs; a drag-to-reorder list or per-child structured
+  form would be a real usability upgrade but wasn't asked for and adds
+  meaningfully more component code for a first version.
+- Autocomplete only fires on a value already being typed after `key: `
+  (or on a bare key) — it doesn't yet handle list-style properties like
+  `after:` with an indented `- "[[...]]"` block underneath (section 9's
+  existing wikilink autocomplete already covers `[[` inside such a list
+  item once the cursor is there; this pass didn't add schema-driven
+  suggestions for the list *items* themselves, only for scalar
+  `key: value` lines). Worth a follow-up if that gap is felt in practice.
+- `MiniMarkdownEditor` (db cells / canvas cards, section 12) doesn't get
+  this completion source — neither surface has a frontmatter block to
+  autocomplete, so there's nothing to wire up there.
+
+Remaining from the original six-item request (section 19): popup/modal
+remainder, the graph revamp, and offline support (still blocked on the
+architecture decision that section spells out) — each its own pass.
+
+---
+
+## 22. Changelog — popup→inline pass 4: row-detail modal becomes a slide-over panel
+
+Continues item 1 (sections 13/15/16/17). Converts the first of the
+full-page modals sections 15/17 deliberately left alone, pending "a
+slide-over panel redesign, not an inline expand section": **`DbRowDetailModal`**
+(`DbModals.jsx`, `database.css`). This was the best first candidate — a
+Notion-style "open page" already conceptually wants to feel like navigating
+to a side view of the row, not a centered dialog floating over the table.
+
+**Converted:** `.db-row-modal-overlay` still dims the page and closes on an
+outside click (it's still an overlay in that sense — a slide-over is not
+the same ask as the small-menu inline conversions in passes 1-3, and
+CLAUDE.md never claimed it would stop dimming the background), but now
+docks its content flush to the right edge (`justify-content: flex-end`,
+`align-items: stretch`) instead of centering a box with page padding.
+`.db-row-modal` itself is now full viewport height, `border-left` instead
+of a full border + border-radius, and slides in from the edge with a short
+transform/opacity keyframe (skipped under `prefers-reduced-motion`). No
+`DbModals.jsx` component logic changed — same props, same `DbCell`
+rendering per column, same delete button and preview section; this pass is
+the shell/CSS only. Mobile override (`max-width: 100%` at the existing
+breakpoint) now reads as "full-screen slide-over on small viewports",
+which is the correct mobile treatment for this pattern and didn't need to
+change.
+
+**Not converted in this pass (deliberately, same one-modal-type-at-a-time
+approach as passes 1-3):**
+- **`DbManageColumnsModal`, `PaletteModal`, `OnboardingFlow`,
+  `CanvasFilePickerModal`, the image viewer** — still `modal.css`'s
+  centered-overlay pattern. None of these are "open this record and look at
+  it beside your other work" the way the row-detail panel is; a command
+  palette or a first-run wizard don't obviously want a side-panel
+  treatment, so each needs its own judgment call rather than the row-detail
+  panel's reasoning applied by default. Next candidate worth a look:
+  `DbManageColumnsModal` is the most row-detail-like of the remainder (a
+  settings-ish list, not a one-shot flow), if this thread continues.
+  `FrontmatterSchemaSettings.jsx` (section 21) is also still this same
+  centered-modal shape for the same reason it was fine to ship that way
+  initially — see that entry.
+- **`GraphViewModal`** — unchanged, still slated for outright replacement
+  by the graph revamp (item 2) rather than a shell conversion.
+- **`DbCells.jsx`'s `DbPopover` in dense/table-cell mode** (attachment
+  picker, dense select/multi-select) — looked at this pass and decided
+  *not* to force it inline. `.db-table-scroll` clips both axes
+  (`overflow: auto`), so an absolutely-positioned inline panel anchored to
+  a cell gets cut off near the table's edges — the exact hazard sections
+  15/17 already flagged. The only way to avoid that clipping is
+  `position: fixed`, which is a floating popup by definition regardless of
+  whether it's portaled to `document.body` or rendered as a plain sibling
+  — dropping the `createPortal` call there would be a cosmetic change, not
+  an actual popup removal, so it wasn't made. This is also the standard
+  treatment in Notion/Airtable/Coda's own dense grid views for exactly this
+  reason: a floating picker is the only usable pattern once a property
+  editor has to open from inside a tightly packed, independently-scrolling
+  cell grid. Left as a real, intentional exception rather than pretend-fixed
+  — revisit only if a genuinely different layout (e.g. always expanding the
+  full row height when any of its cells is being edited) is wanted later,
+  which is a bigger interaction change than this pass's scope.
+
+---
+
+## 23. Changelog — popup→inline pass 5: manage-columns modal becomes a slide-over panel
+
+Continues item 1. Converts the modal section 22 named as the next
+candidate: **`DbManageColumnsModal`** (`DbModals.jsx`, `database.css`).
+Same reasoning as section 22 — this is a live properties list you tweak
+while looking at the table, not a one-shot flow, so the row-detail panel's
+slide-over treatment fits it too.
+
+**Converted:** `.db-manage-overlay`/`.db-manage-modal` now use the identical
+right-docked, full-height, slide-in shell as `.db-row-modal-overlay`/
+`.db-row-modal` from section 22 (same `db-row-modal-slide-in` keyframe,
+reused rather than duplicated). `.db-manage-modal` is now a flex column so
+the property list (`.db-manage-list`, now `flex: 1` instead of a fixed
+`max-height: 360px`) scrolls independently while the header and the
+"add property" row at the bottom both stay pinned (`flex-shrink: 0`) —
+this is a genuine improvement over the old fixed-height list, which is a
+side effect of switching to a full-height panel, not something that needed
+separate work. No `DbModals.jsx` logic changed.
+
+**Still open (unchanged from section 22's list):** `PaletteModal`,
+`OnboardingFlow`, `CanvasFilePickerModal`, the image viewer, and
+`FrontmatterSchemaSettings.jsx` remain centered modals — none of them
+share the "live list beside your other work" shape that made the row-detail
+and manage-columns panels good fits, so converting them needs its own
+per-case judgment, not this same shell reused by default. `GraphViewModal`
+is still slated for outright replacement by the graph revamp rather than a
+shell conversion. `DbCells.jsx`'s dense/table-cell popovers remain the
+documented, intentional exception from section 22 — that reasoning is
+unchanged.
+
+---
+
+## 24. Changelog — popup→inline pass 6: canvas file picker, and closing out item 1
+
+**Converted:** `CanvasFilePickerModal` — was a centered `modal-overlay`;
+`.canvas-toolbar` is an in-flow, non-scrolling top row (`flex-shrink: 0`
+inside `.canvas-view`'s flex column, not absolutely positioned), so this is
+the exact "one shared panel below a static row" shape as `DbViewPanel`/the
+tab-bar menu. It's now rendered by `CanvasView.jsx` as a plain sibling
+directly below `CanvasToolbar`, a fixed-width block (`align-self:
+flex-start`, un-stretched) with `useClickOutside` instead of an overlay
+`onClick`. No search/pick logic changed.
+
+**Item 1 (popup→inline, six-pass total across sections 13/15/16/17/22/23/24)
+is now closed, with three deliberate, documented exceptions:**
+- **`PaletteModal`** (Cmd+K-style fuzzy switcher/command palette) and
+  **`HelpModal`** (reference lookup) stay centered modals. Both are
+  "summon from anywhere, look something up or jump somewhere, dismiss"
+  interactions with no natural anchor point — a command palette floating
+  center-screen is the standard, expected shape for this exact pattern
+  (VS Code, Slack, Notion, Linear all do the same), not a popup standing in
+  for something that should've been inline.
+- **`ProxyFolderBrowser`'s `variant="modal"`** (`App.jsx`'s "Change store
+  folder" action, proxy-auth mode) — a rare, deliberate one-off action
+  triggered from the sidebar footer, not a live list beside ongoing work.
+  Its `variant="inline"` usage (`OnboardingFlow.jsx`) was already inline
+  before this changelog even started (see that file's own header comment).
+- **`FrontmatterSchemaSettings`** (section 21) — same reasoning as
+  `PaletteModal`/`HelpModal`: a settings lookup, summoned and dismissed,
+  not something worth a bespoke inline layout for a first version.
+- **The "image viewer" named in sections 15/17's original deferred list**
+  doesn't currently exist as a separate component in this codebase — no
+  `modal-overlay` usage, lightbox, or dedicated asset-preview surface was
+  found; `onOpenAsset` just opens the file in an editor pane. Either it
+  predates the App.jsx restructure (section 1) and was already removed, or
+  the original scoping note was aspirational. Nothing to convert; noting
+  this so a future session doesn't go looking for it again.
+
+Also unchanged: `DbCells.jsx`'s dense/table-cell popovers remain the
+intentional exception from section 22 (real clipping constraint, not
+laziness), and `GraphViewModal` is still slated for outright replacement by
+the graph revamp rather than a shell conversion — that item (2) is next.
+
+---
+
+## 25. Changelog — graph view revamp, slice 1: local graph, groups, and forces
+
+Item 2 from section 18's plan. Researched Obsidian's actual Graph view
+before starting (its Filters/Groups/Forces panels and local-graph-with-
+depth behavior) rather than guessing — see that section's own summary,
+confirmed against Obsidian's help docs and independent write-ups of the
+same three panels. This pass covers section 18's points 2-4; **point 1
+(replacing the modal shell with a real pane/tab) was deliberately not
+done** — see "Not done" below for why, and what's now easier because of
+this pass if that's picked up next.
+
+**Added (`features/graph/`):**
+- **`useForceGraph.js`** now takes a 5th `forces` argument
+  (`{ repel, linkStrength, linkDistance, center }`, exported as
+  `DEFAULT_FORCES`) instead of hardcoding those four constants. Read via a
+  ref updated every render, not a simulation-effect dependency, so dragging
+  a slider retunes the *running* simulation instead of restarting/reseeding
+  it — same "wake, don't reset" feel as the existing drag/filter-change
+  wake calls.
+- **`graphSettings.js`** (new): persists Filters/Groups/Forces to
+  `localStorage` (`vault_graph_settings`), the same mechanism as accent
+  color and the frontmatter schema — Obsidian keeps the equivalent in
+  `.obsidian/graph.json` for the same reason (reopening the graph
+  shouldn't reset your view). Holds `showAttachments`, `hideOrphans`,
+  `localMode`, `localDepth`, `forces`, `groups`.
+- **`GraphViewModal.jsx`**, three additions:
+  1. **Local graph mode** — a toggle + depth slider (1-5, mirrors
+     Obsidian's own range) that BFS-limits the rendered node set to notes
+     within N hops of `activeFileId`, computed from the *full* edge list
+     before the existing attachment/orphan filters apply (so those still
+     compose correctly on top of the local neighborhood).
+  2. **Groups** — an editable list of `{ query, color }`; a node's fill is
+     the first group whose query is a substring of its name (Obsidian's
+     own "first match wins" rule for its regex-based groups, simplified
+     here to substring-of-name rather than full query syntax — see "Not
+     done"). Reuses `dbState.js`'s `DB_OPTION_COLORS` palette rather than
+     inventing a second one.
+  3. **Forces panel** — four range sliders (repel/link force/link
+     distance/center) bound straight to `useForceGraph`'s new param.
+  All three live in a new `.graph-sidebar`, toggled by a sliders-icon
+  button in the header and docked left as a genuine in-flow flex child of
+  a new `.graph-modal-body` wrapper — not a popup, consistent with item 1's
+  direction elsewhere in this doc, and not a new exception to it.
+- `HelpModal.jsx`'s Graph view entry documents Local graph/Groups/Forces.
+
+**Not done (scope deliberately narrowed for this pass):**
+- **Section 18's point 1 — modal → real pane/tab.** Left as a modal. This
+  is a separate, larger change (a virtual non-Drive-file pane kind touching
+  `EditorContent.jsx`'s `file.kind` switch, `App.jsx`/`PaneNode.jsx`'s pane-
+  opening machinery, `TabBar`/`Breadcrumb`'s `opensInEditorPane` branches)
+  that's orthogonal to the graph's own feature set — doing it in the same
+  pass as three new UI panels would have conflated "does the graph have
+  the right controls" with "does the pane system support a synthetic tab,"
+  making either one harder to review or revert independently. The
+  simulation itself (`useForceGraph.js`) was already framework-agnostic
+  before this pass and stays that way, so a future pane conversion doesn't
+  need to touch it — only `GraphViewModal.jsx`'s outer shell would move.
+- **Groups use substring-of-name matching, not Obsidian's full query
+  syntax** (`tag:`, `path:`, boolean operators). This vault's notes don't
+  have a tag index wired into `linkIndex` the way Obsidian's does, and
+  building one just to support `tag:#foo` group queries is a bigger,
+  separate piece of work than the groups feature itself — substring-of-
+  name covers the common case (e.g. grouping by a naming convention) today.
+  Worth revisiting if `allTags`/`extractTags` (already in `markdownParse.js`
+  for the editor's own tag completion) gets threaded into `linkIndex`
+  records for some other reason first.
+- **No "existing files only" filter** — every node in `linkIndex.records`
+  already corresponds to a real vault file (unresolved links don't get
+  their own record), so this Obsidian toggle has no unresolved-link case
+  to filter here; not applicable rather than skipped.
+- **Tags-as-nodes** (Obsidian's optional "Tags" toggle, showing tag nodes
+  connected to notes bearing them) — not added. Same underlying gap as the
+  Groups query-syntax limitation above (no tag index in `linkIndex` yet);
+  worth doing together if that gap is ever closed.
+- Mobile layout for the new sidebar is a rough first pass (stacks above the
+  canvas, wraps) — real mobile polish for the graph is item 5's own task
+  (mobile canvas/graph work), not folded in here.
+
+Still open from the original batch: DB timeline/chart views (item 3),
+offline support (item 4, blocked on the architecture decision in section
+19), and the mobile canvas/graph polish just mentioned (item 5) — each its
+own pass.

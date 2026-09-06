@@ -1,14 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-import { IconMaximize, IconRefresh, IconX } from '../../components/icons.jsx';
+import { IconMaximize, IconPlus, IconRefresh, IconSliders, IconTrash, IconX } from '../../components/icons.jsx';
+import { DB_OPTION_COLORS } from '../database/dbState.js';
+import { loadGraphSettings, saveGraphSettings } from './graphSettings.js';
 import { useForceGraph } from './useForceGraph.js';
 import { resolveLinkTarget } from '../../lib/linkGraph.js';
 import { clamp } from '../../lib/mathUtils.js';
 
 
 // Full-screen Graph View — a force-directed map of every wikilink in the
-// vault, in the spirit of Obsidian's Graph View. Deliberately built as a
-// self-contained modal (like Help/Palette) rather than a pane-tree tab:
+// vault, in the spirit of Obsidian's Graph View (see CLAUDE.md's graph-
+// revamp entry for what this pass added: Local graph mode with a depth
+// slider, adjustable Forces, and color Groups — Obsidian's own three most-
+// used panels beyond the base Filters this already had). Deliberately built
+// as a self-contained modal (like Help/Palette) rather than a pane-tree tab:
 // the pane/tab system is wired tightly around real Drive files (rename,
 // save, sync), and a synthetic non-file "tab" would need to fight that
 // machinery for little benefit — a modal gets the same "see the whole
@@ -17,12 +22,21 @@ function GraphViewModal({ onClose, linkIndex, linksByFileId, onOpenFile, activeF
   const containerRef = useRef(null);
   const svgRef = useRef(null);
   const [size, setSize] = useState({ width: 800, height: 600 });
-  const [showAttachments, setShowAttachments] = useState(false);
-  const [hideOrphans, setHideOrphans] = useState(false);
+  const [settings, setSettingsState] = useState(loadGraphSettings);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [hoveredId, setHoveredId] = useState(null);
   const [view, setView] = useState({ x: 0, y: 0, k: 1 });
   const dragRef = useRef({ mode: null });
+
+  const patchSettings = (patch) => {
+    setSettingsState((prev) => {
+      const next = { ...prev, ...patch };
+      saveGraphSettings(next);
+      return next;
+    });
+  };
+  const { showAttachments, hideOrphans, localMode, localDepth, forces, groups } = settings;
 
   useEffect(() => {
     const el = containerRef.current;
@@ -35,12 +49,12 @@ function GraphViewModal({ onClose, linkIndex, linksByFileId, onOpenFile, activeF
     return () => ro.disconnect();
   }, []);
 
-  const nodes = useMemo(
+  const allNodes = useMemo(
     () => linkIndex.records.filter((r) => showAttachments || !r.isAsset),
     [linkIndex, showAttachments]
   );
-  const edges = useMemo(() => {
-    const nodeIdSet = new Set(nodes.map((n) => n.id));
+  const allEdges = useMemo(() => {
+    const nodeIdSet = new Set(allNodes.map((n) => n.id));
     const seen = new Set();
     const out = [];
     for (const [sourceId, links] of linksByFileId.entries()) {
@@ -55,7 +69,45 @@ function GraphViewModal({ onClose, linkIndex, linksByFileId, onOpenFile, activeF
       }
     }
     return out;
-  }, [nodes, linksByFileId, linkIndex]);
+  }, [allNodes, linksByFileId, linkIndex]);
+
+  // Local graph — BFS out from the active note by `localDepth` hops, same
+  // shape as Obsidian's "Open local graph" + depth slider. Falls back to
+  // showing everything if there's no active file to center on.
+  const localIdSet = useMemo(() => {
+    if (!localMode || !activeFileId) return null;
+    const adj = new Map();
+    allEdges.forEach(([a, b]) => {
+      if (!adj.has(a)) adj.set(a, []);
+      if (!adj.has(b)) adj.set(b, []);
+      adj.get(a).push(b);
+      adj.get(b).push(a);
+    });
+    const visited = new Set([activeFileId]);
+    let frontier = [activeFileId];
+    for (let d = 0; d < localDepth; d++) {
+      const next = [];
+      frontier.forEach((id) => {
+        (adj.get(id) || []).forEach((n) => {
+          if (!visited.has(n)) {
+            visited.add(n);
+            next.push(n);
+          }
+        });
+      });
+      frontier = next;
+    }
+    return visited;
+  }, [localMode, activeFileId, allEdges, localDepth]);
+
+  const nodes = useMemo(
+    () => (localIdSet ? allNodes.filter((n) => localIdSet.has(n.id)) : allNodes),
+    [allNodes, localIdSet]
+  );
+  const edges = useMemo(
+    () => (localIdSet ? allEdges.filter(([a, b]) => localIdSet.has(a) && localIdSet.has(b)) : allEdges),
+    [allEdges, localIdSet]
+  );
 
   const degree = useMemo(() => {
     const map = new Map();
@@ -78,7 +130,14 @@ function GraphViewModal({ onClose, linkIndex, linksByFileId, onOpenFile, activeF
   );
   const nodeIds = useMemo(() => visibleNodes.map((n) => n.id), [visibleNodes]);
 
-  const { pos, pinned, wake } = useForceGraph(nodeIds, visibleEdges, size.width || 800, size.height || 600);
+  // First matching group (in list order) colors a node — same "first match
+  // wins" rule Obsidian's own Groups panel uses.
+  const groupColorFor = (n) => {
+    const g = groups.find((grp) => grp.query && n.baseName.toLowerCase().includes(grp.query.trim().toLowerCase()));
+    return g?.color || null;
+  };
+
+  const { pos, pinned, wake } = useForceGraph(nodeIds, visibleEdges, size.width || 800, size.height || 600, forces);
 
   const neighborSet = useMemo(() => {
     if (!hoveredId) return null;
@@ -172,14 +231,9 @@ function GraphViewModal({ onClose, linkIndex, linksByFileId, onOpenFile, activeF
           <h3>Graph view</h3>
           <div className="graph-modal-tools">
             <input className="graph-search" placeholder="Find a note…" value={query} onChange={(e) => setQuery(e.target.value)} />
-            <label className="graph-toggle">
-              <input type="checkbox" checked={showAttachments} onChange={(e) => setShowAttachments(e.target.checked)} />
-              Attachments
-            </label>
-            <label className="graph-toggle">
-              <input type="checkbox" checked={hideOrphans} onChange={(e) => setHideOrphans(e.target.checked)} />
-              Hide orphans
-            </label>
+            <button className={`icon-btn ${sidebarOpen ? 'active' : ''}`} title="Filters, groups & forces" onClick={() => setSidebarOpen((v) => !v)}>
+              <IconSliders size={15} />
+            </button>
             <button className="icon-btn" title="Re-run layout" onClick={() => wake(1)}>
               <IconRefresh size={15} />
             </button>
@@ -191,58 +245,161 @@ function GraphViewModal({ onClose, linkIndex, linksByFileId, onOpenFile, activeF
             </button>
           </div>
         </div>
-        <div className="graph-canvas-wrap" ref={containerRef}>
-          <svg
-            ref={svgRef}
-            className="graph-svg"
-            onPointerDown={onBackgroundPointerDown}
-            onPointerMove={onPointerMove}
-            onPointerUp={onPointerUp}
-            onPointerLeave={onPointerUp}
-            onWheel={onWheel}
-          >
-            <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
-              {visibleEdges.map(([a, b], i) => {
-                const pa = pos.get(a);
-                const pb = pos.get(b);
-                if (!pa || !pb) return null;
-                const dim = neighborSet && !(neighborSet.has(a) && neighborSet.has(b));
-                return <line key={i} x1={pa.x} y1={pa.y} x2={pb.x} y2={pb.y} className={`graph-edge ${dim ? 'dim' : ''}`} />;
-              })}
-              {visibleNodes.map((n) => {
-                const p = pos.get(n.id);
-                if (!p) return null;
-                const deg = degree.get(n.id) || 0;
-                const r = clamp(4 + Math.sqrt(deg) * 2.4, 4, 15);
-                const dim = (neighborSet && !neighborSet.has(n.id)) || (matchSet && !matchSet.has(n.id));
-                const showLabel =
-                  visibleNodes.length <= 60 ||
-                  hoveredId === n.id ||
-                  (neighborSet && neighborSet.has(n.id)) ||
-                  (matchSet && matchSet.has(n.id));
-                return (
-                  <g
-                    key={n.id}
-                    className={`graph-node ${dim ? 'dim' : ''} ${n.id === activeFileId ? 'current' : ''} ${n.isAsset ? 'attachment' : ''}`}
-                    transform={`translate(${p.x},${p.y})`}
-                    onPointerDown={(e) => onNodePointerDown(e, n.id)}
-                    onPointerEnter={() => setHoveredId(n.id)}
-                    onPointerLeave={() => setHoveredId((h) => (h === n.id ? null : h))}
-                  >
-                    <circle r={r} />
-                    {showLabel && (
-                      <text x={r + 4} y={4} className="graph-node-label">
-                        {n.baseName}
-                      </text>
-                    )}
-                  </g>
-                );
-              })}
-            </g>
-          </svg>
+        <div className="graph-modal-body">
+          {sidebarOpen && (
+            <div className="graph-sidebar">
+              <div className="graph-sidebar-section">
+                <div className="graph-sidebar-title">Filters</div>
+                <label className="graph-toggle">
+                  <input type="checkbox" checked={localMode} onChange={(e) => patchSettings({ localMode: e.target.checked })} />
+                  Local graph (active note)
+                </label>
+                {localMode && (
+                  <label className="graph-slider-row">
+                    <span>Depth: {localDepth}</span>
+                    <input
+                      type="range"
+                      min={1}
+                      max={5}
+                      step={1}
+                      value={localDepth}
+                      onChange={(e) => patchSettings({ localDepth: Number(e.target.value) })}
+                    />
+                  </label>
+                )}
+                <label className="graph-toggle">
+                  <input type="checkbox" checked={showAttachments} onChange={(e) => patchSettings({ showAttachments: e.target.checked })} />
+                  Attachments
+                </label>
+                <label className="graph-toggle">
+                  <input type="checkbox" checked={hideOrphans} onChange={(e) => patchSettings({ hideOrphans: e.target.checked })} />
+                  Hide orphans
+                </label>
+              </div>
+              <div className="graph-sidebar-section">
+                <div className="graph-sidebar-title">Groups</div>
+                {groups.map((g) => (
+                  <div key={g.id} className="graph-group-row">
+                    <span className="graph-group-swatch" style={{ background: g.color }} />
+                    <input
+                      className="graph-group-input"
+                      value={g.query}
+                      placeholder="text in note name…"
+                      onChange={(e) => patchSettings({ groups: groups.map((x) => (x.id === g.id ? { ...x, query: e.target.value } : x)) })}
+                    />
+                    <button className="icon-btn" title="Remove group" onClick={() => patchSettings({ groups: groups.filter((x) => x.id !== g.id) })}>
+                      <IconTrash size={12} />
+                    </button>
+                  </div>
+                ))}
+                <button
+                  className="graph-add-group-btn"
+                  onClick={() =>
+                    patchSettings({
+                      groups: [...groups, { id: `grp_${Date.now()}`, query: '', color: DB_OPTION_COLORS[groups.length % DB_OPTION_COLORS.length] }]
+                    })
+                  }
+                >
+                  <IconPlus size={12} /> New group
+                </button>
+              </div>
+              <div className="graph-sidebar-section">
+                <div className="graph-sidebar-title">Forces</div>
+                <label className="graph-slider-row">
+                  <span>Repel force</span>
+                  <input type="range" min={400} max={6000} step={100} value={forces.repel} onChange={(e) => patchSettings({ forces: { ...forces, repel: Number(e.target.value) } })} />
+                </label>
+                <label className="graph-slider-row">
+                  <span>Link force</span>
+                  <input
+                    type="range"
+                    min={0.002}
+                    max={0.08}
+                    step={0.002}
+                    value={forces.linkStrength}
+                    onChange={(e) => patchSettings({ forces: { ...forces, linkStrength: Number(e.target.value) } })}
+                  />
+                </label>
+                <label className="graph-slider-row">
+                  <span>Link distance</span>
+                  <input
+                    type="range"
+                    min={20}
+                    max={260}
+                    step={5}
+                    value={forces.linkDistance}
+                    onChange={(e) => patchSettings({ forces: { ...forces, linkDistance: Number(e.target.value) } })}
+                  />
+                </label>
+                <label className="graph-slider-row">
+                  <span>Center force</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={0.06}
+                    step={0.002}
+                    value={forces.center}
+                    onChange={(e) => patchSettings({ forces: { ...forces, center: Number(e.target.value) } })}
+                  />
+                </label>
+              </div>
+            </div>
+          )}
+          <div className="graph-canvas-wrap" ref={containerRef}>
+            <svg
+              ref={svgRef}
+              className="graph-svg"
+              onPointerDown={onBackgroundPointerDown}
+              onPointerMove={onPointerMove}
+              onPointerUp={onPointerUp}
+              onPointerLeave={onPointerUp}
+              onWheel={onWheel}
+            >
+              <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
+                {visibleEdges.map(([a, b], i) => {
+                  const pa = pos.get(a);
+                  const pb = pos.get(b);
+                  if (!pa || !pb) return null;
+                  const dim = neighborSet && !(neighborSet.has(a) && neighborSet.has(b));
+                  return <line key={i} x1={pa.x} y1={pa.y} x2={pb.x} y2={pb.y} className={`graph-edge ${dim ? 'dim' : ''}`} />;
+                })}
+                {visibleNodes.map((n) => {
+                  const p = pos.get(n.id);
+                  if (!p) return null;
+                  const deg = degree.get(n.id) || 0;
+                  const r = clamp(4 + Math.sqrt(deg) * 2.4, 4, 15);
+                  const dim = (neighborSet && !neighborSet.has(n.id)) || (matchSet && !matchSet.has(n.id));
+                  const showLabel =
+                    visibleNodes.length <= 60 ||
+                    hoveredId === n.id ||
+                    (neighborSet && neighborSet.has(n.id)) ||
+                    (matchSet && matchSet.has(n.id));
+                  const groupColor = groupColorFor(n);
+                  return (
+                    <g
+                      key={n.id}
+                      className={`graph-node ${dim ? 'dim' : ''} ${n.id === activeFileId ? 'current' : ''} ${n.isAsset ? 'attachment' : ''}`}
+                      style={groupColor ? { '--graph-node-color': groupColor } : undefined}
+                      transform={`translate(${p.x},${p.y})`}
+                      onPointerDown={(e) => onNodePointerDown(e, n.id)}
+                      onPointerEnter={() => setHoveredId(n.id)}
+                      onPointerLeave={() => setHoveredId((h) => (h === n.id ? null : h))}
+                    >
+                      <circle r={r} />
+                      {showLabel && (
+                        <text x={r + 4} y={4} className="graph-node-label">
+                          {n.baseName}
+                        </text>
+                      )}
+                    </g>
+                  );
+                })}
+              </g>
+            </svg>
+          </div>
         </div>
         <div className="graph-modal-footer">
-          {visibleNodes.length} notes · {visibleEdges.length} links
+          {visibleNodes.length} notes · {visibleEdges.length} links{localMode ? ` · local, depth ${localDepth}` : ''}
         </div>
       </div>
     </div>

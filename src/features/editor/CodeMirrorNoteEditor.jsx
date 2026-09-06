@@ -5,6 +5,7 @@ import { defaultKeymap, history, historyKeymap, redo as cmRedo, undo as cmUndo }
 import { autocompletion, completionKeymap } from '@codemirror/autocomplete';
 
 import { cmIndentSelection } from './cmIndent.js';
+import { frontmatterCompletionSource } from './frontmatterCompletion.js';
 import { buildInlinePreviewPlugin } from './inlinePreviewPlugin.js';
 import { wikilinkTagCompletionSource } from './wikilinkCompletion.js';
 
@@ -17,7 +18,7 @@ import { wikilinkTagCompletionSource } from './wikilinkCompletion.js';
 // than this editor's own last edit, so external updates (initial load,
 // rename-triggered reload) never fight the user's cursor.
 // ---------------------------------------------------------------------------
-function CodeMirrorNoteEditor({ fileId, content, onChange, linkIndex, phantomRecords, allTags, handlers, foldState, onSelectionChange, isActivePane, registerNav }) {
+function CodeMirrorNoteEditor({ fileId, content, onChange, linkIndex, phantomRecords, allTags, frontmatterSchema, handlers, foldState, onSelectionChange, isActivePane, registerNav }) {
   const hostRef = useRef(null);
   const viewRef = useRef(null);
   const lastEmittedRef = useRef(content);
@@ -29,6 +30,7 @@ function CodeMirrorNoteEditor({ fileId, content, onChange, linkIndex, phantomRec
       getLinkIndex: () => linkIndex,
       getPhantomRecords: () => phantomRecords,
       getAllTags: () => allTags,
+      getFrontmatterSchema: () => frontmatterSchema,
       getHandlers: () => handlers,
       getFoldState: () => foldState
     };
@@ -36,6 +38,7 @@ function CodeMirrorNoteEditor({ fileId, content, onChange, linkIndex, phantomRec
   ctxRef.current.getLinkIndex = () => linkIndex;
   ctxRef.current.getPhantomRecords = () => phantomRecords;
   ctxRef.current.getAllTags = () => allTags;
+  ctxRef.current.getFrontmatterSchema = () => frontmatterSchema;
   ctxRef.current.getHandlers = () => handlers;
   ctxRef.current.getFoldState = () => foldState;
 
@@ -52,7 +55,7 @@ function CodeMirrorNoteEditor({ fileId, content, onChange, linkIndex, phantomRec
         cmPlaceholder(
           'Start writing… [[Note Name]] to link, #tag to tag, > [!tip] for callouts, | tables |, +++ toggles +++, :::columns-2 for columns, :::tabs for a tab block, ==highlight==, ++underline++.'
         ),
-        autocompletion({ override: [wikilinkTagCompletionSource(ctx)], activateOnTyping: true }),
+        autocompletion({ override: [wikilinkTagCompletionSource(ctx), frontmatterCompletionSource(ctx)], activateOnTyping: true }),
         buildInlinePreviewPlugin(),
         EditorView.contentAttributes.of({ spellcheck: 'true', autocorrect: 'on' }),
         keymap.of([

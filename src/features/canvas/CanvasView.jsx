@@ -551,6 +551,7 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
         snapEnabled={snapEnabled}
         onToggleSnap={() => setSnapEnabled((v) => !v)}
       />
+      {filePickerOpen && <CanvasFilePickerModal files={allFiles || []} onPick={addFileNodeFromPicker} onClose={() => setFilePickerOpen(false)} />}
       <div
         className={`canvas-surface ${isPanning || spaceDown ? 'panning' : ''}`}
         ref={containerRef}
@@ -622,7 +623,6 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
           </div>
         )}
       </div>
-      {filePickerOpen && <CanvasFilePickerModal files={allFiles || []} onPick={addFileNodeFromPicker} onClose={() => setFilePickerOpen(false)} />}
     </div>
   );
 }

@@ -5,7 +5,7 @@ import { ActivityBar } from './components/ActivityBar.jsx';
 import { ResizeHandle } from './components/ResizeHandle.jsx';
 import { StatusBar } from './components/StatusBar.jsx';
 import { useAppUpdate } from './hooks/useAppUpdate.js';
-import { IconCanvasKind, IconDatabase, IconEye, IconFilePlus, IconFolder, IconFolderPlus, IconGraph, IconHelp, IconLogOut, IconPalette, IconPanelLeft, IconRefresh, IconSearch, IconSettings, IconSplitHorizontal, IconSplitVertical, IconStar, IconTag } from './components/icons.jsx';
+import { IconCanvasKind, IconDatabase, IconEye, IconFilePlus, IconFolder, IconFolderPlus, IconGraph, IconHelp, IconLogOut, IconPalette, IconPanelLeft, IconRefresh, IconSearch, IconSettings, IconSliders, IconSplitHorizontal, IconSplitVertical, IconStar, IconTag } from './components/icons.jsx';
 import { AccentColorPicker } from './features/accent/AccentColorPicker.jsx';
 import { useAccentColor } from './features/accent/accentColor.js';
 import { BookmarksPanel } from './features/bookmarks/BookmarksPanel.jsx';
@@ -30,6 +30,10 @@ import { useVaultIndex } from './hooks/useVaultIndex.js';
 const GraphViewModal = lazy(() => import('./features/graph/GraphViewModal.jsx').then((m) => ({ default: m.GraphViewModal })));
 const HelpModal = lazy(() => import('./features/help/HelpModal.jsx').then((m) => ({ default: m.HelpModal })));
 const PaletteModal = lazy(() => import('./features/palette/PaletteModal.jsx').then((m) => ({ default: m.PaletteModal })));
+const FrontmatterSchemaSettings = lazy(() =>
+  import('./features/settings/FrontmatterSchemaSettings.jsx').then((m) => ({ default: m.FrontmatterSchemaSettings }))
+);
+import { useFrontmatterSchema } from './hooks/useFrontmatterSchema.js';
 import { buildVaultTree, useVaultSync } from './hooks/useVaultSync.js';
 import { mapWithConcurrency } from './lib/concurrency.js';
 import { driveCreateFile, driveCreateFolder, driveGetFileContent, driveMoveItem, driveRenameItem, driveTrashItem, driveUpdateFileContent, driveUploadBinary, isProxy, openFolderPicker } from './lib/driveApi.js';
@@ -92,6 +96,8 @@ export default function App() {
   const [bookmarks, setBookmarks] = useState(new Set());
   const [paletteMode, setPaletteMode] = useState(null); // null | 'commands' | 'switcher'
   const [helpOpen, setHelpOpen] = useState(false);
+  const [schemaSettingsOpen, setSchemaSettingsOpen] = useState(false);
+  const [frontmatterSchema, setFrontmatterSchema] = useFrontmatterSchema();
   const [graphOpen, setGraphOpen] = useState(false);
   // When the switcher is opened via the tab bar's "+" button, the next pick
   // should always open in a new tab — unlike ⌘O, which navigates the current
@@ -871,6 +877,7 @@ export default function App() {
       },
       uploadAttachment: uploadAttachmentFile,
       allTags,
+      frontmatterSchema,
       pagesIndex,
       ensureVaultIndexed: vaultIndex.ensureIndexed,
       vaultIndexReady: vaultIndex.ready,
@@ -885,6 +892,7 @@ export default function App() {
       handleInlineRenameFile,
       uploadAttachmentFile,
       allTags,
+      frontmatterSchema,
       pagesIndex,
       vaultIndex.ensureIndexed,
       vaultIndex.ready,
@@ -1114,6 +1122,9 @@ export default function App() {
                   />
                 )}
               </div>
+              <button className="icon-btn" title="Frontmatter properties" onClick={() => setSchemaSettingsOpen(true)}>
+                <IconSliders size={15} />
+              </button>
               <button className="icon-btn" title="Keyboard shortcuts" onClick={() => setHelpOpen(true)}>
                 <IconHelp size={15} />
               </button>
@@ -1192,6 +1203,15 @@ export default function App() {
       {helpOpen && (
         <Suspense fallback={null}>
           <HelpModal onClose={() => setHelpOpen(false)} />
+        </Suspense>
+      )}
+      {schemaSettingsOpen && (
+        <Suspense fallback={null}>
+          <FrontmatterSchemaSettings
+            schema={frontmatterSchema}
+            onChange={setFrontmatterSchema}
+            onClose={() => setSchemaSettingsOpen(false)}
+          />
         </Suspense>
       )}
       {graphOpen && (
