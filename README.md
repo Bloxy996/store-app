@@ -33,34 +33,14 @@ the app never requests broader Drive access). Sign in on first launch;
 your notes are read from and written straight to your own Drive, never
 to any server this project controls.
 
-### Renaming an existing "vault"-named Cloud/Apps Script project
-
-If you set this up before the app was renamed from "vault" to `store`,
-the client-side code (`temp/appscript.gs`, `lib/driveApi.js`) has
-already been updated to say "store" instead — but your actual Google
-Cloud Console project and Apps Script project names are external
-settings this repo can't change for you:
-
-1. **Cloud Console project name:** [console.cloud.google.com](https://console.cloud.google.com)
-   → select the project → gear icon (⚙) next to the project name in the
-   top bar → **Project settings** → edit **Project name** → Save. This
-   is cosmetic only; it doesn't change the project ID or break your
-   OAuth client.
-2. **Apps Script project name** (if you use the proxy auth mode): open
-   the script at [script.google.com](https://script.google.com) →
-   click the project name at the top left → type the new name → it
-   saves automatically.
-3. **If you rename the Apps Script project, redeploy it** so the change
-   (and the `listStoreFiles`/`STORE_SECRET` code rename) reaches your
-   live URL: **Deploy → Manage deployments → Edit (pencil) → Version:
-   New version → Deploy**. See the setup comment at the top of
-   `temp/appscript.gs` for the full deploy walkthrough.
+See [`appscript.js`](./google/appscript.gs)'s doc comment to set up the
+apps script proxy.
 
 ## Architecture
 
-See [`CLAUDE.md`](./CLAUDE.md) for the full set of architecture
+See [`CLAUDE.md`](./docs/CLAUDE.md) for the full set of architecture
 decisions and conventions (tech stack, the zero-local-note-storage
-rule, file layout, performance notes). See [`TODO.md`](./TODO.md) for
+rule, file layout, performance notes). See [`TODO.md`](./docs/TODO.md) for
 open/planned work.
 
 ## License

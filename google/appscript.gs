@@ -4,11 +4,9 @@
  * Deploy this as a Web App ("Execute as: Me", "Who has access: Anyone").
  * It runs under YOUR (personal) Google identity, so it already has
  * permission to read/write your Drive — visitors never need their own
- * Google OAuth grant, so a Workspace admin's "unconfigured app" block
- * never gets triggered.
+ * Google OAuth grant.
  *
- * SETUP (one time, done inside the Apps Script editor — not the browser
- * you're locked out of):
+ * SETUP (one time, done inside the Apps Script editor):
  *   1. Left sidebar → Services (+) → add "Drive API" → pick version 3.
  *      Apps Script will prompt you to enable it in the linked Cloud
  *      project too — click through that.

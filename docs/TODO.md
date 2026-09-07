@@ -52,7 +52,9 @@ See `CLAUDE.md` for architecture context.
   ```
 
 - [ ] Integrate all `.py` apps from `/temp/processing` into the app,
-      modifying as needed:
+      modifying as needed (after this task, `/temp/processing` should be deleted):
+  - `reader.py` should be accessing folders/files on the user's hardrive,
+    but has simmilar logic to the XML query thing
   - `/statements`: support sorted-insertion — given phrases from a
     newline-separated `.txt` file, find the closest existing phrase using
     the same scoring system as the sorting algorithm, and insert before or
@@ -69,12 +71,6 @@ See `CLAUDE.md` for architecture context.
 - [ ] Basic MIDI DAW editor for melodies or drum sequences — can record
       voice and store the audio file; app can also convert those audio
       files into MIDI.
-
-- [ ] Rename your actual Google Cloud Console project and Apps Script
-      project away from "vault" (cosmetic, external UI — can't be done
-      from this repo). Code side is done: `temp/appscript.gs` and
-      `lib/driveApi.js` no longer say "vault" anywhere, and README has
-      step-by-step rename + redeploy instructions.
 
 - [ ] Image app: shows images (on mobile, can take pictures of papers
       through the app; otherwise takes any image). Square-select portions
