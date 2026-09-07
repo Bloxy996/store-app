@@ -98,6 +98,23 @@
   touch-action: auto;
   -webkit-touch-callout: default;
 }
+/* Same trade as the text-editor carve-out above, for the other case
+   CLAUDE.md's mobile section flagged as still open: a note-embed card's
+   preview body can overflow and needs to scroll on touch, but touch-action
+   is an ancestor-intersection — a descendant can't loosen what `.canvas-
+   node`'s own `none` above already forbids, so the allowance has to live
+   here, on the ancestor. `pan-y` (not `auto`) keeps native pinch-zoom-by-
+   default off, matching `.canvas-surface`'s own pinch handling. Dragging
+   the whole card by touch is only affected when the pointerdown actually
+   lands on overflowing content, via beginMove's own scrollHeight check
+   (CanvasView.jsx) rather than here — a short embed that doesn't overflow
+   still drags normally; `.canvas-dot`/`.canvas-resize-handle` keep their
+   own unconditional `touch-action: none` regardless, since a value further
+   down the tree can always narrow an ancestor's allowance, just never
+   widen it. */
+.canvas-node:has(.canvas-embed-note-body) {
+  touch-action: pan-y;
+}
 .canvas-node-inner {
   height: 100%;
   width: 100%;

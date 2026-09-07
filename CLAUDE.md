@@ -1453,3 +1453,403 @@ Still open from the original batch: DB timeline/chart views (item 3),
 offline support (item 4, blocked on the architecture decision in section
 19), and the mobile canvas/graph polish just mentioned (item 5) — each its
 own pass.
+
+---
+
+## 26. Changelog — graph view revamp, slice 2: pane/tab conversion, tags as nodes, mobile
+
+Finishes item 2 (section 18's point 1, deliberately deferred by slice 1 in
+section 25) plus two more items reiterated directly: tags-as-nodes, and
+graph-specific mobile layout/perf work.
+
+**Pane/tab conversion (`graphPaneFile.js`, new):**
+- The Graph view is a real tab now — split it, close it, Cmd-click it into
+  a new tab, same as any note — instead of a modal. Done via a singleton
+  pseudo-file (`{ id: '__graph__', kind: 'graph', name: 'Graph view' }')
+  injected into `App.jsx`'s `filesById` map, *not* into `sync.filesMeta`.
+  That one distinction is what makes this safe to bolt onto the existing
+  pane machinery without touching it: `ensureFileLoaded`'s existing
+  `sync.filesMeta.find(...)` guard already no-ops for an id it can't find,
+  so there's no Drive fetch attempt, no save-buffer, and it never shows up
+  in search/vault-index results — all for free, without a single
+  Drive-content-path special case. `TabBar`/`PaneHeader`/`Breadcrumb` only
+  ever read `file.name`/`file.kind` off a tab's file and gate
+  bookmark/edit-mode buttons on `kind === 'note'`, so the pseudo-file just
+  renders as a plain, non-bookmarkable, non-editable tab labeled "Graph
+  view" with no extra code — confirmed by reading through
+  `TabBar.jsx`/`PaneNode.jsx` line by line before writing this, not
+  assumed.
+- `EditorContent.jsx` gained a `file.kind === 'graph'` branch (same
+  lazy-`Suspense` shape as the `database`/`canvas` branches above it),
+  rendering the new `features/graph/GraphView.jsx` — `GraphViewModal.jsx`
+  is deleted; its CSS stayed in place as `GraphViewModal.css` (still
+  imported from `index.css`) since that file has long also held unrelated
+  `.editor-preview`/wikilink/callout/table CSS, and renaming it wasn't
+  worth the risk of that unrelated content getting mis-migrated for a
+  filename-only change — only the graph-specific selectors inside it were
+  touched (`.graph-modal` → `.graph-pane`, etc).
+- **Local-graph centering across the pane switch:** local graph mode needs
+  "the note you were looking at", but once you've switched to the Graph
+  tab there is no such note anymore. `App.jsx` now tracks
+  `lastNoteFileIdRef`, updated by a small effect that skips the graph kind,
+  and exposes it as `handlers.getGraphCenterFileId()`. Simple and correct
+  for the common case (open a note, then open Graph view); the edge case
+  where you'd opened Graph view once already and jump straight to another
+  Graph tab without visiting a note in between just falls back to no
+  center note, same as if none had ever been opened this session.
+- Opening the pane: `openGraphInPane()` (`App.jsx`) replaces the old
+  `setGraphOpen(true)`, wired into both the command palette entry and the
+  activity bar's graph icon, going through the exact same
+  `openFileInPane(activePaneId, id, opts)` every note uses — Cmd/Ctrl-click
+  opens it in a new tab exactly like any other file, for the same reason
+  (opts forwarding), not as a special case written for graph specifically.
+
+**Tags as nodes (`GraphView.jsx`):** a new Filters toggle. Each tag used by
+a visible note becomes its own node (`tag:<name>` id, hollow-circle style
+so it's visually distinct from note/attachment nodes), edged to every note
+that carries it — Obsidian's own "Tags" toggle, same idea. Built entirely
+on `tagsByFileId`, which already existed at the App level for the
+frontmatter-tag search feature (section 6 lineage) and is now also threaded
+through `handlers` for this. Clicking a tag node calls the existing
+`handlers.onOpenTag(tag)` (opens the sidebar search pre-filtered to that
+tag) instead of `onOpenFile`, since a tag isn't a file to navigate to.
+
+**Mobile (`useForceGraph.js`, `GraphView.jsx`, `GraphViewModal.css`):**
+- **Pinch-to-zoom** — the graph's zoom was wheel-only (desktop trackpad/
+  mouse), unusable on a touch device with no wheel events. Added two-
+  finger pinch via a `pointersRef` map layered on top of the existing
+  pointer-event handlers (pointer events already unify mouse/touch/pen, so
+  this is additive, not a parallel touch-event implementation): a second
+  concurrent pointer switches `dragRef`'s mode to `'pinch'`, scaling `view.k`
+  around the two fingers' midpoint the same way the wheel handler scales
+  around the cursor.
+- **Simulation cost** — repulsion is the O(n²) part of every tick; on a
+  coarse-pointer device (`matchMedia('(pointer: coarse)')`) with more than
+  150 nodes, it's now skipped on alternate frames (springs + centering
+  still run every frame, so the layout doesn't visibly change shape — only
+  the heaviest term is halved). Below that node count, which is the common
+  case, this never engages.
+- The sidebar's existing `@media (max-width: 720px)` stacking (from slice
+  1) carries over unchanged; still a rough first pass, not full mobile
+  layout polish.
+
+**Deliberately not done:**
+- No spatial-partitioning (quadtree) rewrite of the repulsion pass — frame-
+  skipping is a smaller, lower-risk change that halves the same cost
+  without restructuring `useForceGraph.js`'s core loop; worth revisiting
+  only if real usage shows graphs large enough that halving isn't enough.
+- Groups still substring-of-name only, no tag-query syntax for
+  groups/local-graph filtering (unchanged limitation from slice 1) — tags
+  are now visualizable as nodes but not yet usable as a groups/filter
+  query language; that's a bigger, separate feature.
+- Item 1's mobile canvas optimizations (the freeform `.canvas` board, not
+  the graph) are untouched — different feature, its own pass.
+
+Still open: DB timeline/chart views, offline support, canvas-specific
+mobile work, the vector art editor, and the new "compile vault to XML for
+LLM mass-editing" sidebar tool from the latest request — each its own pass.
+
+---
+
+## 27. Changelog — Compile to XML (vault → LLM mass-edit, and back)
+
+New feature from the latest request, picked as the most tractable of the
+remaining items — no architecture decision to make first (unlike offline
+support) and no new UI paradigm to design (unlike the DB timeline/chart
+views); just a clearly-specified format to implement against.
+
+**`features/compile/compileVault.js`** (new, pure logic — no Drive calls,
+no React, deliberately, so the matching/parsing rules are easy to reason
+about on their own):
+- `flattenVaultTree(tree)` walks `buildVaultTree`'s output once into every
+  folder's and every `.md` note's full path, rooted at a fixed `vault`
+  label rather than the real Drive folder name (so a compiled XML file
+  stays valid if the same store is ever reconnected under a different
+  folder name) — the single source both the Includes/Excludes autocomplete
+  and the apply-XML path→file resolution are built from.
+- `resolveIncludedFiles(tree, includes, excludes)` — empty `includes`
+  means the whole vault, per the request; otherwise a folder entry covers
+  everything nested under it, a file entry covers just itself, and
+  excludes are applied the same way after.
+- `buildCompiledXml(files)` — the exact `<documents><file path="…">…
+  </file></documents>` shape from the request, with each file's content in
+  a CDATA section (handling a literal `]]>` inside a note by splitting it
+  across two CDATA sections, the standard escape for that one case) so
+  wikilinks/HTML/whatever a note contains never needs per-character
+  escaping and round-trips byte-for-byte.
+- `APPLY_FORMAT_PROMPT` — the mass-editing output-format instructions from
+  the request, verbatim, appended after the compiled document in the
+  panel's copy/download output (one artifact, both the content and the
+  instructions for how to reply to it).
+- `parseApplyXml(xmlText)` — parses an LLM's `<update>/<change><search>/
+  <replace></change></update>` reply via the browser's native `DOMParser`
+  (no XML library pulled in for this). Returns a `parseError` string
+  instead of throwing on malformed input, since this is user-pasted
+  content, not trusted data.
+- `applyFileChanges(content, changes)` — runs each file's changes in
+  order (so a later search string can rely on an earlier replace having
+  already run), requiring each `search` to match exactly once, matching
+  the format prompt's own uniqueness rule — 0 or 2+ matches gets reported
+  by index rather than guessed at.
+
+**`features/compile/CompilePanel.jsx` + `.css`** (new) — a sidebar panel
+(new activity-bar icon, braces), not a modal, in keeping with item 1's
+direction elsewhere in this doc:
+- **Compile section:** Includes/Excludes as chip-list inputs with a path
+  autocomplete dropdown (`PathChipInput`, shared by both lists) — the
+  dropdown is a plain sibling block below the input, closed by
+  `useClickOutside`, same "not a portaled popup" pattern as every other
+  inline suggestion list in this app, not a new exception to it. Compile
+  calls `vaultIndex.ensureIndexed()` first if the search index isn't
+  ready yet (same guard `SearchPanel`/`TagsPanel` already use before
+  reading note bodies), then `getBody(id)` per included file — this means
+  a compile reflects each note's last-*saved* content, not unsaved edits
+  sitting in an open buffer; see the Apply section's own note on this for
+  why that's the deliberate, safer choice rather than an oversight. Output
+  renders in a readonly textarea with Copy-to-clipboard and Download
+  buttons.
+- **Apply section:** paste or upload the LLM's XML reply, then Apply,
+  which calls `App.jsx`'s new `applyCompiledChanges(xmlText)`. **A file's
+  changes are all-or-nothing**: every `<change>` for that file must match
+  uniquely before anything is written for it — a partially-applied file
+  left silently half-edited would be worse than reporting exactly which
+  change failed (with its index) and letting the person fix the LLM's
+  search text and retry. **Any file with unsaved edits in an open editor
+  buffer is skipped, not overwritten** — fetching fresh content from Drive
+  and writing back would otherwise silently discard those edits; the
+  panel reports this per file so it's obvious rather than a silent no-op.
+  Successful writes go through the exact same `saveNow(fileId, content)`
+  every normal edit already uses, so an open (non-dirty) buffer for that
+  file, the sync index, and the search index all update in place
+  identically to a normal save — no separate write path was added for this
+  feature to keep in sync with the others.
+- New `IconBraces` in `icons.jsx`, same hand-drawn-SVG format as every
+  other icon there.
+
+**Deliberately not done:**
+- No conflict *resolution* UI (e.g. re-fetch and show a merged diff) for
+  the dirty-buffer-skip case — the message just says to save first and
+  retry Apply; a full merge UI is a much bigger feature than this pass's
+  scope, and "save your note, then retry" is a one-step fix for something
+  that should be rare in practice (editing a note while also running a
+  bulk XML apply against it).
+- Compile doesn't warn if a note is currently open and dirty when
+  included in a compile — it silently compiles the last-saved version.
+  Flagged here rather than fixed because there's no clearly better default
+  short of an "N notes have unsaved changes" banner, which felt like scope
+  creep for a first version; worth adding if this turns out to matter in
+  practice.
+- No `.md`-only restriction is enforced beyond `flattenVaultTree` itself
+  only ever collecting `kind === 'note'` files — canvases/databases/
+  attachments were never candidates in the first place, matching "selects
+  a bunch of `.md` files" from the request.
+
+Still open: DB timeline/chart views, offline support (blocked on the
+architecture decision in section 19), canvas-specific mobile
+optimizations, and the vector art editor.
+
+---
+
+## 28. Changelog — canvas mobile fix: scrolling inside a note-embed card
+
+Picked as the most tractable remaining item — a real, already-documented
+bug (flagged as open back in section 8's mobile entry: "what's not
+addressed here is the interaction between a single-finger drag and
+*scrolling inside* a card's content"), not a new feature needing a design
+decision.
+
+**Root cause:** `touch-action` isn't inherited normally — the browser
+computes an element's *used* value as the intersection of its own value
+and every ancestor's, and an ancestor's `none` can never be loosened by a
+descendant's own more-permissive value, only narrowed further. `.canvas-
+node` sets `touch-action: none` (needed so our own drag-to-move survives
+on mobile — see section 19's fix), so `.canvas-embed-note-body` — the
+actual `overflow: auto` scrollable box inside a note-embed card — stayed
+non-scrollable by touch no matter what it declared for itself.
+
+**Fix, `canvas.css` + `CanvasView.jsx`, same trade already accepted for
+text-editing cards (`.canvas-node:has(.canvas-text-editor)`):**
+- `.canvas-node:has(.canvas-embed-note-body) { touch-action: pan-y; }` —
+  the allowance has to live on the ancestor, since that's where the
+  restriction lives. `pan-y` rather than `auto`/`manipulation` so native
+  pinch-zoom-by-default stays off, consistent with how `.canvas-surface`
+  handles its own (JS-driven) pinch-to-zoom. `.canvas-dot`/`.canvas-
+  resize-handle` are unaffected — they set their own unconditional
+  `touch-action: none`, and a descendant can always narrow an ancestor's
+  allowance, just never widen it, so they stay fully protected.
+- `beginMove` (`CanvasView.jsx`) now bails out immediately — no
+  `stopPropagation`, no `preventDefault`, no pointer capture — when a touch
+  pointerdown lands inside a `.canvas-embed-note-body` that actually
+  overflows (`scrollHeight > clientHeight`), letting the browser's native
+  scroll (now permitted by the CSS above) own the gesture instead of our
+  drag-to-move logic fighting it. A card whose embedded content *doesn't*
+  overflow is unaffected by either change and keeps dragging normally by
+  touch, exactly as before.
+
+**Trade-off, stated plainly rather than glossed over:** a note-embed card
+whose preview content overflows can no longer be *moved* by starting a
+touch-drag from inside that scrolling content — the same trade already
+accepted for cards in text-edit mode. There's no separate drag-handle
+region on these cards (the title bar, `.canvas-embed-title`, is a
+non-scrolling flex-shrink:0 header above the scrollable body, but
+`onPointerDownBody` is wired to the outer wrapper covering both, not the
+title specifically) to move such a card by touch, you'd currently need to
+either drag from a part of the card where the pointerdown doesn't land on
+the overflowing body (there isn't a lot of such space on a small
+note-embed card), or resize/select it another way. Wiring the title bar
+itself as a dedicated always-draggable handle would close that gap
+cleanly — flagged here as the natural next step rather than done in this
+pass, since it's a distinct, separately-testable change (touching
+`CanvasNode.jsx`'s embed-note markup, not just CSS/one function), and this
+pass's job was fixing the scroll-vs-drag bug, not redesigning the card.
+
+**Not touched:** every other canvas mobile item already covered by earlier
+passes (pinch-zoom, the drag-cancel bug, bigger dot/resize-handle touch
+targets, toolbar wrapping) — this was specifically the one open gap
+sections 8/19 had already named and left for "its own pass."
+
+Still open: DB timeline/chart views, offline support (blocked on the
+architecture decision in section 19), and the vector art editor.
+
+---
+
+## 29. Changelog — database Chart view (item 3, second slice)
+
+Picked as the most tractable remaining item — Timeline's two-date-column
+Gantt-lane layout is a genuinely new UI primitive with no existing
+precedent in this codebase to lean on, while Chart mostly needed one new
+pure function plus a rendering component, per section 18's own scoping.
+
+**Added:**
+- **`dbState.js`**: `aggregateDbRows(rows, groupByColumn, valueColumn,
+  aggregateFn)` — the group-by/aggregate step section 18 flagged as
+  needing to land here first (one source of truth, section 3.4) rather
+  than inline inside the chart component, so a future "chart block
+  embedded in a note" feature could reuse it directly. Groups by a Select
+  column's option (same constraint Board's own group-by already has, so
+  `DbGroupByPicker` — already exported from `DbViews.jsx` — is reusable
+  as-is for Chart too, no new picker component needed), reduces each group
+  to a count, or a sum/average of a Number column. Every option gets a
+  bucket even at zero rows, matching Board's "every option is a column"
+  rule, so a bar/slice doesn't vanish the moment its last row is
+  re-tagged.
+- **`features/database/DbChartView.jsx`** (new file, per section 3.7):
+  bar/line/pie over the aggregated data, one view type with a style
+  switcher rather than three separate view types — they all read the same
+  aggregated array and differ only in how it's drawn, and that's exactly
+  how Notion's own Chart view works too. Plain hand-rolled SVG (fixed
+  viewBox, `preserveAspectRatio`), no chart library pulled in — same
+  approach `GraphView` already takes, and three simple geometries with no
+  interaction beyond a legend hover didn't justify one. Also exports
+  `DbAggregatePicker`, the count/sum/average column picker used in the
+  view's settings panel.
+- **`icons.jsx`**: `IconChartBar`/`IconChartLine`/`IconChartPie`, same
+  hand-drawn-SVG format as every other icon there.
+- **`DatabaseView.jsx`**: `chart` added to `DB_VIEW_TYPE_ICONS` and the
+  add-view type list; `addView('chart', ...)` defaults `groupByColumnId`
+  to the vault's first Select column (same pattern board/gallery/calendar
+  already follow) plus `aggregateFn: 'count'` and `chartStyle: 'bar'`;
+  `deleteColumn` now also clears a view's `valueColumnId` (resetting
+  `aggregateFn` back to `'count'`) when its aggregated column is deleted,
+  joining the existing `groupByColumnId`/`coverColumnId`/`dateColumnId`/
+  `sortColumnId` resets there.
+- **`DbViewPanel.jsx`** (new file, extracted from `DatabaseView.jsx`):
+  adding Chart's settings section (group-by + `DbAggregatePicker`) pushed
+  `DatabaseView.jsx` past the ~500-line soft ceiling (section 3.7), so its
+  inline add-view/view-settings panel — a self-contained sub-piece only
+  `DatabaseView` ever renders, same shape as the `DbCalendarView`/
+  `DbChartView` split already — moved to its own file. Pure extraction, no
+  behavior change beyond what Chart itself needed; `DatabaseView.jsx` is
+  back down to ~375 lines.
+- `database.css`: new `.db-chart-*` rules following the existing Board/
+  Calendar section's token conventions right above them.
+- `HelpModal.jsx`'s Databases entry now mentions Chart, its Select-property
+  requirement, and where to switch aggregate/style.
+
+**Not done (deliberately, same reasoning sections 18/20 already gave):**
+Timeline — the two-date-column Gantt-lane layout — is still open; it's the
+one genuinely new layout primitive of the original three, nothing existing
+in `DbViews.jsx`/`DbCalendarView.jsx`/`DbChartView.jsx` is close to it, so
+it stays its own pass rather than getting rushed alongside this one.
+
+Still open: Timeline view, offline support (blocked on the architecture
+decision in section 19), and the vector art editor.
+
+---
+
+## 30. Changelog — database Timeline view (item 3, third and final slice)
+
+Closes out the item-3 database-views batch from section 18: Table, Board,
+Gallery (pre-existing), Calendar (section 20), Chart (section 29), and now
+**Timeline** — the one section 18 itself flagged as "the one genuinely new
+layout primitive, nothing existing in `DbViews.jsx` is close to it."
+
+**Added:**
+- **`features/database/dbDateUtils.jsx`** (new — `.jsx`, not `.js`, since
+  `DbDateColumnPicker` returns markup; the two calendar/chart-style helper
+  files that only export plain functions stayed `.js`, this one couldn't):
+  `pad2`/`isoDate` and `DbDateColumnPicker`, pulled out of
+  `DbCalendarView.jsx` once Timeline needed the exact same "pick a Date
+  property" pattern twice (Start + End) rather than duplicating it
+  (section 3.4). Added `daysBetween(isoA, isoB)` (whole-day difference,
+  parsed as local midnight like every other date-string handling in this
+  codebase) and two new picker options Calendar's own single-picker case
+  never needed: `excludeId` (so the End picker can't offer the column
+  already picked as Start, and vice versa — picking the same column for
+  both would make every bar a same-day sliver) and `selectedId` (a
+  checkmark next to the current pick; Calendar's settings-panel usage
+  still inlines its own checkmarked list rather than this component, so it
+  didn't need this itself, but Timeline needs two pickers side by side in
+  settings and benefits from it). `DbCalendarView.jsx` now imports these
+  instead of defining its own copies — behavior unchanged there.
+- **`features/database/DbTimelineView.jsx`** (new file, per section 3.7):
+  one horizontal bar per row from a Start date column to an End date
+  column; a row missing either date, or with end before start, just
+  doesn't get a bar — same "doesn't appear" rule Calendar already uses
+  for rows with no date, rather than a separate "unscheduled" lane. Range
+  is derived from the data itself (min start to max end across valid
+  rows, padded by 2 days either side) rather than a fixed window with
+  prev/next navigation like Calendar's month view — a Gantt chart's whole
+  point is showing the full span at once, not paging through it. Ruler
+  and lanes share one scroll container with the ruler `position: sticky;
+  top: 0` inside it, so horizontal scroll stays in sync between the two
+  without duplicating scroll state. A vertical line marks today when it
+  falls inside the visible range.
+- **`icons.jsx`**: `IconTimeline`, same hand-drawn-SVG format as every
+  other icon there.
+- **`DatabaseView.jsx`**: `timeline` added to `DB_VIEW_TYPE_ICONS`;
+  `addView('timeline', ...)` defaults to the vault's first two Date
+  columns for start/end (falls back to `null`/`null` or `id`/`null` if
+  there are fewer than two, same as every other view type's "best guess,
+  pick prompts if it can't guess" default); `deleteColumn` now also clears
+  a view's `startColumnId`/`endColumnId` when either's column is deleted,
+  joining the existing resets there.
+- **`DbViewPanel.jsx`**: Timeline's settings section (two
+  `DbDateColumnPicker`s, Start and End, each excluding the other's current
+  pick) and its add-view list entry.
+- `database.css`: new `.db-timeline-*` rules.
+- `HelpModal.jsx`'s Databases entry now mentions Timeline and its two-date
+  requirement.
+
+**Deliberately not done (stated plainly, per section 18/29's own
+precedent of not glossing over scope cuts):**
+- **No dragging a bar to move or resize it.** A row's dates only change
+  from Properties/the row-detail modal, same as every other column type
+  in this app — implementing drag-to-reschedule is a real interaction-
+  design and drag-math project on the order of the canvas's own drag
+  system (magnetic snapping, live date computation from pixel deltas,
+  touch support), not a natural extension of this pass's scope.
+- **No frozen title column.** Row titles render inside their own bar
+  (truncated with ellipsis if too long) rather than in a separate
+  always-visible left column the way most Gantt UIs do it — simpler, and
+  fine for short titles, but a title on a short/early bar can get cut off
+  more than a frozen column would allow. Worth revisiting if this turns
+  out to matter in practice.
+- **No zoom control.** `DAY_WIDTH` is a fixed 32px constant; a timeline
+  spanning a year would be very wide (and require a lot of horizontal
+  scrolling) rather than compressing to fit. A week/month/year zoom toggle
+  is a reasonable follow-up but wasn't essential for a first version.
+
+This closes the entire item-3 batch from sections 18/19. Still open
+overall: offline support (blocked on the architecture decision in section
+19) and the vector art editor.

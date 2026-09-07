@@ -237,6 +237,17 @@ function CanvasView({ file, content, onChange, handlers, linkIndex, loading, all
   const beginMove = useCallback(
     (e, node) => {
       if (editingId === node.id) return;
+      // A touch starting inside an embedded note preview that actually
+      // overflows: bail out before touching anything (no stopPropagation,
+      // no preventDefault, no pointer capture) so the browser's own touch
+      // scrolling — allowed in by `.canvas-node:has(.canvas-embed-note-
+      // body)`'s `pan-y` in canvas.css — owns this gesture instead of us
+      // dragging the card. A card whose content doesn't overflow falls
+      // through to the normal drag path below unaffected.
+      if (e.pointerType !== 'mouse') {
+        const scrollEl = e.target.closest?.('.canvas-embed-note-body');
+        if (scrollEl && scrollEl.scrollHeight > scrollEl.clientHeight + 1) return;
+      }
       e.stopPropagation();
       // Touch-only: without this, iOS/Android still arm their own
       // scroll/long-press gesture recognizer alongside ours even though

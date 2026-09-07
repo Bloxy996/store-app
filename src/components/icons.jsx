@@ -124,6 +124,44 @@ const IconUpload = (p) => (
   </Svg>
 );
 
+const IconBraces = (p) => (
+  <Svg {...p}>
+    <path d="M8 3H7a2 2 0 0 0-2 2v3.5a1.5 1.5 0 0 1-1.5 1.5 1.5 1.5 0 0 1 1.5 1.5V15a2 2 0 0 0 2 2h1" />
+    <path d="M16 3h1a2 2 0 0 1 2 2v3.5a1.5 1.5 0 0 0 1.5 1.5 1.5 1.5 0 0 0-1.5 1.5V15a2 2 0 0 1-2 2h-1" />
+  </Svg>
+);
+
+const IconChartBar = (p) => (
+  <Svg {...p}>
+    <line x1="4" y1="20" x2="20" y2="20" />
+    <rect x="6" y="12" width="3.2" height="8" />
+    <rect x="11" y="7" width="3.2" height="13" />
+    <rect x="16" y="15" width="3.2" height="5" />
+  </Svg>
+);
+
+const IconChartLine = (p) => (
+  <Svg {...p}>
+    <line x1="4" y1="20" x2="20" y2="20" />
+    <polyline points="4 15 9 9 13 13 20 5" />
+  </Svg>
+);
+
+const IconChartPie = (p) => (
+  <Svg {...p}>
+    <path d="M21.21 15.89A10 10 0 1 1 8 2.83" />
+    <path d="M22 12A10 10 0 0 0 12 2v10z" />
+  </Svg>
+);
+
+const IconTimeline = (p) => (
+  <Svg {...p}>
+    <line x1="4" y1="6" x2="14" y2="6" />
+    <line x1="4" y1="12" x2="20" y2="12" />
+    <line x1="4" y1="18" x2="10" y2="18" />
+  </Svg>
+);
+
 const IconMoreVertical = (p) => (
   <Svg {...p}>
     <circle cx="12" cy="5" r="1.4" fill="currentColor" stroke="none" />
@@ -558,4 +596,4 @@ const IconExpand = (p) => (
 
 const ASSET_KIND_ICONS = { video: IconVideo, audio: IconAudio, file: IconFile, database: IconDatabase, canvas: IconCanvasKind };
 
-export { Svg, IconChevronRight, IconChevronDown, IconMenu, IconListTree, IconPalette, IconPlus, IconGraph, IconMaximize, IconFilePlus, IconFolderPlus, IconUpload, IconMoreVertical, IconEdit, IconTrash, IconX, IconPanelLeft, IconSearch, IconTag, IconStar, IconStarFilled, IconRefresh, IconLogOut, IconFolder, IconDrive, IconSplitVertical, IconSplitHorizontal, IconEye, IconArrowLeft, IconArrowRight, IconSettings, IconHelp, IconSliders, IconInfo, IconImageMissing, IconCheck, IconVideo, IconAudio, IconFile, IconDownload, IconDatabase, IconTable, IconKanban, IconLayoutGrid, IconCalendar, IconHash, IconType, IconAlignLeft, IconCheckSquare, IconChevronsUpDown, IconGripVertical, IconPaperclip, IconLink2, IconTags, IconLoader, IconCommand, IconAlertTriangle, IconCanvasKind, IconZoomIn, IconZoomOut, IconFrame, IconStickyNote, IconImage, IconExpand, IconGrid, ASSET_KIND_ICONS };
+export { Svg, IconChevronRight, IconChevronDown, IconMenu, IconListTree, IconPalette, IconPlus, IconGraph, IconMaximize, IconFilePlus, IconFolderPlus, IconUpload, IconBraces, IconChartBar, IconChartLine, IconChartPie, IconTimeline, IconMoreVertical, IconEdit, IconTrash, IconX, IconPanelLeft, IconSearch, IconTag, IconStar, IconStarFilled, IconRefresh, IconLogOut, IconFolder, IconDrive, IconSplitVertical, IconSplitHorizontal, IconEye, IconArrowLeft, IconArrowRight, IconSettings, IconHelp, IconSliders, IconInfo, IconImageMissing, IconCheck, IconVideo, IconAudio, IconFile, IconDownload, IconDatabase, IconTable, IconKanban, IconLayoutGrid, IconCalendar, IconHash, IconType, IconAlignLeft, IconCheckSquare, IconChevronsUpDown, IconGripVertical, IconPaperclip, IconLink2, IconTags, IconLoader, IconCommand, IconAlertTriangle, IconCanvasKind, IconZoomIn, IconZoomOut, IconFrame, IconStickyNote, IconImage, IconExpand, IconGrid, ASSET_KIND_ICONS };

@@ -11,6 +11,7 @@ const GRAPH_SETTINGS_KEY = 'vault_graph_settings';
 
 const DEFAULT_GRAPH_SETTINGS = {
   showAttachments: false,
+  showTags: false,
   hideOrphans: false,
   localMode: false,
   localDepth: 1,

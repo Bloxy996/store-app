@@ -16,6 +16,7 @@ import { renderMarkdownBlocks } from '../../lib/markdownRender.jsx';
 // "Mobile performance & bundle size".
 const DatabaseView = lazy(() => import('../database/DatabaseView.jsx').then((m) => ({ default: m.DatabaseView })));
 const CanvasView = lazy(() => import('../canvas/CanvasView.jsx').then((m) => ({ default: m.CanvasView })));
+const GraphView = lazy(() => import('../graph/GraphView.jsx').then((m) => ({ default: m.GraphView })));
 
 
 function EditorContent({ file, content, onChange, linkIndex, phantomRecords, handlers, mode, loadingNote, backlinkIndex, allFiles, getBody, isActivePane, pendingRowOpen, onConsumeRowOpen }) {
@@ -155,6 +156,21 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
           linkIndex={linkIndex}
           loading={loadingNote}
           allFiles={allFiles}
+        />
+      </Suspense>
+    );
+  }
+
+  if (file.kind === 'graph') {
+    return (
+      <Suspense fallback={<div className="note-loading-bar" aria-hidden="true" />}>
+        <GraphView
+          linkIndex={linkIndex}
+          linksByFileId={handlers.linksByFileId}
+          tagsByFileId={handlers.tagsByFileId}
+          onOpenFile={handlers.onOpenById}
+          onOpenTag={handlers.onOpenTag}
+          activeFileId={handlers.getGraphCenterFileId?.()}
         />
       </Suspense>
     );

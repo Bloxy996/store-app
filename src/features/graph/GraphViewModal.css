@@ -1,33 +1,27 @@
 /* ---------------------------------------------------------------------------
-   Graph view (full-vault wikilink map, opened as a large modal)
+   Graph view (full-vault wikilink map) — a real pane/tab (see
+   graphPaneFile.js + EditorContent.jsx's `file.kind === 'graph'` branch),
+   not a modal; `.graph-pane` fills `.pane-content` the same way
+   `.db-view`/`.canvas-view` do for their own pane kinds. Filename kept as
+   GraphViewModal.css post-conversion — this file has also long held the
+   unrelated `.editor-preview`/wikilink/callout/table styles further down,
+   and renaming it isn't worth the risk of that unrelated CSS getting
+   mis-migrated for a filename-only change.
 --------------------------------------------------------------------------- */
-.graph-modal {
-  width: min(1100px, 94vw);
-  height: min(760px, 88vh);
+.graph-pane {
+  height: 100%;
   display: flex;
   flex-direction: column;
-  padding: 0;
   overflow: hidden;
+  background: var(--bg-0);
 }
-.graph-modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border-soft);
-  flex-shrink: 0;
-  flex-wrap: wrap;
-}
-.graph-modal-header h3 {
-  margin: 0;
-  font-size: 15px;
-  flex-shrink: 0;
-}
-.graph-modal-tools {
+.graph-pane-toolbar {
   display: flex;
   align-items: center;
   gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  flex-shrink: 0;
   flex-wrap: wrap;
 }
 .graph-search {
@@ -48,7 +42,7 @@
   white-space: nowrap;
   cursor: pointer;
 }
-.graph-modal-tools .icon-btn.active {
+.graph-pane-toolbar .icon-btn.active {
   background: var(--accent-soft);
   color: var(--accent);
 }
@@ -167,6 +161,15 @@
 .graph-node.attachment circle {
   fill: var(--text-faint);
 }
+.graph-node.tag circle {
+  fill: none;
+  stroke: var(--text-muted);
+  stroke-width: 1.5;
+}
+.graph-node.tag .graph-node-label {
+  color: var(--text-muted);
+  font-style: italic;
+}
 .graph-node.current circle {
   stroke: var(--accent);
   stroke-width: 2.5;
@@ -180,20 +183,14 @@
   pointer-events: none;
   user-select: none;
 }
-.graph-modal-footer {
-  padding: 7px 16px;
+.graph-pane-footer {
+  padding: 6px 12px;
   border-top: 1px solid var(--border-soft);
   font-size: 11.5px;
   color: var(--text-faint);
   flex-shrink: 0;
 }
 @media (max-width: 720px) {
-  .graph-modal {
-    width: 100vw;
-    height: 100vh;
-    max-height: 100vh;
-    border-radius: 0;
-  }
   .graph-search {
     width: 120px;
   }

@@ -30,3 +30,4 @@
 @import '../features/canvas/canvas.css';
 @import '../components/MiniMarkdownEditor.css';
 @import '../features/settings/FrontmatterSchemaSettings.css';
+@import '../features/compile/CompilePanel.css';

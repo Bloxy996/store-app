@@ -11,7 +11,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 // they update every animation frame; `bump` below is the only piece of
 // this that touches React state, purely to trigger a re-render per tick.
 // `forces` mirrors Obsidian's own Forces panel (repel/link/linkDistance/
-// center) — GraphViewModal exposes these as sliders; the defaults below are
+// center) — GraphView exposes these as sliders; the defaults below are
 // this function's previous hardcoded constants, unchanged for anyone who
 // never touches the sliders.
 const DEFAULT_FORCES = { repel: 2400, linkStrength: 0.02, linkDistance: 95, center: 0.012 };
@@ -53,34 +53,50 @@ function useForceGraph(nodeIds, edgeList, width, height, forces = DEFAULT_FORCES
     let cancelled = false;
     const { pos, vel, pinned } = stateRef.current;
     const DAMPING = 0.8;
+    // Repulsion is the O(n²) part of every tick; on a touch/coarse-pointer
+    // device (phones, tablets — weaker GPUs/CPUs, and this is exactly the
+    // kind of graph a vault's mobile session is most likely to open one-
+    // handed) skip it on alternate frames once the graph is big enough for
+    // that cost to matter. Springs + centering still run every frame, so
+    // the layout doesn't visibly change shape — repulsion just gets
+    // smoothed over two frames instead of recomputed every one, roughly
+    // halving the simulation's heaviest cost. Below the threshold (small
+    // graphs, the common case) this never kicks in at all.
+    const isCoarsePointer = typeof window !== 'undefined' && !!window.matchMedia?.('(pointer: coarse)').matches;
+    const REPULSION_SKIP_THRESHOLD = 150;
+    let frameParity = 0;
 
     function step() {
       if (cancelled) return;
       if (alphaRef.current > 0.008) {
         const alpha = alphaRef.current;
         const { repel: REPULSION, linkStrength: SPRING, linkDistance: SPRING_LEN, center: CENTER_PULL } = forcesRef.current;
+        const skipRepulsion = isCoarsePointer && nodeIds.length > REPULSION_SKIP_THRESHOLD && frameParity % 2 === 1;
+        frameParity++;
         // Pairwise repulsion — O(n²), fine at the node counts a single
         // vault's graph realistically reaches; spatial partitioning would
         // be the next lever if that stops being true for very large vaults.
-        for (let i = 0; i < nodeIds.length; i++) {
-          const a = pos.get(nodeIds[i]);
-          if (!a) continue;
-          for (let j = i + 1; j < nodeIds.length; j++) {
-            const b = pos.get(nodeIds[j]);
-            if (!b) continue;
-            let dx = a.x - b.x;
-            let dy = a.y - b.y;
-            const distSq = Math.max(dx * dx + dy * dy, 25);
-            const dist = Math.sqrt(distSq);
-            const force = (REPULSION * alpha) / distSq;
-            dx /= dist;
-            dy /= dist;
-            const va = vel.get(nodeIds[i]);
-            const vb = vel.get(nodeIds[j]);
-            va.x += dx * force;
-            va.y += dy * force;
-            vb.x -= dx * force;
-            vb.y -= dy * force;
+        if (!skipRepulsion) {
+          for (let i = 0; i < nodeIds.length; i++) {
+            const a = pos.get(nodeIds[i]);
+            if (!a) continue;
+            for (let j = i + 1; j < nodeIds.length; j++) {
+              const b = pos.get(nodeIds[j]);
+              if (!b) continue;
+              let dx = a.x - b.x;
+              let dy = a.y - b.y;
+              const distSq = Math.max(dx * dx + dy * dy, 25);
+              const dist = Math.sqrt(distSq);
+              const force = (REPULSION * alpha) / distSq;
+              dx /= dist;
+              dy /= dist;
+              const va = vel.get(nodeIds[i]);
+              const vb = vel.get(nodeIds[j]);
+              va.x += dx * force;
+              va.y += dy * force;
+              vb.x -= dx * force;
+              vb.y -= dy * force;
+            }
           }
         }
         edgeList.forEach(([s, t]) => {

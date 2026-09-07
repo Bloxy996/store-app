@@ -163,4 +163,44 @@ function serializeDatabaseState(state) {
   return JSON.stringify(state, null, 2);
 }
 
-export { DB_ROW_DND_MIME, dbId, DB_COLUMN_TYPES, DB_ATTACHMENT_TYPES, DB_SORTABLE_TYPES, compareDbValues, DB_OPTION_COLORS, dbEmptyValue, dbMakeRow, makeDefaultDatabaseState, parseDatabaseContent, serializeDatabaseState };
+// Group-by/aggregate helper for Chart view — a pure function (no chart-
+// library or rendering concerns) so a future "chart block embedded in a
+// note" feature could reuse it directly (section 3.4: one source of
+// truth for this math, not recomputed inline inside a chart component).
+// Groups rows by a Select column's option — same "must be a Select"
+// constraint Board's own group-by already has, so the same
+// `DbGroupByPicker` prompt/UI is reusable as-is for Chart too — then
+// reduces each group to one number: a plain row count, or a sum/average
+// of a numeric column. Every option gets a bucket even with zero matching
+// rows (same "every option is a column" rule Board's board view already
+// follows), so a bar/slice doesn't disappear out from under you the
+// moment its last row is removed or re-tagged.
+function aggregateDbRows(rows, groupByColumn, valueColumn, aggregateFn) {
+  const buckets = new Map();
+  (groupByColumn?.options || []).forEach((o) => buckets.set(o.id, { key: o.id, label: o.label, color: o.color, values: [] }));
+  let noneValues = [];
+  rows.forEach((r) => {
+    const key = groupByColumn ? r.values[groupByColumn.id] : null;
+    const bucket = key && buckets.has(key) ? buckets.get(key) : null;
+    const raw = valueColumn ? Number(r.values[valueColumn.id]) : NaN;
+    const num = Number.isFinite(raw) ? raw : 0;
+    if (bucket) bucket.values.push(num);
+    else noneValues.push(num);
+  });
+  if (noneValues.length) buckets.set('__none__', { key: '__none__', label: 'No value', color: '#808080', values: noneValues });
+  return Array.from(buckets.values()).map((b) => ({
+    key: b.key,
+    label: b.label,
+    color: b.color,
+    value:
+      aggregateFn === 'sum'
+        ? b.values.reduce((a, v) => a + v, 0)
+        : aggregateFn === 'average'
+          ? b.values.length
+            ? b.values.reduce((a, v) => a + v, 0) / b.values.length
+            : 0
+          : b.values.length // 'count', the default
+  }));
+}
+
+export { DB_ROW_DND_MIME, dbId, DB_COLUMN_TYPES, DB_ATTACHMENT_TYPES, DB_SORTABLE_TYPES, compareDbValues, DB_OPTION_COLORS, dbEmptyValue, dbMakeRow, makeDefaultDatabaseState, parseDatabaseContent, serializeDatabaseState, aggregateDbRows };

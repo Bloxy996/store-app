@@ -11,6 +11,8 @@ import { useAccentColor } from './features/accent/accentColor.js';
 import { BookmarksPanel } from './features/bookmarks/BookmarksPanel.jsx';
 import { makeDefaultCanvasState, serializeCanvasState } from './features/canvas/canvasState.js';
 import { makeDefaultDatabaseState, serializeDatabaseState } from './features/database/dbState.js';
+import { GRAPH_PANE_FILE, GRAPH_PANE_FILE_ID } from './features/graph/graphPaneFile.js';
+import { applyFileChanges, flattenVaultTree, parseApplyXml } from './features/compile/compileVault.js';
 import { OnboardingFlow, loadingStepProps } from './features/onboarding/OnboardingFlow.jsx';
 import { ProxyFolderBrowser } from './features/onboarding/ProxyFolderBrowser.jsx';
 import { PaneNode, collapseEmptyLeaves, findSplitNode, purgeFileFromTree } from './features/panes/PaneNode.jsx';
@@ -23,12 +25,14 @@ import { releaseImageUrlCache } from './hooks/useDriveImageUrl.js';
 import { useVaultIndex } from './hooks/useVaultIndex.js';
 
 // Code-split: each of these is a full-screen modal/overlay that most
-// sessions never open (graph view, in-app help, the Cmd+K palette). Loading
+// sessions never open (in-app help, the Cmd+K palette). Loading
 // them lazily keeps them out of the initial bundle a phone has to parse
 // before it can show a single note — see CLAUDE.md "Mobile performance &
 // bundle size" for the rest of the code-splitting rules this follows.
-const GraphViewModal = lazy(() => import('./features/graph/GraphViewModal.jsx').then((m) => ({ default: m.GraphViewModal })));
+// (Graph view moved off this list — it's a real pane now, code-split via
+// EditorContent.jsx's file.kind switch same as DatabaseView/CanvasView.)
 const HelpModal = lazy(() => import('./features/help/HelpModal.jsx').then((m) => ({ default: m.HelpModal })));
+const CompilePanel = lazy(() => import('./features/compile/CompilePanel.jsx').then((m) => ({ default: m.CompilePanel })));
 const PaletteModal = lazy(() => import('./features/palette/PaletteModal.jsx').then((m) => ({ default: m.PaletteModal })));
 const FrontmatterSchemaSettings = lazy(() =>
   import('./features/settings/FrontmatterSchemaSettings.jsx').then((m) => ({ default: m.FrontmatterSchemaSettings }))
@@ -98,7 +102,14 @@ export default function App() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [schemaSettingsOpen, setSchemaSettingsOpen] = useState(false);
   const [frontmatterSchema, setFrontmatterSchema] = useFrontmatterSchema();
-  const [graphOpen, setGraphOpen] = useState(false);
+  // Last real note that was active, tracked purely so opening the Graph
+  // pane (which itself has no "note") can still center a local graph on
+  // whatever you were actually looking at. Deliberately a ref, not state —
+  // updated in a plain effect below, read straight off `.current` inside
+  // `handlers` on whatever render happens to follow (handlers already
+  // rebuilds on nearly every keystroke/tick, so this doesn't need its own
+  // dependency wiring to stay fresh in practice).
+  const lastNoteFileIdRef = useRef(null);
   // When the switcher is opened via the tab bar's "+" button, the next pick
   // should always open in a new tab — unlike ⌘O, which navigates the current
   // tab unless the user holds Cmd/Ctrl. Tracked as a ref (not state) since it
@@ -187,7 +198,21 @@ export default function App() {
     }
   }, [paneTree, activePaneId]);
 
-  const filesById = useMemo(() => new Map(sync.filesMeta.map((f) => [f.id, f])), [sync.filesMeta]);
+  const filesById = useMemo(() => {
+    const map = new Map(sync.filesMeta.map((f) => [f.id, f]));
+    map.set(GRAPH_PANE_FILE_ID, GRAPH_PANE_FILE);
+    return map;
+  }, [sync.filesMeta]);
+
+  // Keeps lastNoteFileIdRef (declared above, with its own comment) pointed
+  // at whatever real file was active last, skipping the Graph pane itself
+  // so switching to it doesn't clobber the note it should center on.
+  useEffect(() => {
+    const leaf = findLeaf(paneTree, activePaneId);
+    const tab = leaf?.tabs.find((t) => t.id === leaf.activeTabId);
+    const file = tab ? filesById.get(tab.fileId) : null;
+    if (file && file.kind !== 'graph') lastNoteFileIdRef.current = file.id;
+  }, [paneTree, activePaneId, filesById]);
 
   // Wikilink targets that don't resolve to any real file yet ("phantom"
   // notes, in Obsidian's terminology) — collected from every link in the
@@ -304,6 +329,66 @@ export default function App() {
     [saveNow]
   );
 
+  // Compile panel's "Apply changes" — takes an LLM's raw
+  // <update>/<change> XML reply and writes the matched search/replace
+  // edits back to the store. Requires every change in a file to match
+  // its search text exactly once before writing anything for that file
+  // (all-or-nothing per file, not per change) — a partially-applied file
+  // left silently half-edited is worse than reporting the mismatch and
+  // asking for a retry. Also refuses any file with unsaved edits in an
+  // open buffer (`dirty`), since fetching fresh content from Drive and
+  // writing back would silently discard those — reuses `saveNow` itself
+  // for the actual write so an open buffer for the file (if any, and not
+  // dirty) gets updated in place exactly like a normal edit would.
+  const applyCompiledChanges = useCallback(
+    async (xmlText) => {
+      const { updates, parseError } = parseApplyXml(xmlText);
+      if (parseError) return { parseError, files: [] };
+      const { files: allFiles } = flattenVaultTree(tree);
+      const pathToId = new Map(allFiles.map((f) => [f.path, f.id]));
+      const results = [];
+      for (const update of updates) {
+        const fileId = pathToId.get(update.path);
+        if (!fileId) {
+          results.push({ path: update.path, ok: false, message: 'Not found in the vault' });
+          continue;
+        }
+        const buf = buffers[fileId];
+        if (buf?.dirty) {
+          results.push({ path: update.path, ok: false, message: 'Skipped — unsaved changes open in editor, save first' });
+          continue;
+        }
+        let current;
+        try {
+          current = buf ? buf.content : await driveGetFileContent(token, fileId);
+        } catch (err) {
+          results.push({ path: update.path, ok: false, message: `Could not read file: ${err.message}` });
+          continue;
+        }
+        const { content: next, results: changeResults } = applyFileChanges(current, update.changes);
+        const failed = changeResults.filter((r) => r.status !== 'applied');
+        if (failed.length) {
+          const describe = (r) =>
+            r.status === 'not_found'
+              ? `change ${r.index + 1}: search text not found`
+              : r.status === 'ambiguous'
+                ? `change ${r.index + 1}: search text matches ${r.count} times, needs to be unique`
+                : `change ${r.index + 1}: empty search block`;
+          results.push({ path: update.path, ok: false, message: `Not applied — ${failed.map(describe).join('; ')}` });
+          continue;
+        }
+        try {
+          await saveNow(fileId, next);
+          results.push({ path: update.path, ok: true, message: `${changeResults.length} change${changeResults.length === 1 ? '' : 's'} applied` });
+        } catch (err) {
+          results.push({ path: update.path, ok: false, message: `Write failed: ${err.message}` });
+        }
+      }
+      return { parseError: null, files: results };
+    },
+    [tree, buffers, token, saveNow]
+  );
+
   // Manual save shortcut — saves whichever file the focused pane has open.
   useEffect(() => {
     const handler = (e) => {
@@ -385,6 +470,10 @@ export default function App() {
   );
   const handleSidebarOpenImage = useCallback(
     (file, e) => openFileInPane(activePaneId, file.id, { newTab: !!(e && (e.metaKey || e.ctrlKey)) }),
+    [activePaneId, openFileInPane]
+  );
+  const openGraphInPane = useCallback(
+    (e) => openFileInPane(activePaneId, GRAPH_PANE_FILE_ID, { newTab: !!(e && (e.metaKey || e.ctrlKey)) }),
     [activePaneId, openFileInPane]
   );
 
@@ -877,7 +966,10 @@ export default function App() {
       },
       uploadAttachment: uploadAttachmentFile,
       allTags,
+      tagsByFileId,
+      linksByFileId: sync.linksByFileId,
       frontmatterSchema,
+      getGraphCenterFileId: () => lastNoteFileIdRef.current,
       pagesIndex,
       ensureVaultIndexed: vaultIndex.ensureIndexed,
       vaultIndexReady: vaultIndex.ready,
@@ -892,8 +984,10 @@ export default function App() {
       handleInlineRenameFile,
       uploadAttachmentFile,
       allTags,
+      tagsByFileId,
       frontmatterSchema,
       pagesIndex,
+      sync.linksByFileId,
       vaultIndex.ensureIndexed,
       vaultIndex.ready,
       vaultIndex.progress,
@@ -958,7 +1052,7 @@ export default function App() {
           setMobileDockOpen(true);
         }
       },
-      { id: 'open-graph', label: 'Open graph view', icon: <IconGraph size={15} />, run: () => setGraphOpen(true) },
+      { id: 'open-graph', label: 'Open graph view', icon: <IconGraph size={15} />, run: () => openGraphInPane() },
       {
         id: 'quick-switcher',
         label: 'Quick switcher: jump to note',
@@ -972,7 +1066,7 @@ export default function App() {
       { id: 'change-folder', label: 'Change store folder', icon: <IconFolder size={15} />, run: handlePickFolder },
       { id: 'sign-out', label: 'Sign out', icon: <IconLogOut size={15} />, run: signOut }
     ];
-  }, [folder, handleCreateNoteIn, handleCreateDatabaseIn, handleCreateCanvasIn, handleCreateFolderIn, activePaneId, splitPane, paneTree, toggleTabMode, sync, handlePickFolder, signOut]);
+  }, [folder, handleCreateNoteIn, handleCreateDatabaseIn, handleCreateCanvasIn, handleCreateFolderIn, activePaneId, splitPane, paneTree, toggleTabMode, sync, handlePickFolder, signOut, openGraphInPane]);
 
   const handlePaletteCommand = useCallback((cmd) => {
     setPaletteMode(null);
@@ -1025,7 +1119,7 @@ export default function App() {
             setMobileDockOpen(true);
           }}
           onOpenCommandPalette={() => setPaletteMode('commands')}
-          onOpenGraph={() => setGraphOpen(true)}
+          onOpenGraph={() => openGraphInPane()}
           onSync={() => sync.syncNow()}
           syncing={sync.syncing}
           onChangeFolder={handlePickFolder}
@@ -1096,6 +1190,17 @@ export default function App() {
                 onOpenImage={handleSidebarOpenImage}
                 onToggleBookmark={toggleBookmark}
               />
+            )}
+            {activeSideView === 'compile' && (
+              <Suspense fallback={null}>
+                <CompilePanel
+                  tree={tree}
+                  getBody={vaultIndex.getBody}
+                  ensureIndexed={vaultIndex.ensureIndexed}
+                  indexReady={vaultIndex.ready}
+                  onApplyChanges={applyCompiledChanges}
+                />
+              </Suspense>
             )}
           </div>
           <div className="vault-footer">
@@ -1211,17 +1316,6 @@ export default function App() {
             schema={frontmatterSchema}
             onChange={setFrontmatterSchema}
             onClose={() => setSchemaSettingsOpen(false)}
-          />
-        </Suspense>
-      )}
-      {graphOpen && (
-        <Suspense fallback={null}>
-          <GraphViewModal
-            onClose={() => setGraphOpen(false)}
-            linkIndex={sync.linkIndex}
-            linksByFileId={sync.linksByFileId}
-            onOpenFile={handleSidebarOpenFile}
-            activeFileId={activeFileForStatus?.id}
           />
         </Suspense>
       )}

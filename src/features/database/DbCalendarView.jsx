@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 
 import { IconArrowLeft, IconArrowRight, IconPlus } from '../../components/icons.jsx';
 import { DbCardPropPreview } from './DbViews.jsx';
+import { DbDateColumnPicker, isoDate } from './dbDateUtils.jsx';
 
 // --- Calendar view -----------------------------------------------------------
 // Notion-style month grid: requires one Date property (view.dateColumnId,
@@ -12,17 +13,10 @@ import { DbCardPropPreview } from './DbViews.jsx';
 // Board's grouping, a day a row doesn't belong to isn't a meaningful state
 // to render). Date columns store plain 'YYYY-MM-DD' strings (DbDateCell's
 // <input type="date">), so this compares strings directly — no timezone
-// math needed.
+// math needed. pad2/isoDate/DbDateColumnPicker live in dbDateUtils.jsx,
+// shared with DbTimelineView.
 
 const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
-function pad2(n) {
-  return String(n).padStart(2, '0');
-}
-
-function isoDate(y, m, d) {
-  return `${y}-${pad2(m + 1)}-${pad2(d)}`;
-}
 
 // 42 cells (6 full weeks) starting from the Sunday on/before the 1st, so
 // the grid never reflows height between months.
@@ -36,20 +30,6 @@ function buildMonthCells(year, month) {
     cells.push({ date: isoDate(d.getFullYear(), d.getMonth(), d.getDate()), day: d.getDate(), inMonth: d.getMonth() === month });
   }
   return cells;
-}
-
-function DbDateColumnPicker({ columns, onPick }) {
-  const dateCols = columns.filter((c) => c.type === 'date');
-  if (!dateCols.length) return <p className="muted small">Add a Date property first, from Properties.</p>;
-  return (
-    <div className="db-groupby-pick-list">
-      {dateCols.map((c) => (
-        <button key={c.id} className="db-popover-item" onClick={() => onPick(c.id)}>
-          {c.name}
-        </button>
-      ))}
-    </div>
-  );
 }
 
 function DbCalendarView({ state, view, onOpenRow, rowTitle, addRow, onChangeDateColumn }) {
