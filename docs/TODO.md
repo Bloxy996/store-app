@@ -84,5 +84,4 @@ See `CLAUDE.md` for architecture context and update as needed.
 - [ ] Add an Android accessibility widget menu that can take screenshots
       and also accept typed text, for mobile.
 
-- [ ] Pull the content from the setup doc comment in appscript.gs into README.md
-
+- [x] Pull the content from the setup doc comment in appscript.gs into README.md

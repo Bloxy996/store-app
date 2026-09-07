@@ -6,24 +6,6 @@
  * permission to read/write your Drive — visitors never need their own
  * Google OAuth grant.
  *
- * SETUP (one time, done inside the Apps Script editor):
- *   1. Left sidebar → Services (+) → add "Drive API" → pick version 3.
- *      Apps Script will prompt you to enable it in the linked Cloud
- *      project too — click through that.
- *   2. Replace YOUR_SECRET_HERE below with a long random string
- *      (e.g. generate one at https://www.uuidgenerator.net/ or run
- *      `openssl rand -hex 24` locally). Pick the function "setSecret"
- *      in the toolbar dropdown and click Run once. This stores the
- *      secret in Script Properties (not in the file itself).
- *   3. Deploy → New deployment → type "Web app" → Execute as "Me" →
- *      Who has access "Anyone" → Deploy. Authorize when prompted
- *      (this is you, the owner, authorizing — not a visitor).
- *   4. Copy the "Web app URL" (ends in /exec). That + your secret is
- *      what you paste into store's "Use Apps Script proxy" form.
- *   5. Test it by visiting, in any browser:
- *      <WebAppURL>?action=ping&secret=<your secret>
- *      You should see {"ok":true}.
- *
  * Whenever you edit this file, you must push a new version for the
  * change to reach your live URL: Deploy → Manage deployments → Edit
  * (pencil) → Version: New version → Deploy.

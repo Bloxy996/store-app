@@ -29,12 +29,32 @@ npm run preview   # preview a production build locally
 
 You'll need a Google Cloud project with the Drive API enabled and an
 OAuth client ID for the app's Google sign-in (`drive.file` scope only —
-the app never requests broader Drive access). Sign in on first launch;
-your notes are read from and written straight to your own Drive, never
-to any server this project controls.
+the app never requests broader Drive access). Alternatively, you can
+use the included Apps Script proxy to avoid setting up OAuth entirely.
 
-See [`appscript.js`](./google/appscript.gs)'s doc comment to set up the
-apps script proxy.
+## Apps Script proxy setup
+
+If you prefer not to manage OAuth client credentials, you can deploy
+the included Google Apps Script as a proxy. It runs under your own
+Google identity, so visitors never need their own OAuth grant.
+
+1. Open `google/appscript.gs` in the Apps Script editor.
+2. In the left sidebar, click Services (+) and add the **Drive API**
+   (version 3). Enable it in the linked Cloud project when prompted.
+3. Replace `YOUR_SECRET_HERE` in the `setSecret()` function with a
+   long random string (e.g., from `uuidgenerator.net` or run
+   `openssl rand -hex 24` locally). Select the `setSecret` function
+   in the toolbar dropdown and click **Run** once. This stores the
+   secret in Script Properties.
+4. Deploy the script as a **Web App** (Execute as: Me, Who has access:
+   Anyone). Copy the deployment URL (ends in `/exec`).
+5. In the app’s sign-in screen, choose “Use Apps Script proxy” and
+   enter the URL and your secret. Test by visiting
+   `<WebAppURL>?action=ping&secret=<your secret>` – you should see
+   `{"ok":true}`.
+
+Whenever you edit `appscript.gs`, you must push a new version of the
+deployment for changes to take effect.
 
 ## Architecture
 
