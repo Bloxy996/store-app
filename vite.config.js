@@ -128,6 +128,20 @@ export default defineConfig({
   build: {
     target: 'esnext',
     sourcemap: false,
-    outDir: 'dist'
+    outDir: 'dist',
+    rolldownOptions: {
+      output: {
+        // Workaround for a Rolldown/Vite 8 bug where code-split chunks can
+        // reference a cross-chunk binding (e.g. from a React.lazy()-loaded
+        // module) before that chunk has finished initializing, throwing
+        // "Cannot access '<var>' before initialization" on first render —
+        // this app's login screen crashes blank because of it. Turning off
+        // chunk splitting removes the chunk boundary that triggers the bad
+        // init order. Revisit once upstream fixes
+        // https://github.com/rolldown/rolldown/issues/9515 and the related
+        // rolldown-lazy/bundled-dev init-order issues.
+        codeSplitting: false
+      }
+    }
   }
 });

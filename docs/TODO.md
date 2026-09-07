@@ -1,8 +1,10 @@
 # TODO
 
-Do the following, making major/minor changes as needed. Not all items need
-to land in one pass — tackle one at a time and check it off here when done.
-See `CLAUDE.md` for architecture context.
+Do the following, making major/minor changes as needed, presenting all changes as a 
+single `changes.patch` file and deleting items from `TODO.md` when complete. Not all items need
+to land in one pass — tackle one or a few at a time and check it off here when done. try to 
+minimize use of tokens as much as possible while providing a sufficient response.
+See `CLAUDE.md` for architecture context and update as needed.
 
 - [ ] **Offline support** (all files). Similar to Google Docs: select a
       file/folder to make available offline; for a folder, offline state
@@ -81,3 +83,5 @@ See `CLAUDE.md` for architecture context.
 
 - [ ] Add an Android accessibility widget menu that can take screenshots
       and also accept typed text, for mobile.
+
+- [ ] Pull the content from the setup doc comment in appscript.gs into README.md
