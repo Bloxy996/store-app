@@ -363,6 +363,19 @@ export default function App() {
   // permanent delete, same as every other delete path in this app. No
   // confirmation prompt here (unlike the sidebar's delete action): the
   // person already reviewed this XML before pasting/uploading it.
+  const purgeFileEverywhere = useCallback((fileId) => {
+    setPaneTree((prev) => collapseEmptyLeaves(purgeFileFromTree(prev, fileId)) || makeLeaf(null));
+    setBuffers((prev) => {
+      if (!prev[fileId]) return prev;
+      const next = { ...prev };
+      delete next[fileId];
+      return next;
+    });
+    if (saveTimers.current[fileId]) {
+      clearTimeout(saveTimers.current[fileId]);
+      delete saveTimers.current[fileId];
+    }
+  }, []);
   const applyCompiledChanges = useCallback(
     async (xmlText) => {
       const { updates, creates, deletes, parseError } = parseApplyXml(xmlText);
@@ -691,20 +704,6 @@ export default function App() {
     },
     [paneTree]
   );
-
-  const purgeFileEverywhere = useCallback((fileId) => {
-    setPaneTree((prev) => collapseEmptyLeaves(purgeFileFromTree(prev, fileId)) || makeLeaf(null));
-    setBuffers((prev) => {
-      if (!prev[fileId]) return prev;
-      const next = { ...prev };
-      delete next[fileId];
-      return next;
-    });
-    if (saveTimers.current[fileId]) {
-      clearTimeout(saveTimers.current[fileId]);
-      delete saveTimers.current[fileId];
-    }
-  }, []);
 
   // --- Create / open-by-name / rename / delete / move / upload -------------
   const openNoteByName = useCallback(
