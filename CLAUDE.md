@@ -310,7 +310,7 @@ src/
       GraphView.jsx                   — the graph pane itself (local graph, groups, forces, tags-as-nodes)
       GraphViewModal.css              — graph pane styles (filename predates the modal->pane conversion)
     compile/                        — vault <-> XML for LLM mass-editing
-      compileVault.js                 — flatten/include-exclude/build XML/parse+apply XML (pure logic)
+      compileVault.js                 — flatten/include-exclude/build XML/parse+apply XML, incl. <create>/<delete> (pure logic)
       CompilePanel.jsx / .css         — sidebar panel: compile (copy/download) and apply (paste/upload)
     palette/        PaletteModal.jsx / .css
     help/           HelpModal.jsx      — in-app shortcuts/markdown/features reference (keep in sync — section 6)

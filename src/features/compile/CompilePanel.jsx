@@ -87,8 +87,8 @@ function CompilePanel({ tree, getBody, ensureIndexed, indexReady, onApplyChanges
   const fileInputRef = useRef(null);
 
   const pathOptions = useMemo(() => {
-    const { folderPaths, files } = flattenVaultTree(tree);
-    return [...folderPaths.map((path) => ({ path, kind: 'folder' })), ...files.map((f) => ({ path: f.path, kind: 'file' }))].sort((a, b) =>
+    const { folders, files } = flattenVaultTree(tree);
+    return [...folders.map((f) => ({ path: f.path, kind: 'folder' })), ...files.map((f) => ({ path: f.path, kind: 'file' }))].sort((a, b) =>
       a.path.localeCompare(b.path)
     );
   }, [tree]);
@@ -171,7 +171,9 @@ function CompilePanel({ tree, getBody, ensureIndexed, indexReady, onApplyChanges
       </div>
       <div className="compile-panel-section">
         <div className="compile-panel-title">Apply changes</div>
-        <p className="muted compile-panel-hint">Paste or upload an LLM's &lt;update&gt;/&lt;change&gt; XML reply to apply it to the store.</p>
+        <p className="muted compile-panel-hint">
+          Paste or upload an LLM's &lt;update&gt;, &lt;create&gt;, or &lt;delete&gt; XML reply to apply it to the store.
+        </p>
         <textarea
           className="compile-apply-input"
           placeholder="Paste XML here…"

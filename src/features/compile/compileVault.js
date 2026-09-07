@@ -15,17 +15,18 @@
 const VAULT_ROOT_LABEL = 'vault';
 
 // Walks buildVaultTree's output once into two flat lookup lists: every
-// folder's full path, and every note (.md) file's full path. Both include
-// and exclude lists, and the apply-XML importer's path->id resolution, are
-// built from this same single walk rather than three separate ones.
+// folder's id + full path, and every note (.md) file's id + full path.
+// Both include/exclude lists, the apply-XML importer's path->id
+// resolution, and create/delete's path->folder-id resolution are all built
+// from this same single walk rather than several separate ones.
 function flattenVaultTree(tree) {
-  const folderPaths = [];
+  const folders = []; // { id, path }
   const files = []; // { id, path }
   const walk = (nodes, prefix) => {
     nodes.forEach((node) => {
       const path = `${prefix}/${node.name}`;
       if (node.type === 'folder') {
-        folderPaths.push(path);
+        folders.push({ id: node.id, path });
         walk(node.children || [], path);
       } else if (node.kind === 'note') {
         files.push({ id: node.id, path });
@@ -33,7 +34,26 @@ function flattenVaultTree(tree) {
     });
   };
   walk(tree || [], VAULT_ROOT_LABEL);
-  return { folderPaths, files };
+  return { folders, files };
+}
+
+// Resolves a folder path (e.g. from splitNotePath below) to a Drive folder
+// id — the vault root label itself resolves to `rootFolderId` (a top-level
+// note's "parent folder" is the vault root, which isn't in `folders`
+// itself since flattenVaultTree only walks children of the root). Returns
+// null if the path doesn't match any existing folder — callers treat that
+// as "create the folder first" rather than guessing/auto-creating one.
+function folderIdForPath(folders, rootFolderId, folderPath) {
+  if (folderPath === VAULT_ROOT_LABEL) return rootFolderId;
+  return folders.find((f) => f.path === folderPath)?.id ?? null;
+}
+
+// Splits a full note path into its parent folder's path and the note's own
+// raw name (`driveCreateFile` accepts the name with or without the `.md`
+// suffix, so this doesn't need to strip it).
+function splitNotePath(path) {
+  const idx = path.lastIndexOf('/');
+  return { parentPath: path.slice(0, idx), rawName: path.slice(idx + 1) };
 }
 
 // True if `path` is exactly `prefix` or nested under it (`prefix/...`) —
@@ -64,7 +84,9 @@ function escapeXmlAttr(s) {
 // The exact mass-editing output format from the original request, shipped
 // alongside the compiled document so pasting one blob into Claude gives it
 // both the content and the instructions for how to reply.
-const APPLY_FORMAT_PROMPT = `You are a mass-editing assistant. You must output your changes using the following strict XML format. Do not output the entire file. You may output multiple <change> blocks per file.
+const APPLY_FORMAT_PROMPT = `You are a mass-editing assistant. You must output your changes using the following strict XML format.
+
+To edit an existing note, use <update> with one or more <change> blocks. Do not output the entire file — only the lines that change.
 CRITICAL: Inside the <search> block, you MUST include at least two lines of unchanged text before and after the line(s) you are changing to ensure the match is 100% unique within the file.
 <update path="vault/Projects/App.md">
   <change>
@@ -75,7 +97,15 @@ CRITICAL: Inside the <search> block, you MUST include at least two lines of unch
     [Exact lines to replace them with]
     </replace>
   </change>
-</update>`;
+</update>
+
+To create a new note, use <create> with the note's full content as its text. The parent folder in the path must already exist in the vault — this does not create folders.
+<create path="vault/Projects/New Note.md">
+[Full markdown content of the new note]
+</create>
+
+To delete a note, use a self-closing <delete>.
+<delete path="vault/Projects/Old Note.md" />`;
 
 // `files`: [{ path, content }]. CDATA keeps every note's raw content
 // (including its own literal `<`/`&`/wikilinks) safe without per-character
@@ -100,21 +130,30 @@ function trimXmlBlockText(text) {
   return (text || '').replace(/^\r?\n/, '').replace(/\r?\n[ \t]*$/, '');
 }
 
-// Parses an LLM's `<update>/<change><search>/<replace></change></update>`
-// reply. Returns { updates, parseError }: `updates` is
-// [{ path, changes: [{ search, replace }] }]; a malformed document (not
-// XML at all, or no <update> elements) sets `parseError` instead of
-// throwing, since this is user-pasted/uploaded input, not trusted data.
+// Parses an LLM's reply containing `<update>`, `<create>`, and/or
+// `<delete>` blocks (see APPLY_FORMAT_PROMPT for the exact shape of each).
+// Returns { updates, creates, deletes, parseError }:
+//   - `updates`: [{ path, changes: [{ search, replace }] }]
+//   - `creates`: [{ path, content }]
+//   - `deletes`: [{ path }]
+// A malformed document (not XML at all, or none of the three element
+// types present) sets `parseError` instead of throwing, since this is
+// user-pasted/uploaded input, not trusted data.
 function parseApplyXml(xmlText) {
+  const empty = { updates: [], creates: [], deletes: [] };
   let doc;
   try {
     doc = new DOMParser().parseFromString(xmlText, 'application/xml');
   } catch {
-    return { updates: [], parseError: 'Could not parse this as XML.' };
+    return { ...empty, parseError: 'Could not parse this as XML.' };
   }
-  if (doc.querySelector('parsererror')) return { updates: [], parseError: 'Could not parse this as XML.' };
+  if (doc.querySelector('parsererror')) return { ...empty, parseError: 'Could not parse this as XML.' };
   const updateEls = Array.from(doc.querySelectorAll('update'));
-  if (!updateEls.length) return { updates: [], parseError: 'No <update> blocks found in this document.' };
+  const createEls = Array.from(doc.querySelectorAll('create'));
+  const deleteEls = Array.from(doc.querySelectorAll('delete'));
+  if (!updateEls.length && !createEls.length && !deleteEls.length) {
+    return { ...empty, parseError: 'No <update>, <create>, or <delete> blocks found in this document.' };
+  }
   const updates = updateEls.map((el) => ({
     path: el.getAttribute('path') || '',
     changes: Array.from(el.querySelectorAll('change')).map((c) => ({
@@ -122,7 +161,12 @@ function parseApplyXml(xmlText) {
       replace: trimXmlBlockText(c.querySelector('replace')?.textContent)
     }))
   }));
-  return { updates, parseError: null };
+  const creates = createEls.map((el) => ({
+    path: el.getAttribute('path') || '',
+    content: trimXmlBlockText(el.textContent)
+  }));
+  const deletes = deleteEls.map((el) => ({ path: el.getAttribute('path') || '' }));
+  return { updates, creates, deletes, parseError: null };
 }
 
 // Applies one update's changes to `content` in order, left to right,
@@ -153,4 +197,14 @@ function applyFileChanges(content, changes) {
   return { content: next, results };
 }
 
-export { VAULT_ROOT_LABEL, flattenVaultTree, resolveIncludedFiles, buildCompiledXml, parseApplyXml, applyFileChanges, APPLY_FORMAT_PROMPT };
+export {
+  VAULT_ROOT_LABEL,
+  flattenVaultTree,
+  folderIdForPath,
+  splitNotePath,
+  resolveIncludedFiles,
+  buildCompiledXml,
+  parseApplyXml,
+  applyFileChanges,
+  APPLY_FORMAT_PROMPT
+};

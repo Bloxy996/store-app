@@ -12,7 +12,7 @@ import { BookmarksPanel } from './features/bookmarks/BookmarksPanel.jsx';
 import { makeDefaultCanvasState, serializeCanvasState } from './features/canvas/canvasState.js';
 import { makeDefaultDatabaseState, serializeDatabaseState } from './features/database/dbState.js';
 import { GRAPH_PANE_FILE, GRAPH_PANE_FILE_ID } from './features/graph/graphPaneFile.js';
-import { applyFileChanges, flattenVaultTree, parseApplyXml } from './features/compile/compileVault.js';
+import { applyFileChanges, flattenVaultTree, folderIdForPath, parseApplyXml, splitNotePath } from './features/compile/compileVault.js';
 import { OnboardingFlow, loadingStepProps } from './features/onboarding/OnboardingFlow.jsx';
 import { ProxyFolderBrowser } from './features/onboarding/ProxyFolderBrowser.jsx';
 import { PaneNode, collapseEmptyLeaves, findSplitNode, purgeFileFromTree } from './features/panes/PaneNode.jsx';
@@ -329,24 +329,77 @@ export default function App() {
     [saveNow]
   );
 
-  // Compile panel's "Apply changes" — takes an LLM's raw
-  // <update>/<change> XML reply and writes the matched search/replace
-  // edits back to the store. Requires every change in a file to match
-  // its search text exactly once before writing anything for that file
-  // (all-or-nothing per file, not per change) — a partially-applied file
-  // left silently half-edited is worse than reporting the mismatch and
-  // asking for a retry. Also refuses any file with unsaved edits in an
-  // open buffer (`dirty`), since fetching fresh content from Drive and
-  // writing back would silently discard those — reuses `saveNow` itself
-  // for the actual write so an open buffer for the file (if any, and not
-  // dirty) gets updated in place exactly like a normal edit would.
+  // Compile panel's "Apply changes" — takes an LLM's raw XML reply
+  // (<update>/<change>, <create>, and/or <delete> blocks — see
+  // compileVault.js's APPLY_FORMAT_PROMPT) and applies it to the store.
+  // Processed in create -> update -> delete order regardless of the
+  // document's own element order, so a "delete this, create a replacement
+  // at the same path" reply and an "update the note I just asked you to
+  // create" reply both resolve sensibly; an LLM asking to update a note
+  // it also asked to delete in the same reply is a contradiction the
+  // format doesn't try to guess at — the update simply runs first.
+  //
+  // <update>: requires every change in a file to match its search text
+  // exactly once before writing anything for that file (all-or-nothing
+  // per file, not per change) — a partially-applied file left silently
+  // half-edited is worse than reporting the mismatch and asking for a
+  // retry. Also refuses any file with unsaved edits in an open buffer
+  // (`dirty`), since fetching fresh content from Drive and writing back
+  // would silently discard those — reuses `saveNow` itself for the actual
+  // write so an open buffer for the file (if any, and not dirty) gets
+  // updated in place exactly like a normal edit would.
+  //
+  // <create>: the parent folder must already exist in the vault —
+  // resolved via `folderIdForPath` against the same flattened tree used
+  // for path->id lookups; this does not create missing folders. Mirrors
+  // `handleCreateNoteIn`'s post-create bookkeeping (registerNewFile,
+  // seed the buffer, seed the search index) but never opens the new note
+  // in a pane — this can create many notes in one apply, and opening a
+  // tab per note would be a worse experience than just reporting success.
+  //
+  // <delete>: same dirty-buffer refusal as update, then reuses
+  // `handleDeleteNode`'s underlying calls (driveTrashItem, sync.removeFile,
+  // purgeFileEverywhere, bookmark cleanup) — moves to Drive's trash, not a
+  // permanent delete, same as every other delete path in this app. No
+  // confirmation prompt here (unlike the sidebar's delete action): the
+  // person already reviewed this XML before pasting/uploading it.
   const applyCompiledChanges = useCallback(
     async (xmlText) => {
-      const { updates, parseError } = parseApplyXml(xmlText);
+      const { updates, creates, deletes, parseError } = parseApplyXml(xmlText);
       if (parseError) return { parseError, files: [] };
-      const { files: allFiles } = flattenVaultTree(tree);
+      const { folders, files: allFiles } = flattenVaultTree(tree);
       const pathToId = new Map(allFiles.map((f) => [f.path, f.id]));
       const results = [];
+
+      for (const create of creates) {
+        if (pathToId.has(create.path)) {
+          results.push({ path: create.path, ok: false, message: 'Create skipped — a note already exists at this path' });
+          continue;
+        }
+        const { parentPath, rawName } = splitNotePath(create.path);
+        const parentId = folderIdForPath(folders, folder.id, parentPath);
+        if (!parentId) {
+          results.push({ path: create.path, ok: false, message: `Create failed — parent folder "${parentPath}" doesn't exist yet` });
+          continue;
+        }
+        try {
+          const createdFile = await driveCreateFile(token, parentId, rawName, create.content);
+          sync.registerNewFile({
+            id: createdFile.id,
+            name: createdFile.name,
+            modifiedTime: createdFile.modifiedTime || new Date().toISOString(),
+            parents: [parentId],
+            kind: 'note'
+          });
+          setBuffers((prev) => ({ ...prev, [createdFile.id]: { content: create.content, dirty: false, saving: false, loading: false } }));
+          vaultIndex.updateBody(createdFile.id, create.content);
+          pathToId.set(create.path, createdFile.id);
+          results.push({ path: create.path, ok: true, message: 'Created' });
+        } catch (err) {
+          results.push({ path: create.path, ok: false, message: `Create failed: ${err.message}` });
+        }
+      }
+
       for (const update of updates) {
         const fileId = pathToId.get(update.path);
         if (!fileId) {
@@ -384,9 +437,33 @@ export default function App() {
           results.push({ path: update.path, ok: false, message: `Write failed: ${err.message}` });
         }
       }
+
+      for (const del of deletes) {
+        const fileId = pathToId.get(del.path);
+        if (!fileId) {
+          results.push({ path: del.path, ok: false, message: 'Delete skipped — not found in the vault' });
+          continue;
+        }
+        const buf = buffers[fileId];
+        if (buf?.dirty) {
+          results.push({ path: del.path, ok: false, message: 'Skipped — unsaved changes open in editor, save first' });
+          continue;
+        }
+        try {
+          await driveTrashItem(token, fileId);
+          sync.removeFile(fileId);
+          purgeFileEverywhere(fileId);
+          if (bookmarks.has(fileId)) toggleBookmark(fileId);
+          pathToId.delete(del.path);
+          results.push({ path: del.path, ok: true, message: 'Deleted (moved to Drive trash)' });
+        } catch (err) {
+          results.push({ path: del.path, ok: false, message: `Delete failed: ${err.message}` });
+        }
+      }
+
       return { parseError: null, files: results };
     },
-    [tree, buffers, token, saveNow]
+    [tree, buffers, token, saveNow, folder, sync, vaultIndex, purgeFileEverywhere, bookmarks, toggleBookmark]
   );
 
   // Manual save shortcut — saves whichever file the focused pane has open.
