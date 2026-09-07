@@ -1,5 +1,5 @@
 /**
- * Vault Drive Proxy
+ * store Drive Proxy
  * ------------------
  * Deploy this as a Web App ("Execute as: Me", "Who has access: Anyone").
  * It runs under YOUR (personal) Google identity, so it already has
@@ -21,7 +21,7 @@
  *      Who has access "Anyone" → Deploy. Authorize when prompted
  *      (this is you, the owner, authorizing — not a visitor).
  *   4. Copy the "Web app URL" (ends in /exec). That + your secret is
- *      what you paste into Vault's "Use Apps Script proxy" form.
+ *      what you paste into store's "Use Apps Script proxy" form.
  *   5. Test it by visiting, in any browser:
  *      <WebAppURL>?action=ping&secret=<your secret>
  *      You should see {"ok":true}.
@@ -32,7 +32,7 @@
  */
 
 function setSecret() {
-  PropertiesService.getScriptProperties().setProperty('VAULT_SECRET', 'ab3ed64d-99f5-4c3a-9f00-97516f8a1285');
+  PropertiesService.getScriptProperties().setProperty('STORE_SECRET', 'ab3ed64d-99f5-4c3a-9f00-97516f8a1285');
 }
 
 // Run this once manually (select it in the function dropdown → Run) the
@@ -44,7 +44,7 @@ function authorize_() {
 }
 
 function getSecret_() {
-  return PropertiesService.getScriptProperties().getProperty('VAULT_SECRET');
+  return PropertiesService.getScriptProperties().getProperty('STORE_SECRET');
 }
 
 function authOk_(secret) {
@@ -72,8 +72,8 @@ function doGet(e) {
         return json_({ ok: true });
       case 'listFolderTree':
         return json_({ folders: listFolderTree_(p.root) });
-      case 'listVaultFiles':
-        return json_({ files: listVaultFiles_((p.folders || '').split(',').filter(Boolean)) });
+      case 'listStoreFiles':
+        return json_({ files: listStoreFiles_((p.folders || '').split(',').filter(Boolean)) });
       case 'getContent':
         return getContent_(p.id);
       case 'getBlob':
@@ -116,7 +116,7 @@ function doPost(e) {
 
 // ---------------------------------------------------------------------------
 // Drive operations (Advanced Drive Service — mirrors the Drive v3 REST API
-// calls Vault already makes, so behavior matches what it expects)
+// calls store already makes, so behavior matches what it expects)
 // ---------------------------------------------------------------------------
 
 // Every list/get/create/update call below sets these three so Shared Drive
@@ -154,7 +154,7 @@ function listFolderTree_(rootId) {
   return out;
 }
 
-function listVaultFiles_(folderIds) {
+function listStoreFiles_(folderIds) {
   const mimeClauses = [
     "mimeType = 'text/markdown'",
     "mimeType = 'text/plain'",
@@ -234,7 +234,7 @@ function trashItem_(id) {
   return Drive.Files.update({ trashed: true }, id, null, { fields: 'id,trashed', supportsAllDrives: true });
 }
 
-// Lists what to show one level below `parentId` for Vault's proxy-mode
+// Lists what to show one level below `parentId` for store's proxy-mode
 // folder browser (replaces the Google Picker, which needs an OAuth token
 // a proxied visitor doesn't have). At the top level ('root') this returns
 // both your My Drive subfolders AND your Shared Drives (e.g. "Laptops") as

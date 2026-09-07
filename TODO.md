@@ -51,11 +51,6 @@ See `CLAUDE.md` for architecture context.
   The math-based structure should be structured so it can eventually be exported to standard vector formats like SVG.
   ```
 
-- [ ] Add README and LICENSE to the repo.
-
-- [ ] Mobile: should be able to scroll down past the end of a note (not
-      infinite) so words are never hidden under the keyboard.
-
 - [ ] Integrate all `.py` apps from `/temp/processing` into the app,
       modifying as needed:
   - `/statements`: support sorted-insertion — given phrases from a
@@ -75,11 +70,11 @@ See `CLAUDE.md` for architecture context.
       voice and store the audio file; app can also convert those audio
       files into MIDI.
 
-- [ ] Remove "vault" branding from the Google Cloud Console project and the
-      Google Apps Script project — use "store" instead. For the Apps
-      Script proxy, provide setup instructions for the user (keep the
-      Apps Script code minimal while keeping the app fast — revisit
-      `/temp/appscript.gs` if needed to make that possible).
+- [ ] Rename your actual Google Cloud Console project and Apps Script
+      project away from "vault" (cosmetic, external UI — can't be done
+      from this repo). Code side is done: `temp/appscript.gs` and
+      `lib/driveApi.js` no longer say "vault" anywhere, and README has
+      step-by-step rename + redeploy instructions.
 
 - [ ] Image app: shows images (on mobile, can take pictures of papers
       through the app; otherwise takes any image). Square-select portions

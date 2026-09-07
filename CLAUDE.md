@@ -221,6 +221,15 @@ just on desktop.
   when the pointerdown lands on genuinely overflowing content — see
   `canvas.css`/`CanvasView.jsx`'s `beginMove` for the pattern before
   copying it elsewhere.
+- **On-screen keyboard can hide content with nowhere to scroll it to.**
+  CodeMirror only lets you scroll as far as its own content height, so on
+  a short note the last lines can end up permanently behind the mobile
+  keyboard. Fix is a bounded (not infinite) extra bottom pad on the
+  scroller, mobile-breakpoint-only — see `.cm-editor-host .cm-scroller`'s
+  `@media (max-width: 720px)` rule in `features/editor/
+  CodeMirrorEditor.css`. Apply the same pattern to any other
+  text-input surface that can be focused on mobile (e.g. `DbTextCell`'s
+  multiline editor) if the same complaint comes up there.
 
 ## 5. File structure
 

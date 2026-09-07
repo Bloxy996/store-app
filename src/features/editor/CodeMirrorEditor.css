@@ -20,6 +20,18 @@
   caret-color: var(--text-muted);
   font-family: var(--font-mono);
 }
+/* On mobile the on-screen keyboard covers roughly the bottom third to
+   half of the viewport. CodeMirror only lets you scroll as far as its own
+   content height, so without extra room the last few lines of a note can
+   end up permanently hidden behind the keyboard with no way to scroll
+   them into view. A bounded (not infinite) bottom pad — big enough to
+   clear a typical keyboard — fixes that; it's blank space past the note's
+   real content, not more content. */
+@media (max-width: 720px) {
+  .cm-editor-host .cm-scroller {
+    padding-bottom: 45vh;
+  }
+}
 .cm-editor-host .cm-content {
   padding: 0;
 }

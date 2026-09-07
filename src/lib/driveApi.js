@@ -148,7 +148,7 @@ async function driveListFolderTree(token, rootFolderId) {
 // listing round-trips), and chunks of folder ids are queried concurrently.
 async function driveListVaultContentInFolders(token, folderIds) {
   if (isProxy(token)) {
-    const res = await proxyGet(token, { action: 'listVaultFiles', folders: folderIds.join(',') });
+    const res = await proxyGet(token, { action: 'listStoreFiles', folders: folderIds.join(',') });
     return (await res.json()).files || [];
   }
   // Any real file (notes, images, video, audio, PDFs, zips, whatever) syncs
