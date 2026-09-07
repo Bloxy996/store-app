@@ -51,9 +51,6 @@ See `CLAUDE.md` for architecture context.
   The math-based structure should be structured so it can eventually be exported to standard vector formats like SVG.
   ```
 
-- [ ] Note XML query thing (`features/compile/`) should support
-      adding/deleting notes, not just editing existing ones.
-
 - [ ] Add README and LICENSE to the repo.
 
 - [ ] Mobile: should be able to scroll down past the end of a note (not
