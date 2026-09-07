@@ -155,31 +155,22 @@
 }
 .graph-node circle {
   fill: var(--graph-node-color, var(--accent));
-  stroke: var(--bg-0);
-  stroke-width: 1.5;
 }
 .graph-node.attachment circle {
   fill: var(--text-faint);
 }
 .graph-node.tag circle {
   fill: none;
-  stroke: var(--text-muted);
-  stroke-width: 1.5;
 }
 .graph-node.tag .graph-node-label {
   color: var(--text-muted);
   font-style: italic;
 }
 .graph-node.current circle {
-  stroke: var(--accent);
-  stroke-width: 2.5;
 }
 .graph-node-label {
   fill: var(--text-muted);
   font-size: 10px;
-  paint-order: stroke;
-  stroke: var(--bg-0);
-  stroke-width: 3px;
   pointer-events: none;
   user-select: none;
 }

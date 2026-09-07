@@ -86,4 +86,3 @@ See `CLAUDE.md` for architecture context and update as needed.
 
 - [ ] Pull the content from the setup doc comment in appscript.gs into README.md
 
-- [ ] remove outlines on text and nodes in graph view
