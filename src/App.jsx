@@ -5,11 +5,12 @@ import { ActivityBar } from './components/ActivityBar.jsx';
 import { ResizeHandle } from './components/ResizeHandle.jsx';
 import { StatusBar } from './components/StatusBar.jsx';
 import { useAppUpdate } from './hooks/useAppUpdate.js';
-import { IconCanvasKind, IconDatabase, IconEye, IconFilePlus, IconFolder, IconFolderPlus, IconGraph, IconHelp, IconLogOut, IconPalette, IconPanelLeft, IconRefresh, IconSearch, IconSettings, IconSliders, IconSplitHorizontal, IconSplitVertical, IconStar, IconTag } from './components/icons.jsx';
+import { IconCanvasKind, IconVectorKind, IconDatabase, IconEye, IconFilePlus, IconFolder, IconFolderPlus, IconGraph, IconHelp, IconLogOut, IconPalette, IconPanelLeft, IconRefresh, IconSearch, IconSettings, IconSliders, IconSplitHorizontal, IconSplitVertical, IconStar, IconTag } from './components/icons.jsx';
 import { AccentColorPicker } from './features/accent/AccentColorPicker.jsx';
 import { useAccentColor } from './features/accent/accentColor.js';
 import { BookmarksPanel } from './features/bookmarks/BookmarksPanel.jsx';
 import { makeDefaultCanvasState, serializeCanvasState } from './features/canvas/canvasState.js';
+import { makeDefaultVectorState, serializeVectorState } from './features/vector/vectorState.js';
 import { makeDefaultDatabaseState, serializeDatabaseState } from './features/database/dbState.js';
 import { GRAPH_PANE_FILE, GRAPH_PANE_FILE_ID } from './features/graph/graphPaneFile.js';
 import { applyFileChanges, flattenVaultTree, folderIdForPath, parseApplyXml, splitNotePath } from './features/compile/compileVault.js';
@@ -23,6 +24,8 @@ import { TocPanel } from './features/toc/TocPanel.jsx';
 import { useGoogleAuth, useProxyAuth } from './hooks/useAuth.js';
 import { releaseImageUrlCache } from './hooks/useDriveImageUrl.js';
 import { useVaultIndex } from './hooks/useVaultIndex.js';
+import { useOfflineSync } from './hooks/useOfflineSync.js';
+import { OfflineConflictsPanel } from './features/offline/OfflineConflictsPanel.jsx';
 
 // Code-split: each of these is a full-screen modal/overlay that most
 // sessions never open (in-app help, the Cmd+K palette). Loading
@@ -50,7 +53,7 @@ import { STORE_META, classifyKind, extensionForKind, fileExtension, opensInEdito
 
 
 export default function App() {
-  const { token: googleToken, gisReady, signIn, signOut: signOutGoogle } = useGoogleAuth();
+  const { token: googleToken, gisReady, signIn, signOut: signOutGoogle, hasEverSignedIn } = useGoogleAuth();
   const { proxyToken, signInProxy, signOutProxy } = useProxyAuth();
   const token = googleToken || proxyToken;
   const signOut = useCallback(() => {
@@ -81,7 +84,9 @@ export default function App() {
   }, [accentPickerOpen]);
   const [folder, setFolder] = useState(null);
   const [folderRestoring, setFolderRestoring] = useState(true);
+  const [cachedFolderExists, setCachedFolderExists] = useState(false);
   const sync = useVaultSync(token, folder);
+  const offline = useOfflineSync(token, folder, sync);
   const appUpdate = useAppUpdate();
   const vaultIndex = useVaultIndex(token, sync.filesMeta);
 
@@ -119,7 +124,7 @@ export default function App() {
   // Restore the last-selected vault folder (an ID string, not note content).
   useEffect(() => {
     idbGet(STORE_META, 'vaultFolder').then((rec) => {
-      if (rec) setFolder(rec.value);
+      if (rec) { setFolder(rec.value); setCachedFolderExists(true); }
       setFolderRestoring(false);
     });
   }, []);
@@ -160,6 +165,7 @@ export default function App() {
       releaseImageUrlCache();
       setFolder(picked);
       idbPut(STORE_META, { key: 'vaultFolder', value: picked });
+      setCachedFolderExists(true);
       setBuffers({});
       saveTimers.current = {};
       setPaneTree(makeLeaf(null));
@@ -279,20 +285,26 @@ export default function App() {
   // --- Content loading (per open tab) --------------------------------------
   const ensureFileLoaded = useCallback(
     (fileId) => {
-      if (!fileId || !token) return;
+      if (!fileId || (!token && !offline.isOnline)) return;
       if (buffers[fileId] || loadingFileIds.current.has(fileId)) return;
       const meta = sync.filesMeta.find((f) => f.id === fileId);
       if (!meta || !opensInEditorPane(meta.kind)) return;
       loadingFileIds.current.add(fileId);
       setBuffers((prev) => ({ ...prev, [fileId]: { content: '', dirty: false, saving: false, loading: true } }));
-      driveGetFileContent(token, fileId)
+      const load = !offline.isOnline ? offline.getOfflineContent(fileId) : driveGetFileContent(token, fileId);
+      load
         .then((text) => {
+          if (text === null) throw new Error('Reconnect to open this file.');
           // Databases aren't part of the note search/tag index — only
           // notes' bodies get indexed for full-text search.
           if (meta.kind === 'note') vaultIndex.updateBody(fileId, text);
           setBuffers((prev) => ({ ...prev, [fileId]: { content: text, dirty: false, saving: false, loading: false } }));
         })
-        .catch((err) => {
+        .catch(async (err) => {
+          if (!err.status && offline.offlineFileIds.has(fileId)) {
+            const text = await offline.getOfflineContent(fileId);
+            if (text !== null) { if (meta.kind === 'note') vaultIndex.updateBody(fileId, text); setBuffers((prev) => ({ ...prev, [fileId]: { content: text, dirty: false, saving: false, loading: false } })); return; }
+          }
           setBuffers((prev) => ({
             ...prev,
             [fileId]: { content: '', dirty: false, saving: false, loading: false, loadError: err.message }
@@ -300,24 +312,28 @@ export default function App() {
         })
         .finally(() => loadingFileIds.current.delete(fileId));
     },
-    [token, buffers, sync.filesMeta, vaultIndex]
+    [token, buffers, sync.filesMeta, vaultIndex, offline]
   );
 
   const saveNow = useCallback(
     async (fileId, value) => {
-      if (!token) return;
+      if (!token) {
+        if (offline.offlineFileIds.has(fileId)) { await offline.setOfflineContent(fileId, value, { dirty: true }); }
+        return;
+      }
       setBuffers((prev) => (prev[fileId] ? { ...prev, [fileId]: { ...prev[fileId], saving: true } } : prev));
       try {
         const updated = await driveUpdateFileContent(token, fileId, value);
         sync.applyLocalEdit(fileId, value, updated.modifiedTime || new Date().toISOString());
         vaultIndex.updateBody(fileId, value);
+        if (offline.offlineFileIds.has(fileId)) await offline.refreshCacheAfterSave(fileId, value, updated.modifiedTime);
         setBuffers((prev) => (prev[fileId] ? { ...prev, [fileId]: { ...prev[fileId], dirty: false, saving: false } } : prev));
       } catch (err) {
-        console.error(err);
+        if (!err.status && offline.offlineFileIds.has(fileId)) { await offline.setOfflineContent(fileId, value, { dirty: true }); } else console.error(err);
         setBuffers((prev) => (prev[fileId] ? { ...prev, [fileId]: { ...prev[fileId], saving: false } } : prev));
       }
     },
-    [token, sync, vaultIndex]
+    [token, sync, vaultIndex, offline]
   );
 
   const handleContentChange = useCallback(
@@ -810,6 +826,23 @@ export default function App() {
     [token, sync, activePaneId, openFileInPane]
   );
 
+  const handleCreateVectorIn = useCallback(
+    (parentId) => {
+      const name = window.prompt('New vector art name:');
+      if (!name || !name.trim()) return;
+      (async () => {
+        try {
+          const skeleton = serializeVectorState(makeDefaultVectorState(name.trim()));
+          const created = await driveCreateFile(token, parentId, name.trim(), skeleton, 'vec', 'application/json');
+          const fileRecord = { id: created.id, name: created.name, modifiedTime: created.modifiedTime || new Date().toISOString(), parents: [parentId], kind: 'vector' };
+          sync.registerNewFile(fileRecord);
+          setBuffers((prev) => ({ ...prev, [created.id]: { content: skeleton, dirty: false, saving: false, loading: false } }));
+          openFileInPane(activePaneId, created.id);
+        } catch (err) { window.alert(`Couldn't create vector art: ${err.message}`); }
+      })();
+    }, [token, sync, activePaneId, openFileInPane]
+  );
+
   const handleCreateFolderIn = useCallback(
     async (parentId) => {
       const name = window.prompt('New folder name:');
@@ -937,6 +970,12 @@ export default function App() {
     },
     [filesById, performRename]
   );
+
+  const handleToggleOffline = useCallback(async (node) => {
+    const explicit = offline.offlineRoots.some((root) => root.id === node.id && root.type === node.type);
+    const result = await offline.toggleOfflineRoot(node.id, node.type, !explicit);
+    if (!result.ok) window.alert(result.message);
+  }, [offline]);
 
   const handleDeleteNode = useCallback(
     async (node) => {
@@ -1085,6 +1124,7 @@ export default function App() {
     return [
       { id: 'new-note', label: 'Create new note', icon: <IconFilePlus size={15} />, run: () => handleCreateNoteIn(folder.id) },
       { id: 'new-canvas', label: 'Create new canvas', icon: <IconCanvasKind size={15} />, run: () => handleCreateCanvasIn(folder.id) },
+      { id: 'new-vector', label: 'Create new vector art', icon: <IconVectorKind size={15} />, run: () => handleCreateVectorIn(folder.id) },
       { id: 'new-database', label: 'Create new database', icon: <IconDatabase size={15} />, run: () => handleCreateDatabaseIn(folder.id) },
       { id: 'new-folder', label: 'Create new folder', icon: <IconFolderPlus size={15} />, run: () => handleCreateFolderIn(folder.id) },
       { id: 'toggle-sidebar', label: 'Toggle left sidebar', icon: <IconPanelLeft size={15} />, run: () => setMobileDockOpen((v) => !v) },
@@ -1142,14 +1182,14 @@ export default function App() {
       { id: 'change-folder', label: 'Change store folder', icon: <IconFolder size={15} />, run: handlePickFolder },
       { id: 'sign-out', label: 'Sign out', icon: <IconLogOut size={15} />, run: signOut }
     ];
-  }, [folder, handleCreateNoteIn, handleCreateDatabaseIn, handleCreateCanvasIn, handleCreateFolderIn, activePaneId, splitPane, paneTree, toggleTabMode, sync, handlePickFolder, signOut, openGraphInPane]);
+  }, [folder, handleCreateNoteIn, handleCreateDatabaseIn, handleCreateCanvasIn, handleCreateVectorIn, handleCreateFolderIn, activePaneId, splitPane, paneTree, toggleTabMode, sync, handlePickFolder, signOut, openGraphInPane]);
 
   const handlePaletteCommand = useCallback((cmd) => {
     setPaletteMode(null);
     cmd.run();
   }, []);
 
-  if (!token) {
+  if (!folderRestoring && !token && (offline.isOnline || !hasEverSignedIn || !cachedFolderExists)) {
     return <OnboardingFlow step="signin" onSignIn={signIn} ready={gisReady} onSignInProxy={signInProxy} />;
   }
   if (folderRestoring) {
@@ -1214,6 +1254,7 @@ export default function App() {
                 onCreateNote={handleCreateNoteIn}
                 onCreateDatabase={handleCreateDatabaseIn}
                 onCreateCanvas={handleCreateCanvasIn}
+                onCreateVector={handleCreateVectorIn}
                 onCreateFolder={handleCreateFolderIn}
                 onUploadFiles={handleUploadFiles}
                 onRename={handleRenameNode}
@@ -1222,6 +1263,10 @@ export default function App() {
                 canUpload={!isProxy(token)}
                 bookmarks={bookmarks}
                 onToggleBookmark={toggleBookmark}
+                onToggleOffline={handleToggleOffline}
+                isOfflineExplicit={(id) => offline.offlineRoots.some((root) => root.id === id)}
+                isOfflineEffective={(id) => offline.offlineFileIds.has(id) || offline.offlineFolderIds.has(id)}
+                offlineMode={!token && !offline.isOnline}
               />
             )}
             {activeSideView === 'search' && (
@@ -1368,7 +1413,10 @@ export default function App() {
         appVersion={appUpdate.version}
         updateAvailable={appUpdate.updateAvailable}
         onApplyUpdate={appUpdate.applyUpdate}
+        offlineChanges={offline.hasUnsyncedOfflineEdits}
+        onSyncOffline={offline.reconcileNow}
       />
+      <OfflineConflictsPanel conflicts={offline.pendingConflicts} onResolve={offline.resolveConflict} />
       {paletteMode && (
         <Suspense fallback={null}>
           <PaletteModal

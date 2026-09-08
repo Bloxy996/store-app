@@ -33,6 +33,7 @@ function useGoogleAuth() {
   const [token, setToken] = useState(() => readStoredToken());
   const [tokenClient, setTokenClient] = useState(null);
   const [gisReady, setGisReady] = useState(false);
+  const [hasEverSignedIn, setHasEverSignedIn] = useState(() => localStorage.getItem('vault_has_ever_signed_in') === 'true');
 
   useEffect(() => {
     let cancelled = false;
@@ -49,6 +50,8 @@ function useGoogleAuth() {
           if (resp && resp.access_token) {
             storeToken(resp.access_token, resp.expires_in);
             setToken(resp.access_token);
+            localStorage.setItem('vault_has_ever_signed_in', 'true');
+            setHasEverSignedIn(true);
           }
         }
       });
@@ -86,7 +89,7 @@ function useGoogleAuth() {
     setToken('');
   }, [token]);
 
-  return { token, gisReady, signIn, signOut };
+  return { token, gisReady, signIn, signOut, hasEverSignedIn };
 }
 
 

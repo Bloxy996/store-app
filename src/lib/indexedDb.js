@@ -1,4 +1,4 @@
-import { DB_NAME, DB_VERSION, STORE_FILES, STORE_FOLDERS, STORE_LINKS, STORE_META } from './vaultConfig.js';
+import { DB_NAME, DB_VERSION, STORE_FILES, STORE_FOLDERS, STORE_LINKS, STORE_META, STORE_OFFLINE_NOTES, STORE_OFFLINE_ASSETS } from './vaultConfig.js';
 
 
 // ---------------------------------------------------------------------------
@@ -14,6 +14,8 @@ function openDB() {
       if (!db.objectStoreNames.contains(STORE_FOLDERS)) db.createObjectStore(STORE_FOLDERS, { keyPath: 'id' });
       if (!db.objectStoreNames.contains(STORE_LINKS)) db.createObjectStore(STORE_LINKS, { keyPath: 'fileId' });
       if (!db.objectStoreNames.contains(STORE_META)) db.createObjectStore(STORE_META, { keyPath: 'key' });
+      if (!db.objectStoreNames.contains(STORE_OFFLINE_NOTES)) db.createObjectStore(STORE_OFFLINE_NOTES, { keyPath: 'fileId' });
+      if (!db.objectStoreNames.contains(STORE_OFFLINE_ASSETS)) db.createObjectStore(STORE_OFFLINE_ASSETS, { keyPath: 'fileId' });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
