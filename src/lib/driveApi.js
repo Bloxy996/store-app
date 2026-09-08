@@ -209,6 +209,20 @@ async function driveGetFileContent(token, fileId) {
 }
 
 
+async function driveGetFileMetadata(token, fileId) {
+  if (isProxy(token)) {
+    // The deployed proxy has no metadata action. Reconciliation is
+    // metadata-light in proxy mode by necessity, not a bug.
+    await driveGetFileContent(token, fileId);
+    return { id: fileId };
+  }
+  const fields = encodeURIComponent('id,name,modifiedTime,parents');
+  const res = await fetch(`${DRIVE_FILES_URL}/${fileId}?fields=${fields}&${DRIVE_ALL_DRIVES}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) throw driveError(res, 'Drive metadata fetch failed');
+  return res.json();
+}
+
+
 // Same request as above, but returns a Blob — used for images, which are
 // fetched on demand only (see the constant comment on FETCH_CONCURRENCY).
 async function driveGetFileBlob(token, fileId) {
@@ -411,4 +425,4 @@ async function openFolderPicker(token) {
   });
 }
 
-export { DRIVE_ALL_DRIVES, isProxy, proxyGet, proxyPost, driveBrowseFolders, driveResolveFolder, extractDriveFolderId, chunkArray, driveError, driveListFolderTree, driveListVaultContentInFolders, driveListVaultFiles, driveGetFileContent, driveGetFileBlob, driveUpdateFileContent, driveCreateFile, driveUploadBinary, driveCreateFolder, driveRenameItem, driveMoveItem, driveTrashItem, loadScriptOnce, ensurePickerLoaded, openFolderPicker };
+export { DRIVE_ALL_DRIVES, isProxy, proxyGet, proxyPost, driveBrowseFolders, driveResolveFolder, extractDriveFolderId, chunkArray, driveError, driveListFolderTree, driveListVaultContentInFolders, driveListVaultFiles, driveGetFileContent, driveGetFileMetadata, driveGetFileBlob, driveUpdateFileContent, driveCreateFile, driveUploadBinary, driveCreateFolder, driveRenameItem, driveMoveItem, driveTrashItem, loadScriptOnce, ensurePickerLoaded, openFolderPicker };

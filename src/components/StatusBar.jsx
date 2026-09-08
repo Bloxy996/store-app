@@ -7,7 +7,7 @@ import { parseFrontmatter } from '../lib/markdownParse.js';
 // word count, character count, backlink count, property count, plus a
 // small live sync indicator on the far right.
 // ---------------------------------------------------------------------------
-function StatusBar({ file, content, backlinkCount, syncing, syncError, dirty, saving, selectionText, appVersion, updateAvailable, onApplyUpdate }) {
+function StatusBar({ file, content, backlinkCount, syncing, syncError, dirty, saving, selectionText, appVersion, updateAvailable, onApplyUpdate, offlineChanges, onSyncOffline }) {
   const { properties, body } = parseFrontmatter(content || '');
   const hasSelection = !!selectionText && selectionText.trim().length > 0;
   const countSource = hasSelection ? selectionText : body;
@@ -32,6 +32,7 @@ function StatusBar({ file, content, backlinkCount, syncing, syncError, dirty, sa
         )}
       </div>
       <div className="status-bar-right">
+        {!!offlineChanges && <button className="status-update-btn" onClick={onSyncOffline}>{offlineChanges} offline change{offlineChanges === 1 ? "" : "s"} to sync · Sync now</button>}
         {syncError && (
           <span className="status-sync-error" title={syncError}>
             <IconAlertTriangle size={13} />

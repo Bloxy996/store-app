@@ -40,31 +40,42 @@ Don't propose swapping any of the above without a concrete, stated reason.
 
 ## 3. Non-negotiable architecture principles
 
-### 3.1 Zero local note storage (do not weaken this)
+### 3.1 Local note storage: zero by default, one scoped opt-in exception
 
-Note **content** is never written to disk on this device. It lives only in
-React state / in-memory caches for as long as the tab is open, and is
-streamed to/from Drive over the REST API. IndexedDB (`lib/indexedDb.js`) is
-used *exclusively* as a transient cache for (a) file metadata /
-`modifiedTime`, and (b) the derived wikilink graph — never raw note
-bodies. Clearing IndexedDB never loses data, because Drive is the single
-source of truth. Image bytes follow the same rule
-(`hooks/useDriveImageUrl.js` — fetched on demand, kept only as in-memory
-blob URLs, never persisted). The full-text search/tag index
-(`hooks/useVaultIndex.js`) takes this further: note bodies live in a
-RAM-only `Map` at module scope, never IndexedDB, rebuilt from Drive on
-every page load.
+Note **content** is never written to disk on this device *unless the user
+has explicitly marked that file, or a folder containing it, "Available
+offline."* Outside that opt-in, content lives only in React state /
+in-memory caches for as long as the tab is open, and is streamed to/from
+Drive over the REST API. IndexedDB (`lib/indexedDb.js`) is used as a
+transient cache for (a) file metadata / `modifiedTime`, (b) the derived
+wikilink graph, and (c) — the one exception — the body of any file
+currently covered by an offline rule (`STORE_OFFLINE_NOTES` /
+`STORE_OFFLINE_ASSETS`, owned exclusively by `hooks/useOfflineSync.js`,
+rules resolved by `lib/offlineRules.js`). Never `idbPut` a note body
+outside that one path. Clearing IndexedDB never loses data **except** for
+offline files with unsynced edits made while disconnected — the app must
+warn before clearing in that case (see `useOfflineSync.js`'s
+`hasUnsyncedOfflineEdits`). Image bytes follow the zero-storage rule
+(`hooks/useDriveImageUrl.js` — fetched on demand, in-memory blob URLs
+only) unless that same image's file is itself covered by an offline rule,
+in which case its bytes live in `STORE_OFFLINE_ASSETS` as a read-only
+cache (no offline editing of binary assets — no dirty/conflict state for
+that store). The full-text search/tag index (`hooks/useVaultIndex.js`)
+is unaffected: still RAM-only, still rebuilt from whatever content is
+available (Drive when online, the offline cache when not).
 
 **Any new feature that touches note content must go through this same
 discipline.** Cache derived-from-content data in a `useRef`/module-scope
-`Map` (RAM), or don't cache it — never `idbPut` a note body or anything
-derived from one. `vite.config.js`'s service-worker config enforces the
-same rule at the network layer (`NetworkOnly` for all `googleapis.com`
-traffic) — don't add `runtimeCaching` entries that cache API responses.
+`Map` (RAM), or don't cache it — with the single exception above, never
+`idbPut` a note body or anything derived from one. `vite.config.js`'s
+service-worker config still enforces zero storage at the *network* layer
+(`NetworkOnly` for all `googleapis.com` traffic) — offline files are
+cached at the *app-data* layer instead, deliberately never as
+`runtimeCaching` entries; don't add any.
 
 App settings/config that are *not* note content (accent color, the
-frontmatter schema, graph view settings) are fine in `localStorage` — that
-is a separate, sanctioned exception to this rule, not a loophole in it.
+frontmatter schema, graph view settings) are fine in `localStorage` — a
+separate, sanctioned exception, not a loophole in it.
 
 ### 3.2 Decoupled Drive layer
 
@@ -111,6 +122,7 @@ imports from there — never re-derive it inline:
 | Search matching + ranking                             | `lib/search.js`            |
 | Split-pane tree math                                  | `lib/paneTree.js`          |
 | File-kind classification                              | `lib/vaultConfig.js`       |
+| Offline root expansion and conflict-copy names       | `lib/offlineRules.js`      |
 | DB row group-by/aggregate (count/sum/average)         | `dbState.js`'s `aggregateDbRows` |
 | Frontmatter schema (properties, value options, child-properties) | `lib/frontmatterSchema.js` |
 
@@ -256,6 +268,11 @@ src/
     search.js                       — full-text/tag search parsing and ranking
     paneTree.js                     — split-pane tree math
     frontmatterSchema.js            — customizable frontmatter property schema (3.4)
+    offlineRules.js                 — live offline-root expansion and conflict-copy names
+
+  features/vector/                  — topological vector mesh editor (.vec)
+    vectorState.js, vectorGeometry.js, vectorFill.js — pure vector models/math
+    VectorView.jsx, VectorToolbar.jsx, VectorMesh.jsx, vector.css — vector editor UI
     mathUtils.js                    — clamp
 
   hooks/
@@ -266,6 +283,7 @@ src/
     useClickOutside.js              — generic "close on outside click" hook
     useFrontmatterSchema.js         — persisted frontmatter schema state
     useAppUpdate.js                 — wraps vite-plugin-pwa's useRegisterSW; surfaces "update available"
+    useOfflineSync.js               — opt-in offline cache, sync, and conflict model
 
   components/                       — Generic, reusable View pieces (3.5)
     icons.jsx                       — every <Icon*/> in the app
@@ -323,6 +341,7 @@ src/
       CompilePanel.jsx / .css         — sidebar panel: compile (copy/download) and apply (paste/upload)
     palette/        PaletteModal.jsx / .css
     help/           HelpModal.jsx      — in-app shortcuts/markdown/features reference (keep in sync — section 6)
+    offline/        OfflineConflictsPanel.jsx / .css — right-docked offline conflict resolver
     settings/       FrontmatterSchemaSettings.jsx / .css
     accent/         accentColor.js, AccentColorPicker.jsx
 

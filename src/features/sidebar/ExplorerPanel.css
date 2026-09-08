@@ -128,3 +128,5 @@
   outline-offset: -1px;
   background: var(--accent-soft);
 }
+
+.offline-dot { color: var(--text-faint); flex-shrink: 0; }.offline-dot.explicit { color: var(--accent); }.tree-item.offline-unavailable { opacity:.45; cursor:not-allowed; }
