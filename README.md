@@ -60,8 +60,7 @@ deployment for changes to take effect.
 
 See [`CLAUDE.md`](./docs/CLAUDE.md) for the full set of architecture
 decisions and conventions (tech stack, the zero-local-note-storage
-rule, file layout, performance notes). See [`TODO.md`](./docs/TODO.md) for
-open/planned work.
+rule, file layout, performance notes).
 
 ## License
 
