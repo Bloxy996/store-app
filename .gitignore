@@ -3,3 +3,4 @@ dev-dist
 changes.patch
 dist/
 reader/context.txt
+reader/aggregated.txt
