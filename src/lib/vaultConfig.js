@@ -54,7 +54,7 @@ const DRIVE_UPLOAD_URL = 'https://www.googleapis.com/upload/drive/v3/files';
 
 const DB_NAME = 'vault-cache-db';
 
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 const STORE_FILES = 'files'; // { id, name, modifiedTime, parents, mimeType, kind }  -- metadata only
 
@@ -63,6 +63,9 @@ const STORE_FOLDERS = 'folders'; // { id, name, parents } -- structure only, no 
 const STORE_LINKS = 'links'; // { fileId, links: [{target, alias}], cachedAt } -- graph only
 
 const STORE_META = 'meta'; // { key, value } -- app settings (vault folder id, bookmarks, etc.)
+
+const STORE_OFFLINE_NOTES = 'offlineNotes';
+const STORE_OFFLINE_ASSETS = 'offlineAssets';
 
 
 // How many Drive content requests run in parallel during a sync. Large
@@ -178,4 +181,4 @@ function extensionForKind(kind) {
   return 'md';
 }
 
-export { CLIENT_ID, API_KEY, APP_ID, DRIVE_SCOPE, DRIVE_FILES_URL, DRIVE_UPLOAD_URL, DB_NAME, DB_VERSION, STORE_FILES, STORE_FOLDERS, STORE_LINKS, STORE_META, FETCH_CONCURRENCY, IMAGE_EXTENSIONS, IMAGE_MIME_TYPES, VIDEO_EXTENSIONS, VIDEO_MIME_TYPES, AUDIO_EXTENSIONS, AUDIO_MIME_TYPES, NOTE_EXTENSIONS, DATABASE_EXTENSIONS, CANVAS_EXTENSIONS, fileExtension, isImageName, isVideoName, isAudioName, isAssetName, classifyKind, opensInEditorPane, extensionForKind };
+export { CLIENT_ID, API_KEY, APP_ID, DRIVE_SCOPE, DRIVE_FILES_URL, DRIVE_UPLOAD_URL, DB_NAME, DB_VERSION, STORE_FILES, STORE_FOLDERS, STORE_LINKS, STORE_META, STORE_OFFLINE_NOTES, STORE_OFFLINE_ASSETS, FETCH_CONCURRENCY, IMAGE_EXTENSIONS, IMAGE_MIME_TYPES, VIDEO_EXTENSIONS, VIDEO_MIME_TYPES, AUDIO_EXTENSIONS, AUDIO_MIME_TYPES, NOTE_EXTENSIONS, DATABASE_EXTENSIONS, CANVAS_EXTENSIONS, fileExtension, isImageName, isVideoName, isAudioName, isAssetName, classifyKind, opensInEditorPane, extensionForKind };

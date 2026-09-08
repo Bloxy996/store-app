@@ -23,6 +23,8 @@ import { TocPanel } from './features/toc/TocPanel.jsx';
 import { useGoogleAuth, useProxyAuth } from './hooks/useAuth.js';
 import { releaseImageUrlCache } from './hooks/useDriveImageUrl.js';
 import { useVaultIndex } from './hooks/useVaultIndex.js';
+import { useOfflineSync } from './hooks/useOfflineSync.js';
+import { OfflineConflictsPanel } from './features/offline/OfflineConflictsPanel.jsx';
 
 // Code-split: each of these is a full-screen modal/overlay that most
 // sessions never open (in-app help, the Cmd+K palette). Loading
@@ -50,7 +52,7 @@ import { STORE_META, classifyKind, extensionForKind, fileExtension, opensInEdito
 
 
 export default function App() {
-  const { token: googleToken, gisReady, signIn, signOut: signOutGoogle } = useGoogleAuth();
+  const { token: googleToken, gisReady, signIn, signOut: signOutGoogle, hasEverSignedIn } = useGoogleAuth();
   const { proxyToken, signInProxy, signOutProxy } = useProxyAuth();
   const token = googleToken || proxyToken;
   const signOut = useCallback(() => {
@@ -81,7 +83,9 @@ export default function App() {
   }, [accentPickerOpen]);
   const [folder, setFolder] = useState(null);
   const [folderRestoring, setFolderRestoring] = useState(true);
+  const [cachedFolderExists, setCachedFolderExists] = useState(false);
   const sync = useVaultSync(token, folder);
+  const offline = useOfflineSync(token, folder, sync);
   const appUpdate = useAppUpdate();
   const vaultIndex = useVaultIndex(token, sync.filesMeta);
 
@@ -119,7 +123,7 @@ export default function App() {
   // Restore the last-selected vault folder (an ID string, not note content).
   useEffect(() => {
     idbGet(STORE_META, 'vaultFolder').then((rec) => {
-      if (rec) setFolder(rec.value);
+      if (rec) { setFolder(rec.value); setCachedFolderExists(true); }
       setFolderRestoring(false);
     });
   }, []);
@@ -160,6 +164,7 @@ export default function App() {
       releaseImageUrlCache();
       setFolder(picked);
       idbPut(STORE_META, { key: 'vaultFolder', value: picked });
+      setCachedFolderExists(true);
       setBuffers({});
       saveTimers.current = {};
       setPaneTree(makeLeaf(null));
@@ -279,20 +284,26 @@ export default function App() {
   // --- Content loading (per open tab) --------------------------------------
   const ensureFileLoaded = useCallback(
     (fileId) => {
-      if (!fileId || !token) return;
+      if (!fileId || (!token && !offline.isOnline)) return;
       if (buffers[fileId] || loadingFileIds.current.has(fileId)) return;
       const meta = sync.filesMeta.find((f) => f.id === fileId);
       if (!meta || !opensInEditorPane(meta.kind)) return;
       loadingFileIds.current.add(fileId);
       setBuffers((prev) => ({ ...prev, [fileId]: { content: '', dirty: false, saving: false, loading: true } }));
-      driveGetFileContent(token, fileId)
+      const load = !offline.isOnline ? offline.getOfflineContent(fileId) : driveGetFileContent(token, fileId);
+      load
         .then((text) => {
+          if (text === null) throw new Error('Reconnect to open this file.');
           // Databases aren't part of the note search/tag index — only
           // notes' bodies get indexed for full-text search.
           if (meta.kind === 'note') vaultIndex.updateBody(fileId, text);
           setBuffers((prev) => ({ ...prev, [fileId]: { content: text, dirty: false, saving: false, loading: false } }));
         })
-        .catch((err) => {
+        .catch(async (err) => {
+          if (!err.status && offline.offlineFileIds.has(fileId)) {
+            const text = await offline.getOfflineContent(fileId);
+            if (text !== null) { if (meta.kind === 'note') vaultIndex.updateBody(fileId, text); setBuffers((prev) => ({ ...prev, [fileId]: { content: text, dirty: false, saving: false, loading: false } })); return; }
+          }
           setBuffers((prev) => ({
             ...prev,
             [fileId]: { content: '', dirty: false, saving: false, loading: false, loadError: err.message }
@@ -300,24 +311,28 @@ export default function App() {
         })
         .finally(() => loadingFileIds.current.delete(fileId));
     },
-    [token, buffers, sync.filesMeta, vaultIndex]
+    [token, buffers, sync.filesMeta, vaultIndex, offline]
   );
 
   const saveNow = useCallback(
     async (fileId, value) => {
-      if (!token) return;
+      if (!token) {
+        if (offline.offlineFileIds.has(fileId)) { await offline.setOfflineContent(fileId, value, { dirty: true }); }
+        return;
+      }
       setBuffers((prev) => (prev[fileId] ? { ...prev, [fileId]: { ...prev[fileId], saving: true } } : prev));
       try {
         const updated = await driveUpdateFileContent(token, fileId, value);
         sync.applyLocalEdit(fileId, value, updated.modifiedTime || new Date().toISOString());
         vaultIndex.updateBody(fileId, value);
+        if (offline.offlineFileIds.has(fileId)) await offline.refreshCacheAfterSave(fileId, value, updated.modifiedTime);
         setBuffers((prev) => (prev[fileId] ? { ...prev, [fileId]: { ...prev[fileId], dirty: false, saving: false } } : prev));
       } catch (err) {
-        console.error(err);
+        if (!err.status && offline.offlineFileIds.has(fileId)) { await offline.setOfflineContent(fileId, value, { dirty: true }); } else console.error(err);
         setBuffers((prev) => (prev[fileId] ? { ...prev, [fileId]: { ...prev[fileId], saving: false } } : prev));
       }
     },
-    [token, sync, vaultIndex]
+    [token, sync, vaultIndex, offline]
   );
 
   const handleContentChange = useCallback(
@@ -938,6 +953,12 @@ export default function App() {
     [filesById, performRename]
   );
 
+  const handleToggleOffline = useCallback(async (node) => {
+    const explicit = offline.offlineRoots.some((root) => root.id === node.id && root.type === node.type);
+    const result = await offline.toggleOfflineRoot(node.id, node.type, !explicit);
+    if (!result.ok) window.alert(result.message);
+  }, [offline]);
+
   const handleDeleteNode = useCallback(
     async (node) => {
       const isPage = node.type === 'file' && opensInEditorPane(node.kind);
@@ -1149,7 +1170,7 @@ export default function App() {
     cmd.run();
   }, []);
 
-  if (!token) {
+  if (!folderRestoring && !token && (offline.isOnline || !hasEverSignedIn || !cachedFolderExists)) {
     return <OnboardingFlow step="signin" onSignIn={signIn} ready={gisReady} onSignInProxy={signInProxy} />;
   }
   if (folderRestoring) {
@@ -1222,6 +1243,10 @@ export default function App() {
                 canUpload={!isProxy(token)}
                 bookmarks={bookmarks}
                 onToggleBookmark={toggleBookmark}
+                onToggleOffline={handleToggleOffline}
+                isOfflineExplicit={(id) => offline.offlineRoots.some((root) => root.id === id)}
+                isOfflineEffective={(id) => offline.offlineFileIds.has(id) || offline.offlineFolderIds.has(id)}
+                offlineMode={!token && !offline.isOnline}
               />
             )}
             {activeSideView === 'search' && (
@@ -1368,7 +1393,10 @@ export default function App() {
         appVersion={appUpdate.version}
         updateAvailable={appUpdate.updateAvailable}
         onApplyUpdate={appUpdate.applyUpdate}
+        offlineChanges={offline.hasUnsyncedOfflineEdits}
+        onSyncOffline={offline.reconcileNow}
       />
+      <OfflineConflictsPanel conflicts={offline.pendingConflicts} onResolve={offline.resolveConflict} />
       {paletteMode && (
         <Suspense fallback={null}>
           <PaletteModal

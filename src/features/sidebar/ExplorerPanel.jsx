@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 
-import { ASSET_KIND_ICONS, IconCanvasKind, IconChevronDown, IconChevronRight, IconDatabase, IconEdit, IconFilePlus, IconFolderPlus, IconMoreVertical, IconPlus, IconStar, IconStarFilled, IconTrash, IconUpload } from '../../components/icons.jsx';
+import { ASSET_KIND_ICONS, IconCanvasKind, IconChevronDown, IconChevronRight, IconDatabase, IconEdit, IconFilePlus, IconFolderPlus, IconMoreVertical, IconOfflineAvailable, IconPlus, IconStar, IconStarFilled, IconTrash, IconUpload } from '../../components/icons.jsx';
 import { useClickOutside } from '../../hooks/useClickOutside.js';
 import { opensInEditorPane } from '../../lib/vaultConfig.js';
 
@@ -91,7 +91,7 @@ function AddMenuPanel({ onNewNote, onNewDatabase, onNewCanvas, onNewFolder, onUp
 
 // The inline panel for one row's "..." menu — rendered by TreeNode as a
 // sibling directly below that row, never portaled.
-function TreeItemMenuPanel({ isFolder, canUpload, onNewNote, onNewDatabase, onNewCanvas, onNewFolder, onUploadFiles, onRename, onToggleBookmark, isBookmarked, onDelete, onClose }) {
+function TreeItemMenuPanel({ isFolder, canUpload, onNewNote, onNewDatabase, onNewCanvas, onNewFolder, onUploadFiles, onRename, onToggleBookmark, isBookmarked, onDelete, onToggleOffline, isOfflineExplicit, onClose }) {
   const fileInputRef = useRef(null);
   const run = (fn) => {
     fn();
@@ -140,6 +140,7 @@ function TreeItemMenuPanel({ isFolder, canUpload, onNewNote, onNewDatabase, onNe
           <span>{isBookmarked ? 'Remove bookmark' : 'Bookmark'}</span>
         </button>
       )}
+      <button className="menu-item" onClick={() => run(onToggleOffline)}><IconOfflineAvailable size={14} /><span>{isOfflineExplicit ? 'Remove from offline' : 'Make available offline'}</span></button>
       <button className="menu-item" onClick={() => run(onRename)}>
         <IconEdit size={14} />
         <span>Rename</span>
@@ -191,7 +192,11 @@ const TreeNode = React.memo(function TreeNodeImpl({
   bookmarks,
   onToggleBookmark,
   dragState,
-  setDragState
+  setDragState,
+  isOfflineExplicit,
+  isOfflineEffective,
+  onToggleOffline,
+  offlineMode
 }) {
   const indent = { paddingLeft: 6 + depth * 16 };
   const isDragOver = dragState.overId === node.id;
@@ -211,18 +216,20 @@ const TreeNode = React.memo(function TreeNodeImpl({
     const isAsset = !opensInEditorPane(node.kind);
     const isBookmarked = bookmarks.has(node.id);
     const AssetIcon = ASSET_KIND_ICONS[node.kind] || null;
+    const unavailable = offlineMode && !isOfflineEffective(node.id);
     return (
       <div ref={rowWrapRef}>
         <div className={`tree-row ${isDragOver ? 'drag-over' : ''}`}>
           <button
-            className={`tree-item tree-file ${currentIds.has(node.id) ? 'active' : ''}`}
+            className={`tree-item tree-file ${currentIds.has(node.id) ? 'active' : ''} ${unavailable ? 'offline-unavailable' : ''}`}
             style={indent}
             draggable
             onDragStart={handleDragStart}
             onDragEnd={handleDragEnd}
-            onClick={(e) => (isAsset ? onOpenImage(node, e) : onOpenFile(node.id, e))}
+            onClick={(e) => unavailable ? window.alert('Reconnect to open this file.') : (isAsset ? onOpenImage(node, e) : onOpenFile(node.id, e))}
           >
             {isBookmarked && <IconStarFilled className="bookmark-dot" size={11} />}
+            {isOfflineEffective(node.id) && <IconOfflineAvailable className={`offline-dot ${isOfflineExplicit(node.id) ? 'explicit' : ''}`} size={12} />}
             {AssetIcon && <AssetIcon className="tree-kind-icon" size={13} />}
             <span className="tree-label">{isAsset ? node.name : node.name.replace(/\.[^.]+$/i, '')}</span>
           </button>
@@ -244,6 +251,8 @@ const TreeNode = React.memo(function TreeNodeImpl({
             onToggleBookmark={() => onToggleBookmark(node.id)}
             onRename={() => onRename(node)}
             onDelete={() => onDelete(node)}
+            onToggleOffline={() => onToggleOffline(node)}
+            isOfflineExplicit={isOfflineExplicit(node.id)}
             onClose={() => setMenuOpen(false)}
           />
         )}
@@ -280,7 +289,7 @@ const TreeNode = React.memo(function TreeNodeImpl({
           onClick={() => onToggleExpand(node.id)}
         >
           <span className="tree-caret">{isOpen ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}</span>
-          <span className="tree-label">{node.name}</span>
+          <span className="tree-label">{node.name}</span>{isOfflineEffective(node.id) && <IconOfflineAvailable className={`offline-dot ${isOfflineExplicit(node.id) ? 'explicit' : ''}`} size={12} />}
         </button>
         <button
           className={`tree-menu-btn ${menuOpen ? 'active' : ''}`}
@@ -304,6 +313,8 @@ const TreeNode = React.memo(function TreeNodeImpl({
           onUploadFiles={(files) => onUploadFiles(node.id, files)}
           onRename={() => onRename(node)}
           onDelete={() => onDelete(node)}
+          onToggleOffline={() => onToggleOffline(node)}
+          isOfflineExplicit={isOfflineExplicit(node.id)}
           onClose={() => setMenuOpen(false)}
         />
       )}
@@ -331,6 +342,10 @@ const TreeNode = React.memo(function TreeNodeImpl({
             onToggleBookmark={onToggleBookmark}
             dragState={dragState}
             setDragState={setDragState}
+            isOfflineExplicit={isOfflineExplicit}
+            isOfflineEffective={isOfflineEffective}
+            onToggleOffline={onToggleOffline}
+            offlineMode={offlineMode}
           />
         ))}
     </div>
@@ -368,7 +383,11 @@ const ExplorerPanel = React.memo(function ExplorerPanel({
   onMoveNode,
   canUpload,
   bookmarks,
-  onToggleBookmark
+  onToggleBookmark,
+  isOfflineExplicit = () => false,
+  isOfflineEffective = () => false,
+  onToggleOffline = () => {},
+  offlineMode = false
 }) {
   const [expanded, setExpanded] = useState(new Set());
   const [dragState, setDragState] = useState({ draggingId: null, overId: null });
@@ -450,6 +469,10 @@ const ExplorerPanel = React.memo(function ExplorerPanel({
             onToggleBookmark={onToggleBookmark}
             dragState={dragState}
             setDragState={setDragState}
+            isOfflineExplicit={isOfflineExplicit}
+            isOfflineEffective={isOfflineEffective}
+            onToggleOffline={onToggleOffline}
+            offlineMode={offlineMode}
           />
         ))}
         {tree.length === 0 && <p className="muted small empty-hint">Empty store — use + to add a note.</p>}
