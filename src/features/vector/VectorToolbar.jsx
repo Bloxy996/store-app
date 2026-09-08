@@ -1,0 +1,4 @@
+import { IconEye, IconPlus, IconTrash } from '../../components/icons.jsx';
+const tools=['select','segment','polyline','subdivide','fill','eyedropper'];
+function VectorToolbar({ tool,onTool,style,onStyle,onGroup,onUngroup,onDelete }) { return <div className="vector-toolbar">{tools.map(t=><button key={t} className={`icon-btn ${tool===t?'active':''}`} onClick={()=>onTool(t)} title={t}>{t==='select'?<IconEye size={15}/>:t==='fill'?<IconPlus size={15}/>:<span>{t[0].toUpperCase()}</span>}</button>)}<label>Width <input type="range" min="1" max="24" value={style.thickness} onChange={e=>onStyle({...style,thickness:+e.target.value})}/></label><input aria-label="Stroke color" type="color" value={style.color} onChange={e=>onStyle({...style,color:e.target.value})}/><button onClick={onGroup}>Group</button><button onClick={onUngroup}>Ungroup</button><button className="icon-btn" onClick={onDelete}><IconTrash size={15}/></button></div>; }
+export { VectorToolbar };

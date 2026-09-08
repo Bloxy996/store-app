@@ -269,6 +269,10 @@ src/
     paneTree.js                     — split-pane tree math
     frontmatterSchema.js            — customizable frontmatter property schema (3.4)
     offlineRules.js                 — live offline-root expansion and conflict-copy names
+
+  features/vector/                  — topological vector mesh editor (.vec)
+    vectorState.js, vectorGeometry.js, vectorFill.js — pure vector models/math
+    VectorView.jsx, VectorToolbar.jsx, VectorMesh.jsx, vector.css — vector editor UI
     mathUtils.js                    — clamp
 
   hooks/

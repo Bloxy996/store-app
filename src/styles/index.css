@@ -33,3 +33,4 @@
 @import '../features/compile/CompilePanel.css';
 
 @import '../features/offline/OfflineConflictsPanel.css';
+@import '../features/vector/vector.css';

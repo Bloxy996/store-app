@@ -119,6 +119,7 @@ const DATABASE_EXTENSIONS = new Set(['base']);
 // classifyKind can tell them apart. See the Canvas section below (search
 // "CANVAS BOARD") for the node/edge schema and the CanvasView renderer.
 const CANVAS_EXTENSIONS = new Set(['canvas']);
+const VECTOR_EXTENSIONS = new Set(['vec']);
 
 
 function fileExtension(name) {
@@ -161,6 +162,7 @@ function classifyKind(name, mimeType) {
   if (isAudioName(name) || AUDIO_MIME_TYPES.includes(mimeType)) return 'audio';
   if (DATABASE_EXTENSIONS.has(fileExtension(name))) return 'database';
   if (CANVAS_EXTENSIONS.has(fileExtension(name))) return 'canvas';
+  if (VECTOR_EXTENSIONS.has(fileExtension(name))) return 'vector';
   if (NOTE_EXTENSIONS.has(fileExtension(name)) || mimeType === 'text/markdown' || mimeType === 'text/plain') return 'note';
   return 'file';
 }
@@ -170,7 +172,7 @@ function classifyKind(name, mimeType) {
 // image/asset viewer). Notes, databases, and canvases are all "pages" —
 // they get a tab, a title field, and live in the pane tree like any note.
 function opensInEditorPane(kind) {
-  return kind === 'note' || kind === 'database' || kind === 'canvas';
+  return kind === 'note' || kind === 'database' || kind === 'canvas' || kind === 'vector';
 }
 
 // File extension to use when a "page" kind is created or renamed without
@@ -178,7 +180,8 @@ function opensInEditorPane(kind) {
 function extensionForKind(kind) {
   if (kind === 'database') return 'base';
   if (kind === 'canvas') return 'canvas';
+  if (kind === 'vector') return 'vec';
   return 'md';
 }
 
-export { CLIENT_ID, API_KEY, APP_ID, DRIVE_SCOPE, DRIVE_FILES_URL, DRIVE_UPLOAD_URL, DB_NAME, DB_VERSION, STORE_FILES, STORE_FOLDERS, STORE_LINKS, STORE_META, STORE_OFFLINE_NOTES, STORE_OFFLINE_ASSETS, FETCH_CONCURRENCY, IMAGE_EXTENSIONS, IMAGE_MIME_TYPES, VIDEO_EXTENSIONS, VIDEO_MIME_TYPES, AUDIO_EXTENSIONS, AUDIO_MIME_TYPES, NOTE_EXTENSIONS, DATABASE_EXTENSIONS, CANVAS_EXTENSIONS, fileExtension, isImageName, isVideoName, isAudioName, isAssetName, classifyKind, opensInEditorPane, extensionForKind };
+export { CLIENT_ID, API_KEY, APP_ID, DRIVE_SCOPE, DRIVE_FILES_URL, DRIVE_UPLOAD_URL, DB_NAME, DB_VERSION, STORE_FILES, STORE_FOLDERS, STORE_LINKS, STORE_META, STORE_OFFLINE_NOTES, STORE_OFFLINE_ASSETS, FETCH_CONCURRENCY, IMAGE_EXTENSIONS, IMAGE_MIME_TYPES, VIDEO_EXTENSIONS, VIDEO_MIME_TYPES, AUDIO_EXTENSIONS, AUDIO_MIME_TYPES, NOTE_EXTENSIONS, DATABASE_EXTENSIONS, CANVAS_EXTENSIONS, VECTOR_EXTENSIONS, fileExtension, isImageName, isVideoName, isAudioName, isAssetName, classifyKind, opensInEditorPane, extensionForKind };

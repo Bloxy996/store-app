@@ -16,6 +16,7 @@ import { renderMarkdownBlocks } from '../../lib/markdownRender.jsx';
 // "Mobile performance & bundle size".
 const DatabaseView = lazy(() => import('../database/DatabaseView.jsx').then((m) => ({ default: m.DatabaseView })));
 const CanvasView = lazy(() => import('../canvas/CanvasView.jsx').then((m) => ({ default: m.CanvasView })));
+const VectorView = lazy(() => import('../vector/VectorView.jsx').then((m) => ({ default: m.VectorView })));
 const GraphView = lazy(() => import('../graph/GraphView.jsx').then((m) => ({ default: m.GraphView })));
 
 
@@ -159,6 +160,10 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
         />
       </Suspense>
     );
+  }
+
+  if (file.kind === 'vector') {
+    return <Suspense fallback={<div className="note-loading-bar" aria-hidden="true" />}><VectorView file={file} content={content} onChange={(value) => onChange(value)} handlers={handlers} loading={loadingNote} /></Suspense>;
   }
 
   if (file.kind === 'graph') {

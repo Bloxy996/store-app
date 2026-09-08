@@ -5,11 +5,12 @@ import { ActivityBar } from './components/ActivityBar.jsx';
 import { ResizeHandle } from './components/ResizeHandle.jsx';
 import { StatusBar } from './components/StatusBar.jsx';
 import { useAppUpdate } from './hooks/useAppUpdate.js';
-import { IconCanvasKind, IconDatabase, IconEye, IconFilePlus, IconFolder, IconFolderPlus, IconGraph, IconHelp, IconLogOut, IconPalette, IconPanelLeft, IconRefresh, IconSearch, IconSettings, IconSliders, IconSplitHorizontal, IconSplitVertical, IconStar, IconTag } from './components/icons.jsx';
+import { IconCanvasKind, IconVectorKind, IconDatabase, IconEye, IconFilePlus, IconFolder, IconFolderPlus, IconGraph, IconHelp, IconLogOut, IconPalette, IconPanelLeft, IconRefresh, IconSearch, IconSettings, IconSliders, IconSplitHorizontal, IconSplitVertical, IconStar, IconTag } from './components/icons.jsx';
 import { AccentColorPicker } from './features/accent/AccentColorPicker.jsx';
 import { useAccentColor } from './features/accent/accentColor.js';
 import { BookmarksPanel } from './features/bookmarks/BookmarksPanel.jsx';
 import { makeDefaultCanvasState, serializeCanvasState } from './features/canvas/canvasState.js';
+import { makeDefaultVectorState, serializeVectorState } from './features/vector/vectorState.js';
 import { makeDefaultDatabaseState, serializeDatabaseState } from './features/database/dbState.js';
 import { GRAPH_PANE_FILE, GRAPH_PANE_FILE_ID } from './features/graph/graphPaneFile.js';
 import { applyFileChanges, flattenVaultTree, folderIdForPath, parseApplyXml, splitNotePath } from './features/compile/compileVault.js';
@@ -825,6 +826,23 @@ export default function App() {
     [token, sync, activePaneId, openFileInPane]
   );
 
+  const handleCreateVectorIn = useCallback(
+    (parentId) => {
+      const name = window.prompt('New vector art name:');
+      if (!name || !name.trim()) return;
+      (async () => {
+        try {
+          const skeleton = serializeVectorState(makeDefaultVectorState(name.trim()));
+          const created = await driveCreateFile(token, parentId, name.trim(), skeleton, 'vec', 'application/json');
+          const fileRecord = { id: created.id, name: created.name, modifiedTime: created.modifiedTime || new Date().toISOString(), parents: [parentId], kind: 'vector' };
+          sync.registerNewFile(fileRecord);
+          setBuffers((prev) => ({ ...prev, [created.id]: { content: skeleton, dirty: false, saving: false, loading: false } }));
+          openFileInPane(activePaneId, created.id);
+        } catch (err) { window.alert(`Couldn't create vector art: ${err.message}`); }
+      })();
+    }, [token, sync, activePaneId, openFileInPane]
+  );
+
   const handleCreateFolderIn = useCallback(
     async (parentId) => {
       const name = window.prompt('New folder name:');
@@ -1106,6 +1124,7 @@ export default function App() {
     return [
       { id: 'new-note', label: 'Create new note', icon: <IconFilePlus size={15} />, run: () => handleCreateNoteIn(folder.id) },
       { id: 'new-canvas', label: 'Create new canvas', icon: <IconCanvasKind size={15} />, run: () => handleCreateCanvasIn(folder.id) },
+      { id: 'new-vector', label: 'Create new vector art', icon: <IconVectorKind size={15} />, run: () => handleCreateVectorIn(folder.id) },
       { id: 'new-database', label: 'Create new database', icon: <IconDatabase size={15} />, run: () => handleCreateDatabaseIn(folder.id) },
       { id: 'new-folder', label: 'Create new folder', icon: <IconFolderPlus size={15} />, run: () => handleCreateFolderIn(folder.id) },
       { id: 'toggle-sidebar', label: 'Toggle left sidebar', icon: <IconPanelLeft size={15} />, run: () => setMobileDockOpen((v) => !v) },
@@ -1163,7 +1182,7 @@ export default function App() {
       { id: 'change-folder', label: 'Change store folder', icon: <IconFolder size={15} />, run: handlePickFolder },
       { id: 'sign-out', label: 'Sign out', icon: <IconLogOut size={15} />, run: signOut }
     ];
-  }, [folder, handleCreateNoteIn, handleCreateDatabaseIn, handleCreateCanvasIn, handleCreateFolderIn, activePaneId, splitPane, paneTree, toggleTabMode, sync, handlePickFolder, signOut, openGraphInPane]);
+  }, [folder, handleCreateNoteIn, handleCreateDatabaseIn, handleCreateCanvasIn, handleCreateVectorIn, handleCreateFolderIn, activePaneId, splitPane, paneTree, toggleTabMode, sync, handlePickFolder, signOut, openGraphInPane]);
 
   const handlePaletteCommand = useCallback((cmd) => {
     setPaletteMode(null);
@@ -1235,6 +1254,7 @@ export default function App() {
                 onCreateNote={handleCreateNoteIn}
                 onCreateDatabase={handleCreateDatabaseIn}
                 onCreateCanvas={handleCreateCanvasIn}
+                onCreateVector={handleCreateVectorIn}
                 onCreateFolder={handleCreateFolderIn}
                 onUploadFiles={handleUploadFiles}
                 onRename={handleRenameNode}
