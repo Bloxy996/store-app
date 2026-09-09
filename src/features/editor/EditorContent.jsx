@@ -9,14 +9,15 @@ import { parseFrontmatter } from '../../lib/markdownParse.js';
 import { renderMarkdownBlocks } from '../../lib/markdownRender.jsx';
 
 // Code-split: most sessions spend their whole time in plain markdown notes
-// and never open a .base or .canvas file. Loading these two feature-sized
+// and never open a .base, .canvas, or .vec file. Loading these feature-sized
 // views (and everything they pull in — cell editors, the board renderer,
-// the force layout, ...) only when a file of that kind is actually opened
-// keeps them out of the note-editing hot path's bundle. See CLAUDE.md
-// "Mobile performance & bundle size".
+// the force layout, the vector graph engine, ...) only when a file of that
+// kind is actually opened keeps them out of the note-editing hot path's
+// bundle. See CLAUDE.md "Mobile performance & bundle size".
 const DatabaseView = lazy(() => import('../database/DatabaseView.jsx').then((m) => ({ default: m.DatabaseView })));
 const CanvasView = lazy(() => import('../canvas/CanvasView.jsx').then((m) => ({ default: m.CanvasView })));
 const GraphView = lazy(() => import('../graph/GraphView.jsx').then((m) => ({ default: m.GraphView })));
+const VectorEditorView = lazy(() => import('../vector/VectorEditorView.jsx').then((m) => ({ default: m.VectorEditorView })));
 
 
 function EditorContent({ file, content, onChange, linkIndex, phantomRecords, handlers, mode, loadingNote, backlinkIndex, allFiles, getBody, isActivePane, pendingRowOpen, onConsumeRowOpen }) {
@@ -157,6 +158,14 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
           loading={loadingNote}
           allFiles={allFiles}
         />
+      </Suspense>
+    );
+  }
+
+  if (file.kind === 'vector') {
+    return (
+      <Suspense fallback={<div className="note-loading-bar" aria-hidden="true" />}>
+        <VectorEditorView file={file} content={content} onChange={(value) => onChange(value)} loading={loadingNote} />
       </Suspense>
     );
   }

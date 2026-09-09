@@ -1,0 +1,167 @@
+/* ============================================================================
+   VECTOR EDITOR — Topological (Node-Centric) Vector Art Editor (.vec files).
+   See VectorEditorView.jsx. Same "pan/zoom lives on one transform, world-px
+   everywhere inside it" structure as canvas.css/CanvasView, but the content
+   itself is a real <svg> (not absolutely-positioned divs) since edges/fills
+   need to compile 1:1 to the exported SVG markup (vectorState.js).
+   ============================================================================ */
+.vector-view {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background: var(--bg-1);
+}
+
+.vector-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-0);
+  z-index: 5;
+}
+.vector-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.vector-color-swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+.vector-color-swatch.active {
+  border-color: var(--text-normal);
+}
+.vector-thickness-select {
+  background: var(--bg-2);
+  color: var(--text-normal);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  padding: 3px 4px;
+}
+.vector-zoom-pct {
+  min-width: 48px;
+  text-align: center;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  padding: 4px 2px;
+  border-radius: var(--radius-sm);
+}
+.vector-zoom-pct:hover {
+  background: var(--bg-2);
+  color: var(--text-normal);
+}
+
+.vector-surface {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+  background-color: var(--bg-1);
+  background-image: radial-gradient(var(--bg-4) 1px, transparent 1px);
+  background-size: 22px 22px;
+  background-position: 0 0;
+  cursor: default;
+  touch-action: none;
+  outline: none;
+  contain: layout paint size;
+}
+.vector-surface.panning {
+  cursor: grab;
+}
+.vector-svg {
+  display: block;
+  user-select: none;
+}
+
+.vector-edge {
+  cursor: pointer;
+}
+.vector-edge.selected {
+  filter: drop-shadow(0 0 0 1px var(--accent)) brightness(1.15);
+}
+.vector-preview-line {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  pointer-events: none;
+}
+
+.vector-vertex {
+  fill: var(--bg-1);
+  stroke: var(--text-muted);
+  stroke-width: 1.5;
+  cursor: pointer;
+}
+.vector-vertex:hover {
+  stroke: var(--text-normal);
+}
+.vector-vertex.selected {
+  fill: var(--accent);
+  stroke: var(--accent-hover);
+}
+.vector-vertex.grouped {
+  stroke-dasharray: 2 1.5;
+}
+.vector-vertex.in-chain {
+  fill: var(--accent-soft);
+  stroke: var(--accent);
+}
+
+.vector-marquee {
+  fill: var(--accent-soft);
+  stroke: var(--accent);
+  stroke-width: 1;
+  pointer-events: none;
+}
+
+.vector-selection-box {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1;
+  stroke-dasharray: 3 2;
+  pointer-events: none;
+}
+.vector-scale-handle {
+  fill: var(--bg-1);
+  stroke: var(--accent);
+  stroke-width: 1;
+  cursor: nwse-resize;
+}
+.vector-rotate-stem {
+  stroke: var(--accent);
+  stroke-width: 1;
+  pointer-events: none;
+}
+.vector-rotate-handle {
+  fill: var(--bg-1);
+  stroke: var(--accent);
+  stroke-width: 1;
+  cursor: grab;
+}
+
+.vector-selection-toolbar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 4px;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 4px;
+  z-index: 5;
+}

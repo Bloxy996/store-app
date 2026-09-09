@@ -28,6 +28,7 @@
 @import 'responsive.css';
 @import '../features/database/database.css';
 @import '../features/canvas/canvas.css';
+@import '../features/vector/vector.css';
 @import '../components/MiniMarkdownEditor.css';
 @import '../features/settings/FrontmatterSchemaSettings.css';
 @import '../features/compile/CompilePanel.css';

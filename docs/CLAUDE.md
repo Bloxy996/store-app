@@ -10,7 +10,8 @@ holds only durable, still-true architecture facts.
 ## 1. What this project is
 
 **store** (lowercase, always) — a file store that reads and writes `.md`
-notes (and `.base` database, `.canvas` board) files directly to and from
+notes (and `.base` database, `.canvas` board, `.vec` vector art) files
+directly to and from
 the user's Google Drive. Client-only React SPA (no backend server, no
 database of its own), runs entirely in the browser, packaged as an
 installable PWA, deployed as a static site on GitHub Pages.
@@ -165,10 +166,11 @@ specific to each (see inline code comments before changing them).
 ### 3.6 Kind-aware, not kind-forked
 
 A note pane's file can be a plain markdown note, a `.base` database, a
-`.canvas` board, or the virtual graph view. This is handled by **one**
-router (`features/editor/EditorContent.jsx`) switching on `file.kind` to
-render `DatabaseView` / `CanvasView` / `GraphView` / the normal markdown
-editor — not separate copy-pasted pane implementations. The graph view is
+`.canvas` board, a `.vec` vector art document, or the virtual graph view.
+This is handled by **one** router (`features/editor/EditorContent.jsx`)
+switching on `file.kind` to render `DatabaseView` / `CanvasView` /
+`VectorEditorView` / `GraphView` / the normal markdown editor — not
+separate copy-pasted pane implementations. The graph view is
 a real tab backed by a singleton pseudo-file (`graphPaneFile.js`, id
 `__graph__`, injected into `filesById` but never into `sync.filesMeta`, so
 it never triggers a Drive fetch or shows up in search). If a new file kind
@@ -326,6 +328,11 @@ src/
       canvasState.js                 — node/edge model, hit-testing, parse/serialize
       CanvasToolbar.jsx, CanvasFilePickerModal.jsx, CanvasNode.jsx
       CanvasView.jsx                 — pan/zoom/drag, touch-action handling (section 4)
+    vector/                         — topological (node-centric) vector art editor for .vec files
+      vectorState.js                  — Vertex/Edge/fill/group schema, parse/serialize, mutations, SVG export
+      vectorTopology.js               — half-edge face tracing, fill-only planarization, spatial grid, snapping
+      VectorToolbar.jsx               — tool switcher, style pickers, undo/redo, export
+      VectorEditorView.jsx            — pan/zoom/drag SVG canvas, all tools, transforms (3.6 pattern)
     graph/
       useForceGraph.js               — force-directed layout simulation (framework-agnostic; tunable forces)
       graphSettings.js                — persisted Filters/Groups/Forces (localStorage)
@@ -351,7 +358,7 @@ src/
 
 A CSS file next to a component/feature file with the same name is that
 piece's styles. Not every JS/JSX file has a matching CSS file — some share
-a feature-level stylesheet (`canvas.css`, `database.css`, `sidebar.css`).
+a feature-level stylesheet (`canvas.css`, `vector.css`, `database.css`, `sidebar.css`).
 
 ## 6. Keep the in-app help in sync
 

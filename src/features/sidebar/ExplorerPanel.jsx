@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 
-import { ASSET_KIND_ICONS, IconCanvasKind, IconChevronDown, IconChevronRight, IconDatabase, IconEdit, IconFilePlus, IconFolderPlus, IconMoreVertical, IconOfflineAvailable, IconPlus, IconStar, IconStarFilled, IconTrash, IconUpload } from '../../components/icons.jsx';
+import { ASSET_KIND_ICONS, IconCanvasKind, IconChevronDown, IconChevronRight, IconDatabase, IconEdit, IconFilePlus, IconFolderPlus, IconMoreVertical, IconOfflineAvailable, IconPlus, IconStar, IconStarFilled, IconTrash, IconUpload, IconVectorKind } from '../../components/icons.jsx';
 import { useClickOutside } from '../../hooks/useClickOutside.js';
 import { opensInEditorPane } from '../../lib/vaultConfig.js';
 
@@ -31,7 +31,7 @@ const DND_MIME = 'application/x-vault-node';
 
 function AddMenuButton({ active, onToggle }) {
   return (
-    <button className={`icon-btn ${active ? 'active' : ''}`} onClick={onToggle} title="New note, canvas, database, folder, or upload" aria-label="Add">
+    <button className={`icon-btn ${active ? 'active' : ''}`} onClick={onToggle} title="New note, canvas, vector art, database, folder, or upload" aria-label="Add">
       <IconPlus size={16} />
     </button>
   );
@@ -42,7 +42,7 @@ function AddMenuButton({ active, onToggle }) {
 // row — not anchored under the button itself — so it pushes the tree down
 // in normal flow instead of floating over it, matching the DbViewPanel /
 // TabBar-menu-panel convention established for other former popups.
-function AddMenuPanel({ onNewNote, onNewDatabase, onNewCanvas, onNewFolder, onUploadFiles, canUpload, onClose }) {
+function AddMenuPanel({ onNewNote, onNewDatabase, onNewCanvas, onNewVector, onNewFolder, onUploadFiles, canUpload, onClose }) {
   const fileInputRef = useRef(null);
   const run = (fn) => {
     fn();
@@ -57,6 +57,10 @@ function AddMenuPanel({ onNewNote, onNewDatabase, onNewCanvas, onNewFolder, onUp
       <button className="menu-item" onClick={() => run(onNewCanvas)}>
         <IconCanvasKind size={15} />
         <span>New canvas</span>
+      </button>
+      <button className="menu-item" onClick={() => run(onNewVector)}>
+        <IconVectorKind size={15} />
+        <span>New vector art</span>
       </button>
       <button className="menu-item" onClick={() => run(onNewDatabase)}>
         <IconDatabase size={15} />
@@ -91,7 +95,7 @@ function AddMenuPanel({ onNewNote, onNewDatabase, onNewCanvas, onNewFolder, onUp
 
 // The inline panel for one row's "..." menu — rendered by TreeNode as a
 // sibling directly below that row, never portaled.
-function TreeItemMenuPanel({ isFolder, canUpload, onNewNote, onNewDatabase, onNewCanvas, onNewFolder, onUploadFiles, onRename, onToggleBookmark, isBookmarked, onDelete, onToggleOffline, isOfflineExplicit, onClose }) {
+function TreeItemMenuPanel({ isFolder, canUpload, onNewNote, onNewDatabase, onNewCanvas, onNewVector, onNewFolder, onUploadFiles, onRename, onToggleBookmark, isBookmarked, onDelete, onToggleOffline, isOfflineExplicit, onClose }) {
   const fileInputRef = useRef(null);
   const run = (fn) => {
     fn();
@@ -109,6 +113,12 @@ function TreeItemMenuPanel({ isFolder, canUpload, onNewNote, onNewDatabase, onNe
         <button className="menu-item" onClick={() => run(onNewCanvas)}>
           <IconCanvasKind size={14} />
           <span>New canvas</span>
+        </button>
+      )}
+      {isFolder && (
+        <button className="menu-item" onClick={() => run(onNewVector)}>
+          <IconVectorKind size={14} />
+          <span>New vector art</span>
         </button>
       )}
       {isFolder && (
@@ -183,6 +193,7 @@ const TreeNode = React.memo(function TreeNodeImpl({
   onCreateNote,
   onCreateDatabase,
   onCreateCanvas,
+  onCreateVector,
   onCreateFolder,
   onUploadFiles,
   onRename,
@@ -309,6 +320,7 @@ const TreeNode = React.memo(function TreeNodeImpl({
           onNewNote={() => onCreateNote(node.id)}
           onNewDatabase={() => onCreateDatabase(node.id)}
           onNewCanvas={() => onCreateCanvas(node.id)}
+          onNewVector={() => onCreateVector(node.id)}
           onNewFolder={() => onCreateFolder(node.id)}
           onUploadFiles={(files) => onUploadFiles(node.id, files)}
           onRename={() => onRename(node)}
@@ -332,6 +344,7 @@ const TreeNode = React.memo(function TreeNodeImpl({
             onCreateNote={onCreateNote}
             onCreateDatabase={onCreateDatabase}
             onCreateCanvas={onCreateCanvas}
+            onCreateVector={onCreateVector}
             onCreateFolder={onCreateFolder}
             onUploadFiles={onUploadFiles}
             onRename={onRename}
@@ -376,6 +389,7 @@ const ExplorerPanel = React.memo(function ExplorerPanel({
   onCreateNote,
   onCreateDatabase,
   onCreateCanvas,
+  onCreateVector,
   onCreateFolder,
   onUploadFiles,
   onRename,
@@ -423,6 +437,7 @@ const ExplorerPanel = React.memo(function ExplorerPanel({
             onNewNote={() => onCreateNote(vaultRootId)}
             onNewDatabase={() => onCreateDatabase(vaultRootId)}
             onNewCanvas={() => onCreateCanvas(vaultRootId)}
+            onNewVector={() => onCreateVector(vaultRootId)}
             onNewFolder={() => onCreateFolder(vaultRootId)}
             onUploadFiles={(files) => onUploadFiles(vaultRootId, files)}
             canUpload={canUpload}
@@ -459,6 +474,7 @@ const ExplorerPanel = React.memo(function ExplorerPanel({
             onCreateNote={onCreateNote}
             onCreateDatabase={onCreateDatabase}
             onCreateCanvas={onCreateCanvas}
+            onCreateVector={onCreateVector}
             onCreateFolder={onCreateFolder}
             onUploadFiles={onUploadFiles}
             onRename={onRename}

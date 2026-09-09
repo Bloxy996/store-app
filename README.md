@@ -1,7 +1,8 @@
 # store
 
 A minimalist, Notion/Obsidian-hybrid file store that reads and writes
-`.md` notes (plus `.base` database and `.canvas` board files) directly
+`.md` notes (plus `.base` database, `.canvas` board, and `.vec` vector
+art files) directly
 to and from your own Google Drive. Client-only React SPA — no backend
 server and no database of its own; everything runs in the browser and
 is packaged as an installable PWA.
@@ -13,6 +14,8 @@ is packaged as an installable PWA.
 - Notion-style `.base` databases (table/board/gallery views, typed
   columns, filtering/sorting)
 - `.canvas` boards and an Obsidian-style local/full graph view
+- A topological (node/edge graph) vector art editor (`.vec` files) that
+  compiles straight to SVG
 - Full-text search and a wikilink-based backlink index
 - Multi-pane/tab editing with split panes
 - Installable as a PWA; works offline for the app shell (note content

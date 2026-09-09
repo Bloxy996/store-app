@@ -2,11 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { driveCreateFile, driveGetFileBlob, driveGetFileContent, driveGetFileMetadata, driveUpdateFileContent } from '../lib/driveApi.js';
 import { idbDeleteMany, idbGet, idbGetAll, idbPut } from '../lib/indexedDb.js';
 import { buildConflictCopyName, resolveOfflineIds } from '../lib/offlineRules.js';
-import { STORE_META, STORE_OFFLINE_ASSETS, STORE_OFFLINE_NOTES } from '../lib/vaultConfig.js';
+import { STORE_META, STORE_OFFLINE_ASSETS, STORE_OFFLINE_NOTES, extensionForKind } from '../lib/vaultConfig.js';
 
 const subscribeOnline = (notify) => { window.addEventListener('online', notify); window.addEventListener('offline', notify); return () => { window.removeEventListener('online', notify); window.removeEventListener('offline', notify); }; };
 const getOnline = () => navigator.onLine;
-const assetKind = (kind) => !['note', 'database', 'canvas'].includes(kind);
+const assetKind = (kind) => !['note', 'database', 'canvas', 'vector'].includes(kind);
 
 function useOfflineSync(token, folder, sync) {
   const isOnline = useSyncExternalStore(subscribeOnline, getOnline, () => true);
@@ -93,8 +93,8 @@ function useOfflineSync(token, folder, sync) {
     if (action === 'discard') await idbDeleteMany(STORE_OFFLINE_NOTES, [fileId]);
     else if (action === 'keep-drive') await refreshCacheAfterSave(fileId, conflict.remoteContent, conflict.remote?.modifiedTime);
     else if (action === 'keep-mine') { const updated = await driveUpdateFileContent(token, fileId, row.content); await refreshCacheAfterSave(fileId, row.content, updated.modifiedTime); sync.applyLocalEdit(fileId, row.content, updated.modifiedTime); }
-    else if (action === 'keep-both') { const made = await driveCreateFile(token, conflict.parentId, buildConflictCopyName(conflict.name, conflict.kind), row.content, conflict.kind === 'database' ? 'base' : conflict.kind === 'canvas' ? 'canvas' : 'md', conflict.kind === 'note' ? 'text/markdown' : 'application/json'); sync.registerNewFile({ ...made, kind: conflict.kind }); await refreshCacheAfterSave(fileId, conflict.remoteContent, conflict.remote?.modifiedTime); }
-    else if (action === 'restore') { const made = await driveCreateFile(token, conflict.parentId, conflict.name, row.content, conflict.kind === 'database' ? 'base' : conflict.kind === 'canvas' ? 'canvas' : 'md'); sync.registerNewFile({ ...made, kind: conflict.kind }); await idbDeleteMany(STORE_OFFLINE_NOTES, [fileId]); }
+    else if (action === 'keep-both') { const made = await driveCreateFile(token, conflict.parentId, buildConflictCopyName(conflict.name, conflict.kind), row.content, extensionForKind(conflict.kind), conflict.kind === 'note' ? 'text/markdown' : 'application/json'); sync.registerNewFile({ ...made, kind: conflict.kind }); await refreshCacheAfterSave(fileId, conflict.remoteContent, conflict.remote?.modifiedTime); }
+    else if (action === 'restore') { const made = await driveCreateFile(token, conflict.parentId, conflict.name, row.content, extensionForKind(conflict.kind)); sync.registerNewFile({ ...made, kind: conflict.kind }); await idbDeleteMany(STORE_OFFLINE_NOTES, [fileId]); }
     setPendingConflicts((old) => old.filter((c) => c.fileId !== fileId)); refreshDirty();
   }, [pendingConflicts, token, refreshCacheAfterSave, sync, refreshDirty]);
   useEffect(() => { if (isOnline && dirtyRows.length) reconcileNow().catch(() => {}); }, [isOnline]); // intentionally sync on reconnect
