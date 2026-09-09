@@ -48,6 +48,38 @@
   font-size: 12px;
   padding: 3px 4px;
 }
+.vector-color-custom,
+.vector-canvas-bg {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  overflow: hidden;
+  display: inline-block;
+}
+.vector-color-custom input,
+.vector-canvas-bg input {
+  position: absolute;
+  inset: -4px;
+  width: calc(100% + 8px);
+  height: calc(100% + 8px);
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  opacity: 0;
+}
+.vector-canvas-bg {
+  border-radius: var(--radius-sm);
+  width: 20px;
+  height: 20px;
+}
+.vector-canvas-bg-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-left: 4px;
+}
 .vector-zoom-pct {
   min-width: 48px;
   text-align: center;
@@ -93,11 +125,41 @@
 .vector-edge.selected {
   filter: drop-shadow(0 0 0 1px var(--accent)) brightness(1.15);
 }
+.vector-edge.snap-target {
+  filter: drop-shadow(0 0 0 1.5px var(--accent));
+}
 .vector-preview-line {
   stroke: var(--accent);
   stroke-width: 1.5;
   stroke-dasharray: 4 3;
   pointer-events: none;
+}
+.vector-page {
+  pointer-events: none;
+}
+.vector-fill {
+  pointer-events: none; /* clicks pass through to whatever tool is active underneath, by default */
+}
+.vector-fill.pickable {
+  pointer-events: auto; /* only the eyedropper tool needs to actually hit-test a fill */
+  cursor: copy;
+}
+.vector-snap-guide {
+  stroke: var(--accent);
+  stroke-width: 1;
+  stroke-dasharray: 5 4;
+  opacity: 0.7;
+  pointer-events: none;
+}
+.vector-snap-marker {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  pointer-events: none;
+}
+.vector-selection-move-hit {
+  fill: transparent;
+  cursor: move;
 }
 
 .vector-vertex {
@@ -158,10 +220,24 @@
   top: 8px;
   right: 8px;
   display: flex;
+  align-items: center;
   gap: 4px;
   background: var(--bg-0);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 4px;
   z-index: 5;
+}
+.vector-selection-toolbar .text-action {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-normal);
+  font-size: 11px;
+  padding: 4px 8px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.vector-selection-toolbar .text-action:hover {
+  background: var(--bg-2);
 }

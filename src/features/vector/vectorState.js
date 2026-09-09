@@ -1,4 +1,4 @@
-import { findMinimalFaceContainingPoint, incidentEdgeIds, buildVertexAdjacency } from './vectorTopology.js';
+import { boundaryReferencesOnly, buildVertexAdjacency, findFillBoundary, incidentEdgeIds, resolveBoundaryPolygon } from './vectorTopology.js';
 
 // ============================================================================
 // VECTOR ART DOCUMENT — a strict node/edge graph, stored as JSON inside a
@@ -9,22 +9,24 @@ import { findMinimalFaceContainingPoint, incidentEdgeIds, buildVertexAdjacency }
 //     canvas: { width, height, background },
 //     vertices: [ { id, x, y } ],
 //     edges:    [ { id, v1, v2, style: { color, thickness } } ],
-//     fills:    [ { id, seed: {x,y}, color } ] }
+//     fills:    [ { id, boundary: [...], color } ],
+//     groups:   [ { id, vertexIds: [...] } ] }
 //
 // Design notes (see also the rewritten build spec this ships against):
 //  - Edges are undirected and ALWAYS carry their own explicit style — there
 //    is no vertex style and no inheritance, so there's never a conflict to
 //    resolve when an edge's two endpoints belong to differently-styled
 //    edges elsewhere in the graph.
-//  - `fills` stores the user's actual choice (a seed point + a color) — that
-//    part is authoritative, exactly like a vertex position. What's NOT
-//    stored is which vertex/edge cycle currently bounds that seed point;
-//    that's recomputed on every render/export via
-//    findMinimalFaceContainingPoint (vectorTopology.js), consistent with the
-//    spec's "Fill Cycle list is derived, not authoritative" rule. If an edit
-//    leaves a fill's seed point no longer enclosed by anything, it simply
-//    stops rendering rather than being force-deleted — the user can always
-//    re-fill.
+//  - A fill's `boundary` is a STRUCTURAL reference, not a snapshot of
+//    coordinates: each entry is either a real vertex id, or (at a fill-only
+//    crossing — see vectorTopology.js's planarizeForFill) the two real edge
+//    ids that cross there. resolveBoundaryPolygon turns that back into
+//    concrete points from wherever those vertices/edges are RIGHT NOW, so a
+//    fill tracks the shape as it's edited instead of a fixed snapshot going
+//    stale the moment something moves. If a boundary's vertex/edge no
+//    longer exists (deleted) or a crossing stops crossing, the fill is
+//    pruned outright (pruneFills, called after every delete) rather than
+//    silently failing to render.
 //  - No multi-edges and no self-loops: addEdge is a no-op (returns the
 //    state unchanged, `ok:false`) if the two vertices already share an edge
 //    or are the same vertex.
@@ -39,13 +41,14 @@ const DEFAULT_STYLE = { color: VECTOR_COLORS[6], thickness: 2 };
 const VECTOR_ZOOM_MIN = 0.1;
 const VECTOR_ZOOM_MAX = 6;
 
-// Screen-px thresholds for snapping/hit-testing — divided by zoom before use
-// so they stay visually constant regardless of zoom level (same convention
-// CanvasView uses for CANVAS_CONNECT_NEAR_PX).
+// Screen-px thresholds for snapping/hit-testing — the view divides these by
+// the current zoom before passing them to snapCandidate, so the hit area
+// stays visually constant on screen regardless of zoom level (same
+// convention CanvasView uses for CANVAS_CONNECT_NEAR_PX).
 const VERTEX_SNAP_PX = 14;
 const VERTEX_HIT_PX = 10;
-const EDGE_SNAP_PX = 8;
-const AXIS_SNAP_PX = 6;
+const EDGE_SNAP_PX = 10;
+const AXIS_SNAP_PX = 7;
 
 // World-px a pulled edge endpoint must travel from its shared vertex before
 // Graph Severing (Tear-Away Disconnect) actually detaches it — below this
@@ -66,6 +69,18 @@ function makeDefaultVectorState(title) {
 }
 
 
+function parseFillBoundary(raw, vertexIds, edgeIds) {
+  if (!Array.isArray(raw) || raw.length < 3) return null;
+  const boundary = [];
+  for (const comp of raw) {
+    if (!comp) return null;
+    if (comp.type === 'vertex' && vertexIds.has(comp.id)) boundary.push({ type: 'vertex', id: comp.id });
+    else if (comp.type === 'crossing' && edgeIds.has(comp.edgeA) && edgeIds.has(comp.edgeB)) boundary.push({ type: 'crossing', edgeA: comp.edgeA, edgeB: comp.edgeB });
+    else return null;
+  }
+  return boundary;
+}
+
 // Tolerant parse: malformed/foreign JSON yields a fresh empty document
 // rather than crashing the pane, same convention as parseCanvasContent.
 function parseVectorContent(content) {
@@ -79,7 +94,12 @@ function parseVectorContent(content) {
           .filter((e) => e && e.id && vertexIds.has(e.v1) && vertexIds.has(e.v2) && e.v1 !== e.v2)
           .map((e) => ({ id: e.id, v1: e.v1, v2: e.v2, style: { color: e.style?.color || DEFAULT_STYLE.color, thickness: Number(e.style?.thickness) || DEFAULT_STYLE.thickness } }))
       : [];
-    const fills = Array.isArray(p?.fills) ? p.fills.filter((f) => f && f.id && f.seed && f.color).map((f) => ({ id: f.id, seed: { x: Number(f.seed.x) || 0, y: Number(f.seed.y) || 0 }, color: f.color })) : [];
+    const edgeIds = new Set(edges.map((e) => e.id));
+    const fills = Array.isArray(p?.fills)
+      ? p.fills
+          .map((f) => (f && f.id && f.color ? { id: f.id, color: f.color, boundary: parseFillBoundary(f.boundary, vertexIds, edgeIds) } : null))
+          .filter((f) => f && f.boundary)
+      : [];
     const groups = Array.isArray(p?.groups)
       ? p.groups.filter((g) => g && g.id && Array.isArray(g.vertexIds)).map((g) => ({ id: g.id, vertexIds: g.vertexIds.filter((id) => vertexIds.has(id)) })).filter((g) => g.vertexIds.length > 1)
       : [];
@@ -134,7 +154,9 @@ function moveVertex(state, vertexId, x, y) {
 }
 
 // Bulk move for marquee-drag / global transform — `deltas` is
-// Map(vertexId -> {x, y}) of ABSOLUTE new positions.
+// Map(vertexId -> {x, y}) of ABSOLUTE new positions. Fills aren't touched
+// here: their boundary is structural (vertex/edge ids), so they follow the
+// move automatically the next time they're resolved for rendering.
 function moveVertices(state, deltas) {
   if (!deltas.size) return state;
   return { ...state, vertices: state.vertices.map((v) => (deltas.has(v.id) ? { ...v, ...deltas.get(v.id) } : v)) };
@@ -142,6 +164,10 @@ function moveVertices(state, deltas) {
 
 function setEdgeStyle(state, edgeId, style) {
   return { ...state, edges: state.edges.map((e) => (e.id === edgeId ? { ...e, style: { ...e.style, ...style } } : e)) };
+}
+
+function setCanvasBackground(state, background) {
+  return { ...state, canvas: { ...state.canvas, background } };
 }
 
 // Vertex Insertion (Subdivision): E(v1,v2) -> V_new + E1(v1,V_new) +
@@ -160,6 +186,19 @@ function subdivideEdge(state, edgeId, point) {
   };
 }
 
+// Edge Mid-Point Insertion, for an EXISTING vertex being dropped onto an
+// edge (as opposed to subdivideEdge, which creates a brand-new one): the
+// dragged vertex itself becomes the subdivision point, binding it into the
+// topology while keeping whatever other edges it already had. No-op if the
+// vertex is already one of the edge's own endpoints.
+function bindVertexOntoEdge(state, edgeId, vertexId) {
+  const edge = state.edges.find((e) => e.id === edgeId);
+  if (!edge || edge.v1 === vertexId || edge.v2 === vertexId) return state;
+  const e1 = { id: `e-${cryptoRandomId()}`, v1: edge.v1, v2: vertexId, style: { ...edge.style } };
+  const e2 = { id: `e-${cryptoRandomId()}`, v1: vertexId, v2: edge.v2, style: { ...edge.style } };
+  return { ...state, edges: [...state.edges.filter((e) => e.id !== edgeId), e1, e2] };
+}
+
 // Graph Severing (Tear-Away Disconnect), scoped to just the pulled edge:
 // replaces ONE endpoint of ONE edge with a brand-new vertex at `point`,
 // leaving every other edge at the original vertex fully intact.
@@ -176,6 +215,16 @@ function severEdgeEndpoint(state, edgeId, vertexIdBeingPulled, point) {
   };
 }
 
+// Drops any fill whose boundary depends on a vertex/edge id no longer
+// present — called after every delete so a fill never silently orphans
+// itself against a shape that no longer exists.
+function pruneFills(state) {
+  const vertexIds = new Set(state.vertices.map((v) => v.id));
+  const edgeIds = new Set(state.edges.map((e) => e.id));
+  const fills = state.fills.filter((f) => boundaryReferencesOnly(f.boundary, vertexIds, edgeIds));
+  return fills.length === state.fills.length ? state : { ...state, fills };
+}
+
 // Deletes vertices (and every edge/fill that depended on them). Edges are
 // found via the adjacency index, not a full-array scan, so this stays
 // O(degree) per removed vertex rather than O(E).
@@ -187,9 +236,12 @@ function deleteVertices(state, vertexIds) {
   const vertices = state.vertices.filter((v) => !vertexIds.has(v.id));
   const edges = state.edges.filter((e) => !doomedEdgeIds.has(e.id));
   const groups = state.groups.map((g) => ({ ...g, vertexIds: g.vertexIds.filter((id) => !vertexIds.has(id)) })).filter((g) => g.vertexIds.length > 1);
-  // Fills whose seed no longer resolves to any face just stop rendering
-  // (see the schema note above) rather than being pruned here.
-  return { ...state, vertices, edges, groups };
+  return pruneFills({ ...state, vertices, edges, groups });
+}
+
+function deleteEdges(state, edgeIds) {
+  if (!edgeIds.size) return state;
+  return pruneFills({ ...state, edges: state.edges.filter((e) => !edgeIds.has(e.id)) });
 }
 
 // Subgraph Grouping: a vertex belongs to at most one group, so joining a
@@ -217,20 +269,27 @@ function groupVertexIds(state, groupId) {
   return state.groups.find((g) => g.id === groupId)?.vertexIds || [];
 }
 
-function deleteEdges(state, edgeIds) {
-  if (!edgeIds.size) return state;
-  return { ...state, edges: state.edges.filter((e) => !edgeIds.has(e.id)) };
+// True only when `vertexIds` is exactly one whole group's membership (no
+// more, no less) — used to decide whether the selection toolbar should
+// offer "Group" or "Ungroup".
+function selectionIsExactlyOneGroup(state, vertexIds) {
+  if (vertexIds.size < 2) return false;
+  return state.groups.some((g) => g.vertexIds.length === vertexIds.size && g.vertexIds.every((id) => vertexIds.has(id)));
 }
 
 // Vector Flood Fill: resolves the minimal enclosing face under `point` and
-// records a fill there, replacing any existing fill that resolves to the
-// same face (so re-clicking a filled region just changes its color instead
-// of stacking a duplicate fill entry).
+// records a fill there. Also resolves every EXISTING fill's current polygon
+// and removes any that already covers this same point first — so clicking
+// an already-filled region with a new color replaces it instead of
+// stacking a duplicate fill underneath.
 function addFillAt(state, point, color) {
-  const face = findMinimalFaceContainingPoint(state.vertices, state.edges, point);
-  if (!face) return { state, ok: false };
-  const fills = state.fills.filter((f) => !isPointInPolygon(f.seed, face.points));
-  const fill = { id: `f-${cryptoRandomId()}`, seed: point, color };
+  const boundary = findFillBoundary(state.vertices, state.edges, point);
+  if (!boundary) return { state, ok: false };
+  const fills = state.fills.filter((f) => {
+    const poly = resolveBoundaryPolygon(state.vertices, state.edges, f.boundary);
+    return !poly || !isPointInPolygon(point, poly);
+  });
+  const fill = { id: `f-${cryptoRandomId()}`, boundary, color };
   return { state: { ...state, fills: [...fills, fill] }, ok: true };
 }
 
@@ -266,9 +325,9 @@ function compileVectorSvg(state) {
   const sortedEdges = [...state.edges].sort((a, b) => a.style.thickness - b.style.thickness);
   const fillsMarkup = state.fills
     .map((f) => {
-      const face = findMinimalFaceContainingPoint(state.vertices, state.edges, f.seed);
-      if (!face) return '';
-      const pts = face.points.map((p) => `${p.x},${p.y}`).join(' ');
+      const poly = resolveBoundaryPolygon(state.vertices, state.edges, f.boundary);
+      if (!poly) return '';
+      const pts = poly.map((p) => `${p.x},${p.y}`).join(' ');
       return `  <polygon points="${pts}" fill="${f.color}" stroke="none" />`;
     })
     .filter(Boolean)
@@ -306,14 +365,18 @@ export {
   moveVertex,
   moveVertices,
   setEdgeStyle,
+  setCanvasBackground,
   subdivideEdge,
+  bindVertexOntoEdge,
   severEdgeEndpoint,
   deleteVertices,
   deleteEdges,
   addFillAt,
+  isPointInPolygon,
   groupVertices,
   ungroupVertices,
   groupIdForVertex,
   groupVertexIds,
+  selectionIsExactlyOneGroup,
   compileVectorSvg
 };

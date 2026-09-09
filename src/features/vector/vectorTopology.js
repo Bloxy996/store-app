@@ -219,13 +219,15 @@ function planarizeForFill(vertices, edges) {
   const crossingsByEdge = new Map(edges.map((e) => [e.id, []]));
   const vmap = new Map(vertices.map((v) => [v.id, v]));
   const syntheticPoints = []; // {x,y} deduped list; index used as a stable synthetic id
+  const syntheticSourceEdges = []; // parallel array: the [edgeIdA, edgeIdB] whose crossing produced syntheticPoints[i]
 
-  const findOrAddSynthetic = (pt) => {
+  const findOrAddSynthetic = (pt, edgeIdA, edgeIdB) => {
     const eps = 0.5;
     for (let i = 0; i < syntheticPoints.length; i++) {
       if (Math.abs(syntheticPoints[i].x - pt.x) < eps && Math.abs(syntheticPoints[i].y - pt.y) < eps) return i;
     }
     syntheticPoints.push({ x: pt.x, y: pt.y });
+    syntheticSourceEdges.push([edgeIdA, edgeIdB]);
     return syntheticPoints.length - 1;
   };
 
@@ -237,18 +239,25 @@ function planarizeForFill(vertices, edges) {
       if (!a1 || !a2 || !b1 || !b2) continue;
       const hit = segmentIntersection(a1, a2, b1, b2);
       if (!hit) continue;
-      const synId = findOrAddSynthetic(hit);
+      const synId = findOrAddSynthetic(hit, ea.id, eb.id);
       crossingsByEdge.get(ea.id).push({ t: hit.t, synId });
       crossingsByEdge.get(eb.id).push({ t: hit.u, synId });
     }
   }
 
-  if (syntheticPoints.length === 0) return { vertices, edges }; // common case — nothing to planarize, reuse the real arrays
+  // vertexSourceEdges maps every synthetic vertex id back to the two real
+  // edge ids that cross there, so a fill boundary that passes through it can
+  // be re-resolved later purely from live edge endpoints (see
+  // resolveBoundaryPolygon) instead of a fixed point that goes stale the
+  // moment either crossing edge moves.
+  const vertexSourceEdges = new Map();
+  if (syntheticPoints.length === 0) return { vertices, edges, vertexSourceEdges }; // common case — nothing to planarize, reuse the real arrays
 
   const pVertices = vertices.slice();
   const synVertexIds = syntheticPoints.map((pt, i) => {
     const id = `__fillsyn_${i}`;
     pVertices.push({ id, x: pt.x, y: pt.y });
+    vertexSourceEdges.set(id, syntheticSourceEdges[i]);
     return id;
   });
 
@@ -270,18 +279,20 @@ function planarizeForFill(vertices, edges) {
     if (prevId !== e.v2) pEdges.push({ id: `__fillsplit_${n++}`, v1: prevId, v2: e.v2 });
   }
 
-  return { vertices: pVertices, edges: pEdges };
+  return { vertices: pVertices, edges: pEdges, vertexSourceEdges };
 }
 
-// Given a click point, find the smallest traced face (by area) that
-// contains it. Because the "outer"/unbounded face of a shape traces as a
-// polygon over the same boundary vertices as its innermost sibling face
-// (just the reverse winding), it always has an area >= any genuinely
-// bounded face that contains the same point, so picking the minimum-area
-// containing face naturally selects the real enclosed region without this
-// function ever having to classify which traced face is the outer one.
-function findMinimalFaceContainingPoint(vertices, edges, point) {
-  const { vertices: pv, edges: pe } = planarizeForFill(vertices, edges);
+// Given a click point, finds the smallest traced face (by area) that
+// contains it — see the module comment on traceFaces for why "smallest
+// containing" needs no outer/inner classification — and converts its
+// boundary into a STRUCTURAL spec: a list of components each referencing
+// real vertex ids (or, at a fill-only crossing, the two real edge ids that
+// cross there) rather than a fixed set of coordinates. That's what makes a
+// fill survive vertices moving: resolveBoundaryPolygon (below) re-derives
+// the actual points from wherever those vertices/edges currently are,
+// every time it's called, instead of a snapshot taken at fill-time.
+function findFillBoundary(vertices, edges, point) {
+  const { vertices: pv, edges: pe, vertexSourceEdges } = planarizeForFill(vertices, edges);
   const faces = traceFaces(pv, pe);
   let best = null;
   let bestArea = Infinity;
@@ -293,7 +304,47 @@ function findMinimalFaceContainingPoint(vertices, edges, point) {
       best = f;
     }
   }
-  return best; // { vertexIds, points } or null
+  if (!best) return null;
+  const boundary = best.vertexIds.map((id) => {
+    const crossing = vertexSourceEdges.get(id);
+    return crossing ? { type: 'crossing', edgeA: crossing[0], edgeB: crossing[1] } : { type: 'vertex', id };
+  });
+  return boundary;
+}
+
+// The inverse of findFillBoundary: turns a structural boundary spec back
+// into concrete {x,y} points using the CURRENT vertices/edges. Returns null
+// if anything the boundary depends on no longer exists (a referenced vertex
+// was deleted) or no longer crosses (the two edges at a 'crossing' entry no
+// longer intersect) — callers use a null result to drop the fill.
+function resolveBoundaryPolygon(vertices, edges, boundary) {
+  const vmap = new Map(vertices.map((v) => [v.id, v]));
+  const emap = new Map(edges.map((e) => [e.id, e]));
+  const points = [];
+  for (const comp of boundary) {
+    if (comp.type === 'vertex') {
+      const v = vmap.get(comp.id);
+      if (!v) return null;
+      points.push({ x: v.x, y: v.y });
+    } else {
+      const ea = emap.get(comp.edgeA);
+      const eb = emap.get(comp.edgeB);
+      if (!ea || !eb) return null;
+      const a1 = vmap.get(ea.v1), a2 = vmap.get(ea.v2), b1 = vmap.get(eb.v1), b2 = vmap.get(eb.v2);
+      if (!a1 || !a2 || !b1 || !b2) return null;
+      const hit = segmentIntersection(a1, a2, b1, b2);
+      if (!hit) return null; // the two edges no longer cross — this fill's boundary no longer exists
+      points.push({ x: hit.x, y: hit.y });
+    }
+  }
+  return points;
+}
+
+// True if every vertex/edge a boundary depends on still exists in the given
+// sets — used to prune fills after a delete without paying for a full
+// segment-intersection re-check (deletion invalidates by ID, not geometry).
+function boundaryReferencesOnly(boundary, vertexIdSet, edgeIdSet) {
+  return boundary.every((comp) => (comp.type === 'vertex' ? vertexIdSet.has(comp.id) : edgeIdSet.has(comp.edgeA) && edgeIdSet.has(comp.edgeB)));
 }
 
 // ---------------------------------------------------------------------------
@@ -336,8 +387,11 @@ function snapCandidate(vertices, edges, rawPoint, opts) {
   if (bestEdge) return { point: bestEdgePoint, snappedEdgeId: bestEdge.id, snappedEdgeT: bestEdgeT };
 
   // Axis/alignment snap: pull the raw point onto a nearby vertex's x or y
-  // if it's close on just that one axis.
+  // if it's close on just that one axis. Tracks which vertex produced each
+  // axis's snap (axisSnapVertexX/Y) purely so the UI can draw a guideline
+  // through it — irrelevant to the resulting point itself.
   let snappedX = rawPoint.x, snappedY = rawPoint.y, axisSnapped = false;
+  let axisSnapVertexX = null, axisSnapVertexY = null;
   let bestDx = axisPx, bestDy = axisPx;
   for (const v of vertices) {
     if (v.id === excludeVertexId) continue;
@@ -347,14 +401,16 @@ function snapCandidate(vertices, edges, rawPoint, opts) {
       bestDx = dx;
       snappedX = v.x;
       axisSnapped = true;
+      axisSnapVertexX = v.id;
     }
     if (dy < bestDy) {
       bestDy = dy;
       snappedY = v.y;
       axisSnapped = true;
+      axisSnapVertexY = v.id;
     }
   }
-  return { point: { x: snappedX, y: snappedY }, axisSnapped };
+  return { point: { x: snappedX, y: snappedY }, axisSnapped, axisSnapVertexX, axisSnapVertexY };
 }
 
 export {
@@ -367,6 +423,8 @@ export {
   incidentEdgeIds,
   traceFaces,
   planarizeForFill,
-  findMinimalFaceContainingPoint,
+  findFillBoundary,
+  resolveBoundaryPolygon,
+  boundaryReferencesOnly,
   snapCandidate
 };

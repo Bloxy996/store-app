@@ -9,11 +9,11 @@ import {
   SEVER_THRESHOLD_PX,
   VECTOR_ZOOM_MAX,
   VECTOR_ZOOM_MIN,
-  VERTEX_HIT_PX,
   VERTEX_SNAP_PX,
   addEdge,
   addFillAt,
   addVertex,
+  bindVertexOntoEdge,
   compileVectorSvg,
   deleteEdges,
   deleteVertices,
@@ -22,17 +22,38 @@ import {
   groupVertices,
   moveVertices,
   parseVectorContent,
+  selectionIsExactlyOneGroup,
   serializeVectorState,
-  severEdgeEndpoint,
+  setCanvasBackground,
   setEdgeStyle,
+  severEdgeEndpoint,
   subdivideEdge,
   ungroupVertices
 } from './vectorState.js';
-import { SpatialGrid, buildVertexAdjacency, dist, findMinimalFaceContainingPoint, snapCandidate } from './vectorTopology.js';
+import { SpatialGrid, buildVertexAdjacency, closestPointOnSegment, dist, findFillBoundary, resolveBoundaryPolygon, snapCandidate } from './vectorTopology.js';
 import { clamp } from '../../lib/mathUtils.js';
 
 const MOVE_THRESHOLD = 3; // world px before a pointerdown counts as a drag, not a click — same convention as CanvasView
 
+// A big multiple of the guideline threshold — just long enough that an
+// alignment guide reads clearly on screen without needing the real canvas
+// bounds plumbed through every caller.
+const GUIDE_LINE_SPAN = 4000;
+
+// Snap thresholds are authored in screen px (vectorState.js) but every
+// distance in this editor's geometry is in WORLD units, so every threshold
+// gets divided by the current zoom right before use — otherwise "14px" of
+// slack would mean 14 world units regardless of zoom, i.e. a hit target
+// that's way too generous zoomed in and way too tight zoomed out.
+function snapOpts(zoom, grid, axisSnapEnabled, opts = {}) {
+  return {
+    grid,
+    vertexPx: (opts.vertexPx ?? VERTEX_SNAP_PX) / zoom,
+    edgePx: opts.allowSubdivide === false ? -1 : EDGE_SNAP_PX / zoom,
+    axisPx: axisSnapEnabled && opts.allowAxisSnap !== false ? AXIS_SNAP_PX / zoom : -1,
+    excludeVertexId: opts.excludeVertexId
+  };
+}
 
 // Resolves a raw click point to a usable vertex id, applying the editor's
 // snap priority (vertex > edge-subdivide > axis) and creating whatever the
@@ -40,21 +61,15 @@ const MOVE_THRESHOLD = 3; // world px before a pointerdown counts as a drag, not
 // without committing it, so callers can fold a whole gesture (e.g. a
 // polyline click that both places a point AND connects it to the previous
 // one) into a single undo step.
-function resolvePlacement(doc, grid, rawPoint, opts = {}) {
-  const snap = snapCandidate(doc.vertices, doc.edges, rawPoint, {
-    grid,
-    vertexPx: opts.vertexPx ?? VERTEX_SNAP_PX,
-    edgePx: opts.allowSubdivide === false ? -1 : EDGE_SNAP_PX,
-    axisPx: opts.allowAxisSnap === false ? -1 : AXIS_SNAP_PX,
-    excludeVertexId: opts.excludeVertexId
-  });
-  if (snap.snappedVertexId) return { nextDoc: doc, vertexId: snap.snappedVertexId };
+function resolvePlacement(doc, grid, rawPoint, zoom, axisSnapEnabled, opts = {}) {
+  const snap = snapCandidate(doc.vertices, doc.edges, rawPoint, snapOpts(zoom, grid, axisSnapEnabled, opts));
+  if (snap.snappedVertexId) return { nextDoc: doc, vertexId: snap.snappedVertexId, snap };
   if (snap.snappedEdgeId) {
     const nextDoc = subdivideEdge(doc, snap.snappedEdgeId, snap.point);
-    return { nextDoc, vertexId: nextDoc._newVertexId };
+    return { nextDoc, vertexId: nextDoc._newVertexId, snap };
   }
   const nextDoc = addVertex(doc, snap.point.x, snap.point.y);
-  return { nextDoc, vertexId: nextDoc._newVertexId };
+  return { nextDoc, vertexId: nextDoc._newVertexId, snap };
 }
 
 function bboxOf(vertices, ids) {
@@ -62,6 +77,25 @@ function bboxOf(vertices, ids) {
   if (!pts.length) return null;
   const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
   return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+}
+
+// Corner and edge-midpoint transform handles for a selection bounding box.
+// Edge-midpoint handles are axis-locked (top/bottom scale height only,
+// left/right scale width only) — `anchor` is always the OPPOSITE side/
+// corner, since that's what stays fixed while dragging.
+function handleConfigsFor(box) {
+  const midX = (box.minX + box.maxX) / 2;
+  const midY = (box.minY + box.maxY) / 2;
+  return [
+    { key: 'nw', x: box.minX, y: box.minY, anchor: { x: box.maxX, y: box.maxY }, axisLock: null, cursor: 'nwse-resize' },
+    { key: 'ne', x: box.maxX, y: box.minY, anchor: { x: box.minX, y: box.maxY }, axisLock: null, cursor: 'nesw-resize' },
+    { key: 'sw', x: box.minX, y: box.maxY, anchor: { x: box.maxX, y: box.minY }, axisLock: null, cursor: 'nesw-resize' },
+    { key: 'se', x: box.maxX, y: box.maxY, anchor: { x: box.minX, y: box.minY }, axisLock: null, cursor: 'nwse-resize' },
+    { key: 'n', x: midX, y: box.minY, anchor: { x: box.minX, y: box.maxY }, axisLock: 'y', cursor: 'ns-resize' },
+    { key: 's', x: midX, y: box.maxY, anchor: { x: box.minX, y: box.minY }, axisLock: 'y', cursor: 'ns-resize' },
+    { key: 'w', x: box.minX, y: midY, anchor: { x: box.maxX, y: box.minY }, axisLock: 'x', cursor: 'ew-resize' },
+    { key: 'e', x: box.maxX, y: midY, anchor: { x: box.minX, y: box.minY }, axisLock: 'x', cursor: 'ew-resize' }
+  ];
 }
 
 
@@ -79,6 +113,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
   const [liveOverrides, setLiveOverrides] = useState(null);
   const [marquee, setMarquee] = useState(null);
   const [pointerWorld, setPointerWorld] = useState(null);
+  const [snapPreview, setSnapPreview] = useState(null);
   const [spaceDown, setSpaceDown] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
   const [historyTick, setHistoryTick] = useState(0);
@@ -146,6 +181,18 @@ function VectorEditorView({ file, content, onChange, loading }) {
 
   // Edges sorted so heavier strokes draw last (on top) — Dynamic Z-Index.
   const sortedEdges = useMemo(() => [...doc.edges].sort((a, b) => a.style.thickness - b.style.thickness), [doc.edges]);
+
+  // Fills resolve against verticesForRender (not doc.vertices), so a fill
+  // visibly tracks its shape live while a drag is in progress, not just
+  // after it's dropped — this is also what keeps a fill from "breaking"
+  // (going stale) as vertices move, since it's recomputed from current
+  // positions on every render rather than a fixed point captured at
+  // fill-time. A fill whose boundary depends on a deleted vertex/edge
+  // resolves to null and is skipped — pruneFills (vectorState.js) removes
+  // those from the document outright the next time the graph is edited.
+  const resolvedFills = useMemo(() => {
+    return doc.fills.map((f) => ({ fill: f, points: resolveBoundaryPolygon(verticesForRender, doc.edges, f.boundary) })).filter((x) => x.points);
+  }, [doc.fills, doc.edges, verticesForRender]);
 
   const scheduleLiveOverrides = useCallback((map) => {
     pendingOverridesRef.current = map;
@@ -274,7 +321,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
     containerRef.current.setPointerCapture(e.pointerId);
     const world = screenToWorld(e.clientX, e.clientY);
 
-    if (tool === 'eyedropper') return; // eyedropper only samples edges — vertices carry no style
+    if (tool === 'eyedropper') return; // eyedropper only samples edges/fills — vertices carry no style
 
     if (tool === 'vertex') {
       // Drag FROM an existing vertex spawns a new connected vertex at the drop point.
@@ -342,7 +389,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
 
     const ids = nextSelection.size ? nextSelection : new Set([vertexId]);
     const startPositions = new Map(Array.from(ids).map((id) => [id, vertexById.get(id)]));
-    dragRef.current = { mode: 'move', ids, startPositions, startWorld: world, moved: false };
+    dragRef.current = { mode: 'move', ids, startPositions, startWorld: world, moved: false, singleId: ids.size === 1 ? vertexId : null };
   };
 
   const onVertexDoubleClick = (e, vertexId) => {
@@ -354,6 +401,11 @@ function VectorEditorView({ file, content, onChange, loading }) {
     }
   };
 
+  // Clicking an edge directly with the Vertex or Polyline tool subdivides
+  // it right at the clicked point — this is the "click along an edge"
+  // Vertex Insertion path from an edge that's thin enough to land on
+  // exactly (the background handler below covers the wider snap-radius
+  // case, near-but-not-on an edge).
   const onEdgePointerDown = (e, edgeId) => {
     e.stopPropagation();
     if (spaceDown) {
@@ -362,7 +414,30 @@ function VectorEditorView({ file, content, onChange, loading }) {
     }
     if (tool === 'eyedropper') {
       const edge = doc.edges.find((ed) => ed.id === edgeId);
-      if (edge) setActiveStyle({ ...edge.style });
+      if (edge) setActiveStyle((s) => ({ ...s, ...edge.style }));
+      return;
+    }
+    if (tool === 'vertex' || tool === 'polyline') {
+      const edge = doc.edges.find((ed) => ed.id === edgeId);
+      const a = vertexById.get(edge?.v1);
+      const b = vertexById.get(edge?.v2);
+      if (!edge || !a || !b) return;
+      const world = screenToWorld(e.clientX, e.clientY);
+      const { point } = closestPointOnSegment(world, a, b);
+      const next = subdivideEdge(doc, edgeId, point);
+      const newVid = next._newVertexId;
+      if (tool === 'vertex') {
+        commitState(next);
+      } else {
+        let working = next;
+        if (polylineChain.length) {
+          const last = polylineChain[polylineChain.length - 1];
+          const { state: withEdge, ok } = addEdge(working, last, newVid, activeStyle);
+          if (ok) working = withEdge;
+        }
+        commitState(working);
+        setPolylineChain((chain) => [...chain, newVid]);
+      }
       return;
     }
     if (tool === 'select') {
@@ -373,6 +448,28 @@ function VectorEditorView({ file, content, onChange, loading }) {
       });
       setSelectedVertexIds(new Set());
     }
+  };
+
+  const onFillPointerDown = (e, fill) => {
+    e.stopPropagation();
+    if (tool === 'eyedropper') {
+      setActiveStyle((s) => ({ ...s, color: fill.color })); // fills have no thickness — eyedropper on a fill only carries color
+    }
+  };
+
+  // Selection bounding-box body: dragging it anywhere (not just by grabbing
+  // an individual vertex dot) moves the whole selection.
+  const onSelectionBoxPointerDown = (e) => {
+    e.stopPropagation();
+    if (spaceDown) {
+      beginPan(e);
+      return;
+    }
+    containerRef.current.setPointerCapture(e.pointerId);
+    const world = screenToWorld(e.clientX, e.clientY);
+    const ids = selectedVertexIds;
+    const startPositions = new Map(Array.from(ids).map((id) => [id, vertexById.get(id)]));
+    dragRef.current = { mode: 'move', ids, startPositions, startWorld: world, moved: false, singleId: ids.size === 1 ? Array.from(ids)[0] : null };
   };
 
   const onBackgroundPointerDown = (e) => {
@@ -394,7 +491,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
       return;
     }
     if (tool === 'polyline') {
-      const { nextDoc, vertexId } = resolvePlacement(doc, grid, world);
+      const { nextDoc, vertexId } = resolvePlacement(doc, grid, world, viewport.zoom, axisSnapEnabled);
       if (nextDoc !== doc) commitState(nextDoc);
       if (polylineChain.length) {
         const last = polylineChain[polylineChain.length - 1];
@@ -423,7 +520,10 @@ function VectorEditorView({ file, content, onChange, loading }) {
     const world = screenToWorld(e.clientX, e.clientY);
     setPointerWorld(world);
     const drag = dragRef.current;
-    if (!drag) return;
+    if (!drag) {
+      setSnapPreview(null);
+      return;
+    }
 
     if (drag.mode === 'pan') {
       setViewport((v) => ({ ...v, x: drag.startViewport.x + (e.clientX - drag.startClient.x), y: drag.startViewport.y + (e.clientY - drag.startClient.y) }));
@@ -437,21 +537,37 @@ function VectorEditorView({ file, content, onChange, loading }) {
 
     if (drag.mode === 'place-vertex') {
       if (dist(drag.startWorld, world) > MOVE_THRESHOLD / viewport.zoom) drag.moved = true;
+      const snap = snapCandidate(doc.vertices, doc.edges, world, snapOpts(viewport.zoom, grid, axisSnapEnabled));
+      setSnapPreview(snap);
       return;
     }
 
     if (drag.mode === 'move') {
       if (dist(drag.startWorld, world) > MOVE_THRESHOLD / viewport.zoom) drag.moved = true;
-      const dx = world.x - drag.startWorld.x;
-      const dy = world.y - drag.startWorld.y;
-      const map = new Map();
-      for (const [id, pos] of drag.startPositions) map.set(id, { x: pos.x + dx, y: pos.y + dy });
-      scheduleLiveOverrides(map);
+      if (drag.singleId) {
+        // Single-vertex drags snap live: to another vertex's exact position
+        // (visual alignment, not a merge — both stay distinct), onto an
+        // edge (bound on drop — see below), or to an axis. Group drags
+        // intentionally skip target-snapping and just move by a uniform
+        // delta, per "maintaining relative distances".
+        const snap = snapCandidate(doc.vertices, doc.edges, world, snapOpts(viewport.zoom, grid, axisSnapEnabled, { excludeVertexId: drag.singleId }));
+        setSnapPreview(snap);
+        scheduleLiveOverrides(new Map([[drag.singleId, snap.point]]));
+      } else {
+        setSnapPreview(null);
+        const dx = world.x - drag.startWorld.x;
+        const dy = world.y - drag.startWorld.y;
+        const map = new Map();
+        for (const [id, pos] of drag.startPositions) map.set(id, { x: pos.x + dx, y: pos.y + dy });
+        scheduleLiveOverrides(map);
+      }
       return;
     }
 
     if (drag.mode === 'spawn-connected') {
       if (dist(drag.startWorld, world) > MOVE_THRESHOLD / viewport.zoom) drag.moved = true;
+      const snap = snapCandidate(doc.vertices, doc.edges, world, snapOpts(viewport.zoom, grid, axisSnapEnabled, { excludeVertexId: drag.fromVertexId }));
+      setSnapPreview(snap);
       return; // preview line follows pointerWorld automatically; the actual vertex/edge is created on pointerup
     }
 
@@ -474,14 +590,14 @@ function VectorEditorView({ file, content, onChange, loading }) {
         }
         const next = severEdgeEndpoint(doc, best.edgeId, drag.vertexId, world);
         commitState(next);
-        dragRef.current = { mode: 'move', ids: new Set([next._newVertexId]), startPositions: new Map([[next._newVertexId, world]]), startWorld: world, moved: true };
+        dragRef.current = { mode: 'move', ids: new Set([next._newVertexId]), startPositions: new Map([[next._newVertexId, world]]), startWorld: world, moved: true, singleId: next._newVertexId };
         setSelectedVertexIds(new Set([next._newVertexId]));
       }
       return;
     }
 
     if (drag.mode === 'transform') {
-      const next = computeTransform(drag, world, e.shiftKey);
+      const next = computeTransform(drag, world);
       scheduleLiveOverrides(next);
     }
   };
@@ -490,6 +606,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
     const drag = dragRef.current;
     dragRef.current = null;
     setIsPanning(false);
+    setSnapPreview(null);
     if (!drag) return;
 
     if (drag.mode === 'marquee') {
@@ -505,7 +622,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
 
     if (drag.mode === 'place-vertex') {
       if (!drag.moved && pointerWorld) {
-        const { nextDoc } = resolvePlacement(doc, grid, pointerWorld);
+        const { nextDoc } = resolvePlacement(doc, grid, pointerWorld, viewport.zoom, axisSnapEnabled);
         if (nextDoc !== doc) commitState(nextDoc);
       }
       return;
@@ -515,7 +632,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
       if (pointerWorld) {
         const dropDist = dist(drag.startWorld, pointerWorld);
         if (dropDist > MOVE_THRESHOLD / viewport.zoom) {
-          const { nextDoc, vertexId } = resolvePlacement(doc, grid, pointerWorld, { excludeVertexId: drag.fromVertexId });
+          const { nextDoc, vertexId } = resolvePlacement(doc, grid, pointerWorld, viewport.zoom, axisSnapEnabled, { excludeVertexId: drag.fromVertexId });
           const { state: withEdge, ok } = addEdge(nextDoc, drag.fromVertexId, vertexId, activeStyle);
           commitState(ok ? withEdge : nextDoc);
         }
@@ -523,7 +640,24 @@ function VectorEditorView({ file, content, onChange, loading }) {
       return;
     }
 
-    if (drag.mode === 'move' || drag.mode === 'transform') {
+    if (drag.mode === 'move') {
+      if (drag.singleId && pointerWorld) {
+        // Re-resolve the final snap once more at drop time: if it lands on
+        // an edge the vertex isn't already part of, Edge Mid-Point
+        // Insertion binds it into that edge's topology instead of just
+        // leaving it sitting on top.
+        const snap = snapCandidate(doc.vertices, doc.edges, pointerWorld, snapOpts(viewport.zoom, grid, axisSnapEnabled, { excludeVertexId: drag.singleId }));
+        let next = moveVertices(doc, new Map([[drag.singleId, snap.point]]));
+        if (snap.snappedEdgeId) next = bindVertexOntoEdge(next, snap.snappedEdgeId, drag.singleId);
+        commitState(next);
+      } else if (liveOverrides && liveOverrides.size) {
+        commitState(moveVertices(doc, liveOverrides));
+      }
+      setLiveOverrides(null);
+      return;
+    }
+
+    if (drag.mode === 'transform') {
       if (liveOverrides && liveOverrides.size) {
         commitState(moveVertices(doc, liveOverrides));
       }
@@ -548,8 +682,10 @@ function VectorEditorView({ file, content, onChange, loading }) {
     if (drag.kind === 'scale') {
       const dx = world.x - drag.anchor.x;
       const dy = world.y - drag.anchor.y;
-      const scaleX = drag.spanX === 0 ? 1 : dx / drag.spanX;
-      const scaleY = drag.spanY === 0 ? 1 : dy / drag.spanY;
+      let scaleX = drag.spanX === 0 ? 1 : dx / drag.spanX;
+      let scaleY = drag.spanY === 0 ? 1 : dy / drag.spanY;
+      if (drag.axisLock === 'x') scaleY = 1; // edge-midpoint handle: horizontal-only scaling
+      if (drag.axisLock === 'y') scaleX = 1; // edge-midpoint handle: vertical-only scaling
       for (const [id, pos] of drag.startPositions) {
         map.set(id, { x: drag.anchor.x + (pos.x - drag.anchor.x) * scaleX, y: drag.anchor.y + (pos.y - drag.anchor.y) * scaleY });
       }
@@ -566,13 +702,12 @@ function VectorEditorView({ file, content, onChange, loading }) {
     return map;
   }
 
-  const beginScale = (e, corner, box) => {
+  const beginScale = (e, handle) => {
     e.stopPropagation();
     containerRef.current.setPointerCapture(e.pointerId);
-    const anchor = { x: corner.x === 'min' ? box.maxX : box.minX, y: corner.y === 'min' ? box.maxY : box.minY };
     const world = screenToWorld(e.clientX, e.clientY);
     const startPositions = new Map(Array.from(selectedVertexIds).map((id) => [id, vertexById.get(id)]));
-    dragRef.current = { mode: 'transform', kind: 'scale', anchor, spanX: world.x - anchor.x, spanY: world.y - anchor.y, startPositions };
+    dragRef.current = { mode: 'transform', kind: 'scale', anchor: handle.anchor, axisLock: handle.axisLock, spanX: world.x - handle.anchor.x, spanY: world.y - handle.anchor.y, startPositions };
   };
 
   const beginRotate = (e, box) => {
@@ -638,10 +773,9 @@ function VectorEditorView({ file, content, onChange, loading }) {
     );
   }
 
-  const selectionBox = selectedVertexIds.size > 1 ? bboxOf(verticesForRender, selectedVertexIds) : null;
-  const fillFaces = doc.fills
-    .map((f) => ({ fill: f, face: findMinimalFaceContainingPoint(doc.vertices, doc.edges, f.seed) }))
-    .filter((x) => x.face);
+  const selectionBox = tool === 'select' && selectedVertexIds.size > 1 ? bboxOf(verticesForRender, selectedVertexIds) : null;
+  const canGroup = selectedVertexIds.size > 1 && !selectionIsExactlyOneGroup(doc, selectedVertexIds);
+  const canUngroup = selectionIsExactlyOneGroup(doc, selectedVertexIds);
 
   return (
     <div className="vector-view">
@@ -660,6 +794,8 @@ function VectorEditorView({ file, content, onChange, loading }) {
           setActiveStyle((s) => ({ ...s, thickness }));
           if (selectedEdgeIds.size) commitState(Array.from(selectedEdgeIds).reduce((d, id) => setEdgeStyle(d, id, { thickness }), doc));
         }}
+        canvasBackground={doc.canvas.background}
+        onSetCanvasBackground={(color) => commitState(setCanvasBackground(doc, color))}
         axisSnapEnabled={axisSnapEnabled}
         onToggleAxisSnap={() => setAxisSnapEnabled((v) => !v)}
         onUndo={undo}
@@ -690,9 +826,25 @@ function VectorEditorView({ file, content, onChange, loading }) {
         <svg className="vector-svg" width="100%" height="100%">
           <rect className="vector-bg-hit" x="0" y="0" width="100%" height="100%" fill="transparent" />
           <g transform={`translate(${viewport.x} ${viewport.y}) scale(${viewport.zoom})`}>
-            {fillFaces.map(({ fill, face }) => (
-              <polygon key={fill.id} points={face.points.map((p) => `${p.x},${p.y}`).join(' ')} fill={fill.color} stroke="none" />
+            <rect className="vector-page" x={0} y={0} width={doc.canvas.width} height={doc.canvas.height} fill={doc.canvas.background} />
+
+            {resolvedFills.map(({ fill, points }) => (
+              <polygon key={fill.id} points={points.map((p) => `${p.x},${p.y}`).join(' ')} fill={fill.color} stroke="none" className={`vector-fill ${tool === 'eyedropper' ? 'pickable' : ''}`} onPointerDown={(ev) => onFillPointerDown(ev, fill)} />
             ))}
+
+            {/* Selection move hit-area, rendered BEFORE vertices/edges so an
+                individual vertex/edge on top of it still gets pointer
+                priority for its own more-specific click behavior. */}
+            {selectionBox && (
+              <rect
+                className="vector-selection-move-hit"
+                x={selectionBox.minX}
+                y={selectionBox.minY}
+                width={selectionBox.maxX - selectionBox.minX}
+                height={selectionBox.maxY - selectionBox.minY}
+                onPointerDown={onSelectionBoxPointerDown}
+              />
+            )}
 
             {sortedEdges.map((e) => {
               const a = vertexById.get(e.v1);
@@ -709,7 +861,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
                   strokeWidth={e.style.thickness}
                   strokeLinecap="butt"
                   strokeLinejoin="miter"
-                  className={`vector-edge ${selectedEdgeIds.has(e.id) ? 'selected' : ''}`}
+                  className={`vector-edge ${selectedEdgeIds.has(e.id) ? 'selected' : ''} ${snapPreview?.snappedEdgeId === e.id ? 'snap-target' : ''}`}
                   onPointerDown={(ev) => onEdgePointerDown(ev, e.id)}
                 />
               );
@@ -737,6 +889,20 @@ function VectorEditorView({ file, content, onChange, loading }) {
                 y2={pointerWorld.y}
               />
             )}
+
+            {/* Snapping guidelines: full-length dashed lines through whichever
+                vertex produced an axis snap, plus a highlight ring/marker on
+                a snapped vertex or edge point. */}
+            {snapPreview?.axisSnapVertexX != null && vertexById.get(snapPreview.axisSnapVertexX) && (
+              <line className="vector-snap-guide" x1={snapPreview.point.x} y1={-GUIDE_LINE_SPAN} x2={snapPreview.point.x} y2={GUIDE_LINE_SPAN} />
+            )}
+            {snapPreview?.axisSnapVertexY != null && vertexById.get(snapPreview.axisSnapVertexY) && (
+              <line className="vector-snap-guide" x1={-GUIDE_LINE_SPAN} y1={snapPreview.point.y} x2={GUIDE_LINE_SPAN} y2={snapPreview.point.y} />
+            )}
+            {snapPreview?.snappedVertexId && vertexById.get(snapPreview.snappedVertexId) && (
+              <circle className="vector-snap-marker" cx={snapPreview.point.x} cy={snapPreview.point.y} r={9 / viewport.zoom} />
+            )}
+            {snapPreview?.snappedEdgeId && <circle className="vector-snap-marker" cx={snapPreview.point.x} cy={snapPreview.point.y} r={5 / viewport.zoom} />}
 
             {verticesForRender.map((v) => {
               const selected = selectedVertexIds.has(v.id);
@@ -767,20 +933,16 @@ function VectorEditorView({ file, content, onChange, loading }) {
             {selectionBox && (
               <g className="vector-transform-handles">
                 <rect x={selectionBox.minX} y={selectionBox.minY} width={selectionBox.maxX - selectionBox.minX} height={selectionBox.maxY - selectionBox.minY} className="vector-selection-box" />
-                {[
-                  { x: 'min', y: 'min' },
-                  { x: 'max', y: 'min' },
-                  { x: 'min', y: 'max' },
-                  { x: 'max', y: 'max' }
-                ].map((corner) => (
+                {handleConfigsFor(selectionBox).map((h) => (
                   <rect
-                    key={`${corner.x}-${corner.y}`}
+                    key={h.key}
                     className="vector-scale-handle"
-                    x={(corner.x === 'min' ? selectionBox.minX : selectionBox.maxX) - 4 / viewport.zoom}
-                    y={(corner.y === 'min' ? selectionBox.minY : selectionBox.maxY) - 4 / viewport.zoom}
+                    style={{ cursor: h.cursor }}
+                    x={h.x - 4 / viewport.zoom}
+                    y={h.y - 4 / viewport.zoom}
                     width={8 / viewport.zoom}
                     height={8 / viewport.zoom}
-                    onPointerDown={(e) => beginScale(e, corner, selectionBox)}
+                    onPointerDown={(e) => beginScale(e, h)}
                   />
                 ))}
                 <line className="vector-rotate-stem" x1={(selectionBox.minX + selectionBox.maxX) / 2} y1={selectionBox.minY} x2={(selectionBox.minX + selectionBox.maxX) / 2} y2={selectionBox.minY - 24 / viewport.zoom} />
@@ -798,6 +960,16 @@ function VectorEditorView({ file, content, onChange, loading }) {
 
         {(selectedVertexIds.size > 0 || selectedEdgeIds.size > 0) && (
           <div className="vector-selection-toolbar">
+            {canGroup && (
+              <button className="text-action" onClick={() => commitState(groupVertices(doc, selectedVertexIds))} title="Group (G)">
+                Group
+              </button>
+            )}
+            {canUngroup && (
+              <button className="text-action" onClick={() => commitState(ungroupVertices(doc, selectedVertexIds))} title="Ungroup (Shift+G)">
+                Ungroup
+              </button>
+            )}
             <button className="icon-btn" onClick={deleteSelection} title="Delete">
               <IconTrash size={14} />
             </button>
