@@ -27,7 +27,12 @@
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
-const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID;
+// Base URL of the store backend (see server/README.md) — the frontend's
+// only remaining direct network dependency for auth/Drive access. All
+// Drive REST calls and the OAuth sign-in redirect go through this origin
+// now; the frontend itself no longer calls googleapis.com or holds a
+// Google token (see driveApi.js / hooks/useAuth.js).
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
 
 const API_KEY = import.meta.env.VITE_GOOGLE_API_KEY; // optional, used by Picker
 
@@ -44,12 +49,12 @@ const APP_ID = import.meta.env.VITE_GOOGLE_APP_ID; // optional, used by Picker
 // a "restricted" scope: Google requires it to be added under OAuth consent
 // screen -> Data Access -> Scopes, and — like drive.file — it only needs
 // full app verification once you leave Testing mode / add non-test users.
-const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
-
-
-const DRIVE_FILES_URL = 'https://www.googleapis.com/drive/v3/files';
-
-const DRIVE_UPLOAD_URL = 'https://www.googleapis.com/upload/drive/v3/files';
+//
+// CLIENT_ID/DRIVE_SCOPE now live server-side only (server/src/config.js) —
+// the OAuth redirect flow is initiated and completed by the backend, so
+// the frontend has no more use for them. DRIVE_FILES_URL/DRIVE_UPLOAD_URL
+// have moved the same way (server/src/driveClient.js); kept here only as
+// the historical reference for what the backend's requests look like.
 
 
 const DB_NAME = 'vault-cache-db';
@@ -190,6 +195,6 @@ function extensionForKind(kind) {
   return 'md';
 }
 
-export { CLIENT_ID, API_KEY, APP_ID, DRIVE_SCOPE, DRIVE_FILES_URL, DRIVE_UPLOAD_URL, DB_NAME, DB_VERSION, STORE_FILES, STORE_FOLDERS, STORE_LINKS, STORE_META, STORE_OFFLINE_NOTES, STORE_OFFLINE_ASSETS, FETCH_CONCURRENCY, IMAGE_EXTENSIONS, IMAGE_MIME_TYPES, VIDEO_EXTENSIONS, VIDEO_MIME_TYPES, AUDIO_EXTENSIONS, AUDIO_MIME_TYPES, NOTE_EXTENSIONS, DATABASE_EXTENSIONS, CANVAS_EXTENSIONS, VECTOR_EXTENSIONS, fileExtension, isImageName, isVideoName, isAudioName, isAssetName, classifyKind, opensInEditorPane, extensionForKind };
+export { BACKEND_URL, API_KEY, APP_ID, DB_NAME, DB_VERSION, STORE_FILES, STORE_FOLDERS, STORE_LINKS, STORE_META, STORE_OFFLINE_NOTES, STORE_OFFLINE_ASSETS, FETCH_CONCURRENCY, IMAGE_EXTENSIONS, IMAGE_MIME_TYPES, VIDEO_EXTENSIONS, VIDEO_MIME_TYPES, AUDIO_EXTENSIONS, AUDIO_MIME_TYPES, NOTE_EXTENSIONS, DATABASE_EXTENSIONS, CANVAS_EXTENSIONS, VECTOR_EXTENSIONS, fileExtension, isImageName, isVideoName, isAudioName, isAssetName, classifyKind, opensInEditorPane, extensionForKind };
 
 

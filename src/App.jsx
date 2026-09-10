@@ -23,7 +23,7 @@ import { SearchPanel } from './features/search/SearchPanel.jsx';
 import { ExplorerPanel } from './features/sidebar/ExplorerPanel.jsx';
 import { TagsPanel } from './features/tags/TagsPanel.jsx';
 import { TocPanel } from './features/toc/TocPanel.jsx';
-import { useGoogleAuth, useProxyAuth } from './hooks/useAuth.js';
+import { useBackendAuth, useProxyAuth } from './hooks/useAuth.js';
 import { releaseImageUrlCache } from './hooks/useDriveImageUrl.js';
 import { useVaultIndex } from './hooks/useVaultIndex.js';
 import { useOfflineSync } from './hooks/useOfflineSync.js';
@@ -55,7 +55,7 @@ import { STORE_META, classifyKind, extensionForKind, fileExtension, opensInEdito
 
 
 export default function App() {
-  const { token: googleToken, gisReady, signIn, signOut: signOutGoogle, hasEverSignedIn } = useGoogleAuth();
+  const { token: googleToken, authReady, signIn, signOut: signOutGoogle, hasEverSignedIn } = useBackendAuth();
   const { proxyToken, signInProxy, signOutProxy } = useProxyAuth();
   const token = googleToken || proxyToken;
   const signOut = useCallback(() => {
@@ -1243,7 +1243,7 @@ export default function App() {
   }, []);
 
   if (!folderRestoring && !token && (offline.isOnline || !hasEverSignedIn || !cachedFolderExists)) {
-    return <OnboardingFlow step="signin" onSignIn={signIn} ready={gisReady} onSignInProxy={signInProxy} />;
+    return <OnboardingFlow step="signin" onSignIn={signIn} ready={authReady} onSignInProxy={signInProxy} />;
   }
   if (folderRestoring) {
     const { label, pct } = loadingStepProps({ phase: 'opening', loaded: 0, total: 0 });

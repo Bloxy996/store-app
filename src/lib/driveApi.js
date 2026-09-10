@@ -1,17 +1,21 @@
-import { API_KEY, APP_ID, DRIVE_FILES_URL, DRIVE_UPLOAD_URL, classifyKind } from './vaultConfig.js';
+import { API_KEY, APP_ID, BACKEND_URL, classifyKind } from './vaultConfig.js';
 
 
 // ---------------------------------------------------------------------------
-// Google Drive REST wrapper (full `drive` scope — see DRIVE_SCOPE note above)
+// store backend relay (see server/README.md)
 //
-// Every request below carries supportsAllDrives=true / includeItemsFromAllDrives=true.
-// This matters for folders added via Google Drive desktop's "back up a folder
-// from your computer" mode: those live under the special "Computers" area,
-// a separate corpus from ordinary My Drive, and files.list silently omits
-// it unless these flags are set. Folders that were already inside My Drive
-// work either way, so this is always safe to include.
+// The functions below used to call googleapis.com directly with a bearer
+// token held in the browser. That token now lives server-side (as a
+// refresh token, in an httpOnly session cookie) — the frontend calls this
+// backend instead, with `credentials: 'include'` so the session cookie
+// rides along, and the backend attaches a fresh Google access token on our
+// behalf. `token` is still threaded through every function below for
+// backward compatibility with every call site (App.jsx, useVaultSync.js,
+// etc.) and to keep dispatching on isProxy(token) working unchanged — in
+// backend-relay mode its value is just a truthy "signed in" marker, not a
+// real bearer token (see hooks/useAuth.js).
 // ---------------------------------------------------------------------------
-const DRIVE_ALL_DRIVES = 'supportsAllDrives=true&includeItemsFromAllDrives=true';
+const BACKEND_DRIVE_URL = `${BACKEND_URL}/api/drive`;
 
 
 // --- Apps Script proxy support -------------------------------------------
@@ -108,38 +112,14 @@ async function driveListFolderTree(token, rootFolderId) {
     const res = await proxyGet(token, { action: 'listFolderTree', root: rootFolderId });
     return (await res.json()).folders || [];
   }
-  const allFolders = [];
-  let frontier = [rootFolderId];
-  while (frontier.length) {
-    const chunks = chunkArray(frontier, 10);
-    const chunkResults = await Promise.all(
-      chunks.map(async (chunk) => {
-        const parentClauses = chunk.map((id) => `'${id}' in parents`).join(' or ');
-        const q = encodeURIComponent(`(${parentClauses}) and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
-        const fields = encodeURIComponent('files(id,name,parents),nextPageToken');
-        let pageToken = '';
-        const found = [];
-        do {
-          const url = `${DRIVE_FILES_URL}?q=${q}&fields=${fields}&pageSize=1000&${DRIVE_ALL_DRIVES}${
-            pageToken ? `&pageToken=${pageToken}` : ''
-          }`;
-          const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-          if (!res.ok) throw driveError(res, 'Drive folder list failed');
-          const data = await res.json();
-          found.push(...(data.files || []));
-          pageToken = data.nextPageToken || '';
-        } while (pageToken);
-        return found;
-      })
-    );
-    const nextFrontier = [];
-    chunkResults.flat().forEach((f) => {
-      allFolders.push(f);
-      nextFrontier.push(f.id);
-    });
-    frontier = nextFrontier;
-  }
-  return allFolders;
+  // The BFS itself now runs server-side (server/src/driveClient.js) — same
+  // logic, moved so the browser doesn't need a bearer token to drive it.
+  const res = await fetch(`${BACKEND_DRIVE_URL}/folder-tree?root=${encodeURIComponent(rootFolderId)}`, {
+    credentials: 'include'
+  });
+  if (!res.ok) throw driveError(res, 'Drive folder list failed');
+  const data = await res.json();
+  return data.folders || [];
 }
 
 
@@ -155,31 +135,14 @@ async function driveListVaultContentInFolders(token, folderIds) {
   // now — only Google's native app types (Docs/Sheets/Slides/etc, which
   // have no downloadable bytes via alt=media in the format this app wants)
   // and folders (handled by the separate folder-tree listing) are excluded.
-  const chunks = chunkArray(folderIds, 10);
-  const chunkResults = await Promise.all(
-    chunks.map(async (chunk) => {
-      const parentClauses = chunk.map((id) => `'${id}' in parents`).join(' or ');
-      const q = encodeURIComponent(
-        `(${parentClauses}) and trashed = false and not mimeType contains 'vnd.google-apps'`
-      );
-      const fields = encodeURIComponent('files(id,name,modifiedTime,parents,mimeType,size),nextPageToken');
-      let pageToken = '';
-      const found = [];
-      do {
-        const url = `${DRIVE_FILES_URL}?q=${q}&fields=${fields}&pageSize=1000&orderBy=name&${DRIVE_ALL_DRIVES}${
-          pageToken ? `&pageToken=${pageToken}` : ''
-        }`;
-        const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-        if (!res.ok) throw driveError(res, 'Drive list failed');
-        const data = await res.json();
-        found.push(...(data.files || []));
-        pageToken = data.nextPageToken || '';
-      } while (pageToken);
-      return found;
-    })
-  );
-
-  return chunkResults.flat().map((f) => ({
+  // Query construction/pagination moved server-side (driveClient.js); the
+  // frontend just hands over the folder ids to search.
+  const res = await fetch(`${BACKEND_DRIVE_URL}/vault-content?folders=${encodeURIComponent(folderIds.join(','))}`, {
+    credentials: 'include'
+  });
+  if (!res.ok) throw driveError(res, 'Drive list failed');
+  const data = await res.json();
+  return (data.files || []).map((f) => ({
     ...f,
     kind: classifyKind(f.name, f.mimeType)
   }));
@@ -201,9 +164,7 @@ async function driveGetFileContent(token, fileId) {
     const res = await proxyGet(token, { action: 'getContent', id: fileId });
     return res.text();
   }
-  const res = await fetch(`${DRIVE_FILES_URL}/${fileId}?alt=media&${DRIVE_ALL_DRIVES}`, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
+  const res = await fetch(`${BACKEND_DRIVE_URL}/file/${fileId}/content`, { credentials: 'include' });
   if (!res.ok) throw driveError(res, 'Drive fetch failed');
   return res.text();
 }
@@ -216,8 +177,7 @@ async function driveGetFileMetadata(token, fileId) {
     await driveGetFileContent(token, fileId);
     return { id: fileId };
   }
-  const fields = encodeURIComponent('id,name,modifiedTime,parents');
-  const res = await fetch(`${DRIVE_FILES_URL}/${fileId}?fields=${fields}&${DRIVE_ALL_DRIVES}`, { headers: { Authorization: `Bearer ${token}` } });
+  const res = await fetch(`${BACKEND_DRIVE_URL}/file/${fileId}/metadata`, { credentials: 'include' });
   if (!res.ok) throw driveError(res, 'Drive metadata fetch failed');
   return res.json();
 }
@@ -234,9 +194,7 @@ async function driveGetFileBlob(token, fileId) {
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     return new Blob([bytes], { type: data.mimeType });
   }
-  const res = await fetch(`${DRIVE_FILES_URL}/${fileId}?alt=media&${DRIVE_ALL_DRIVES}`, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
+  const res = await fetch(`${BACKEND_DRIVE_URL}/file/${fileId}/blob`, { credentials: 'include' });
   if (!res.ok) throw driveError(res, 'Drive fetch failed');
   return res.blob();
 }
@@ -246,9 +204,10 @@ async function driveUpdateFileContent(token, fileId, content) {
   if (isProxy(token)) {
     return proxyPost(token, { action: 'updateContent', id: fileId, content });
   }
-  const res = await fetch(`${DRIVE_UPLOAD_URL}/${fileId}?uploadType=media&${DRIVE_ALL_DRIVES}`, {
+  const res = await fetch(`${BACKEND_DRIVE_URL}/file/${fileId}/content`, {
     method: 'PATCH',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'text/markdown' },
+    credentials: 'include',
+    headers: { 'Content-Type': 'text/markdown' },
     body: content
   });
   if (!res.ok) throw driveError(res, 'Drive save failed');
@@ -265,20 +224,14 @@ async function driveCreateFile(token, folderId, rawName, content = '', ext = 'md
   if (isProxy(token)) {
     return proxyPost(token, { action: 'createFile', folderId, name, content });
   }
-  const metadata = { name, parents: [folderId], mimeType };
-  const boundary = `vault-${Date.now()}`;
-  const body =
-    `--${boundary}\r\n` +
-    `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
-    `${JSON.stringify(metadata)}\r\n` +
-    `--${boundary}\r\n` +
-    `Content-Type: ${mimeType}\r\n\r\n` +
-    `${content}\r\n` +
-    `--${boundary}--`;
-  const res = await fetch(`${DRIVE_UPLOAD_URL}?uploadType=multipart&fields=id,name,modifiedTime,parents&${DRIVE_ALL_DRIVES}`, {
+  // The multipart request body is now assembled server-side
+  // (driveClient.js's createFile) — the browser just sends the plain
+  // fields it wants written.
+  const res = await fetch(`${BACKEND_DRIVE_URL}/file`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` },
-    body
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ folderId, name, content, mimeType })
   });
   if (!res.ok) throw driveError(res, 'Drive create failed');
   return res.json();
@@ -296,18 +249,21 @@ async function driveUploadBinary(token, folderId, file) {
     err.code = 'proxy-unsupported';
     throw err;
   }
-  const bytes = await file.arrayBuffer();
-  const metadata = { name: file.name, parents: [folderId], mimeType: file.type || 'application/octet-stream' };
-  const boundary = `vault-${Date.now()}`;
-  const head = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: ${
-    metadata.mimeType
-  }\r\n\r\n`;
-  const tail = `\r\n--${boundary}--`;
-  const body = new Blob([head, bytes, tail]);
-  const res = await fetch(`${DRIVE_UPLOAD_URL}?uploadType=multipart&fields=id,name,modifiedTime,parents,mimeType&${DRIVE_ALL_DRIVES}`, {
+  const mimeType = file.type || 'application/octet-stream';
+  // Metadata rides in headers (URI-encoded — header values can't carry
+  // arbitrary Unicode directly) rather than a multipart body; the backend
+  // assembles the actual multipart Drive request from these plus the raw
+  // bytes in the body (driveClient.js's uploadBinary).
+  const res = await fetch(`${BACKEND_DRIVE_URL}/file/upload`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` },
-    body
+    credentials: 'include',
+    headers: {
+      'Content-Type': mimeType,
+      'X-Folder-Id': folderId,
+      'X-File-Name': encodeURIComponent(file.name),
+      'X-Mime-Type': mimeType
+    },
+    body: file
   });
   if (!res.ok) throw driveError(res, 'Drive upload failed');
   return res.json();
@@ -318,10 +274,11 @@ async function driveCreateFolder(token, parentId, name) {
   if (isProxy(token)) {
     return proxyPost(token, { action: 'createFolder', parentId, name });
   }
-  const res = await fetch(`${DRIVE_FILES_URL}?fields=id,name,parents&${DRIVE_ALL_DRIVES}`, {
+  const res = await fetch(`${BACKEND_DRIVE_URL}/folder`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, parents: [parentId], mimeType: 'application/vnd.google-apps.folder' })
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ parentId, name })
   });
   if (!res.ok) throw driveError(res, 'Drive folder create failed');
   return res.json();
@@ -333,9 +290,10 @@ async function driveRenameItem(token, id, newName) {
   if (isProxy(token)) {
     return proxyPost(token, { action: 'rename', id, newName });
   }
-  const res = await fetch(`${DRIVE_FILES_URL}/${id}?fields=id,name&${DRIVE_ALL_DRIVES}`, {
+  const res = await fetch(`${BACKEND_DRIVE_URL}/item/${id}/rename`, {
     method: 'PATCH',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: newName })
   });
   if (!res.ok) throw driveError(res, 'Drive rename failed');
@@ -352,10 +310,12 @@ async function driveMoveItem(token, id, newParentId, oldParentId) {
     err.code = 'proxy-unsupported';
     throw err;
   }
-  const res = await fetch(
-    `${DRIVE_FILES_URL}/${id}?addParents=${newParentId}&removeParents=${oldParentId}&fields=id,parents&${DRIVE_ALL_DRIVES}`,
-    { method: 'PATCH', headers: { Authorization: `Bearer ${token}` } }
-  );
+  const res = await fetch(`${BACKEND_DRIVE_URL}/item/${id}/move`, {
+    method: 'PATCH',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ newParentId, oldParentId })
+  });
   if (!res.ok) throw driveError(res, 'Drive move failed');
   return res.json();
 }
@@ -369,10 +329,9 @@ async function driveTrashItem(token, id) {
   if (isProxy(token)) {
     return proxyPost(token, { action: 'trash', id });
   }
-  const res = await fetch(`${DRIVE_FILES_URL}/${id}?${DRIVE_ALL_DRIVES}`, {
+  const res = await fetch(`${BACKEND_DRIVE_URL}/item/${id}/trash`, {
     method: 'PATCH',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ trashed: true })
+    credentials: 'include'
   });
   if (!res.ok) throw driveError(res, 'Drive delete failed');
   return res.json();
@@ -401,14 +360,29 @@ async function ensurePickerLoaded() {
 }
 
 
+// The Picker widget makes its own calls straight to Google, not through
+// driveApi's backend relay, so it needs a real bearer token — minted
+// on demand from the refresh token the backend holds, and used here only
+// in memory for as long as the Picker is open. The `token` param is kept
+// (App.jsx still gates on it/isProxy(token) before calling this) but is no
+// longer what's actually handed to the Picker.
+async function fetchPickerAccessToken() {
+  const res = await fetch(`${BACKEND_URL}/auth/picker-token`, { credentials: 'include' });
+  if (!res.ok) throw driveError(res, 'Could not get a Picker token');
+  const data = await res.json();
+  return data.accessToken;
+}
+
+
 async function openFolderPicker(token) {
   await ensurePickerLoaded();
+  const accessToken = await fetchPickerAccessToken();
   return new Promise((resolve) => {
     const view = new window.google.picker.DocsView(window.google.picker.ViewId.FOLDERS)
       .setSelectFolderEnabled(true)
       .setIncludeFolders(true);
     const builder = new window.google.picker.PickerBuilder()
-      .setOAuthToken(token)
+      .setOAuthToken(accessToken)
       .addView(view)
       .setTitle('Select your store folder')
       .setCallback((data) => {
@@ -425,4 +399,4 @@ async function openFolderPicker(token) {
   });
 }
 
-export { DRIVE_ALL_DRIVES, isProxy, proxyGet, proxyPost, driveBrowseFolders, driveResolveFolder, extractDriveFolderId, chunkArray, driveError, driveListFolderTree, driveListVaultContentInFolders, driveListVaultFiles, driveGetFileContent, driveGetFileMetadata, driveGetFileBlob, driveUpdateFileContent, driveCreateFile, driveUploadBinary, driveCreateFolder, driveRenameItem, driveMoveItem, driveTrashItem, loadScriptOnce, ensurePickerLoaded, openFolderPicker };
+export { isProxy, proxyGet, proxyPost, driveBrowseFolders, driveResolveFolder, extractDriveFolderId, chunkArray, driveError, driveListFolderTree, driveListVaultContentInFolders, driveListVaultFiles, driveGetFileContent, driveGetFileMetadata, driveGetFileBlob, driveUpdateFileContent, driveCreateFile, driveUploadBinary, driveCreateFolder, driveRenameItem, driveMoveItem, driveTrashItem, loadScriptOnce, ensurePickerLoaded, openFolderPicker };

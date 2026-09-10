@@ -32,6 +32,19 @@ const repoName = process.env.GITHUB_REPOSITORY?.split('/')[1];
 const isUserOrgPage = repoName?.endsWith('.github.io');
 const base = process.env.GITHUB_ACTIONS && repoName && !isUserOrgPage ? `/${repoName}/` : '/';
 
+// The backend origin (server/README.md) — Drive content and auth now flow
+// through here instead of googleapis.com directly, so the service worker
+// needs to know its origin to keep excluding that traffic from its cache
+// (see the runtimeCaching NetworkOnly rule below). Falls back to matching
+// nothing rather than throwing when unset, so a build without the env var
+// still succeeds — just without that extra safety net.
+let backendOrigin = '';
+try {
+  backendOrigin = new URL(process.env.VITE_BACKEND_URL || '').origin;
+} catch {
+  // Unset/invalid at build time — fine, see comment above.
+}
+
 export default defineConfig({
   base,
   define: {
@@ -111,6 +124,16 @@ export default defineConfig({
             urlPattern: ({ url }) =>
               url.origin === 'https://accounts.google.com' ||
               url.origin === 'https://apis.google.com',
+            handler: 'NetworkOnly'
+          },
+          {
+            // store's own backend (server/) — Drive content and session
+            // auth now flow through here (see the header comment above).
+            // Same reasoning as the googleapis.com rule: never cache any
+            // of it. Only registered when VITE_BACKEND_URL parses at
+            // build time; navigateFallbackDenylist above already covers
+            // /api/ for the same-origin case.
+            urlPattern: ({ url }) => !!backendOrigin && url.origin === backendOrigin,
             handler: 'NetworkOnly'
           }
         ]
