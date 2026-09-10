@@ -1,7 +1,7 @@
 import { history } from '@codemirror/commands';
 import { useRef, useState } from 'react';
 
-import { IconArrowLeft, IconArrowRight, IconEdit, IconEye, IconMoreVertical, IconPanelLeft, IconPlus, IconSplitHorizontal, IconSplitVertical, IconStar, IconStarFilled, IconX } from '../../components/icons.jsx';
+import { IconArrowLeft, IconArrowRight, IconEdit, IconExternalLink, IconEye, IconMoreVertical, IconPanelLeft, IconPlus, IconSplitHorizontal, IconSplitVertical, IconStar, IconStarFilled, IconX } from '../../components/icons.jsx';
 import { useClickOutside } from '../../hooks/useClickOutside.js';
 import { opensInEditorPane } from '../../lib/vaultConfig.js';
 
@@ -21,7 +21,7 @@ import { opensInEditorPane } from '../../lib/vaultConfig.js';
 // `.tab-bar-scroll`), not portaled. Only one tab's menu can be open at a
 // time, tracked here as `menuTabId`.
 // ---------------------------------------------------------------------------
-function TabBar({ leaf, filesById, buffers, isActivePane, onSelectTab, onCloseTab, onNewTab, onSplitTab, onCloseOthers, onCloseAll }) {
+function TabBar({ leaf, filesById, buffers, isActivePane, onSelectTab, onCloseTab, onNewTab, onSplitTab, onPopOutTab, onCloseOthers, onCloseAll }) {
   const [menuTabId, setMenuTabId] = useState(null);
   const wrapRef = useRef(null);
   useClickOutside([wrapRef], () => setMenuTabId(null));
@@ -99,6 +99,16 @@ function TabBar({ leaf, filesById, buffers, isActivePane, onSelectTab, onCloseTa
             }}
           >
             <IconSplitHorizontal size={14} /> Split down
+          </button>
+          <span className="tab-menu-panel-divider" />
+          <button
+            className="tab-menu-panel-item"
+            onClick={() => {
+              onPopOutTab(menuTab.id);
+              setMenuTabId(null);
+            }}
+          >
+            <IconExternalLink size={14} /> Open in new window
           </button>
           <span className="tab-menu-panel-divider" />
           <button

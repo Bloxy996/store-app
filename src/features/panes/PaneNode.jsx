@@ -74,6 +74,7 @@ function LeafPane({
   onCloseTab,
   onNewTab,
   onSplitTab,
+  onPopOutTab,
   onCloseOthers,
   onCloseAll,
   onSplit,
@@ -109,6 +110,7 @@ function LeafPane({
         onCloseTab={(tabId) => onCloseTab(leaf.id, tabId)}
         onNewTab={() => onNewTab(leaf.id)}
         onSplitTab={(tabId, direction) => onSplitTab(leaf.id, tabId, direction)}
+        onPopOutTab={(tabId) => onPopOutTab(leaf.id, tabId)}
         onCloseOthers={(tabId) => onCloseOthers(leaf.id, tabId)}
         onCloseAll={() => onCloseAll(leaf.id)}
       />

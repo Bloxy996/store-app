@@ -17,6 +17,8 @@ import { applyFileChanges, flattenVaultTree, folderIdForPath, parseApplyXml, spl
 import { OnboardingFlow, loadingStepProps } from './features/onboarding/OnboardingFlow.jsx';
 import { ProxyFolderBrowser } from './features/onboarding/ProxyFolderBrowser.jsx';
 import { PaneNode, collapseEmptyLeaves, findSplitNode, purgeFileFromTree } from './features/panes/PaneNode.jsx';
+import { PopoutNotePane } from './features/panes/PopoutNotePane.jsx';
+import { PopoutWindow } from './features/panes/PopoutWindow.jsx';
 import { SearchPanel } from './features/search/SearchPanel.jsx';
 import { ExplorerPanel } from './features/sidebar/ExplorerPanel.jsx';
 import { TagsPanel } from './features/tags/TagsPanel.jsx';
@@ -97,6 +99,13 @@ export default function App() {
 
   const [paneTree, setPaneTree] = useState(() => makeLeaf(null));
   const [activePaneId, setActivePaneId] = useState(() => paneTree.id);
+  // Notes currently displayed in their own detached browser window (see
+  // features/panes/PopoutWindow.jsx) instead of a pane. Keyed by fileId,
+  // not by tab/pane id — a popped-out note isn't part of the pane tree at
+  // all while it's out, the same way a file can already be open in two
+  // panes at once today (splitPane copies a tab's fileId into a new leaf),
+  // both editing the exact same shared `buffers` entry.
+  const [poppedOutFileIds, setPoppedOutFileIds] = useState(() => new Set());
 
   const [activeSideView, setActiveSideView] = useState('explorer'); // explorer | search | tags | bookmarks
   const [mobileDockOpen, setMobileDockOpen] = useState(false);
@@ -658,6 +667,41 @@ export default function App() {
     },
     [paneTree]
   );
+
+  // Moves one tab out of the pane tree and into its own real browser
+  // window instead of a pane — the note keeps editing through the exact
+  // same `buffers`/`handlers` pipeline as any other open tab, so popping
+  // it out doesn't fork its state, just where it's rendered. Closing that
+  // tab first (rather than leaving it in place) avoids two CodeMirror
+  // instances racing to be "the" editor for the same buffer in the common
+  // case of popping out a tab that isn't also open in a second pane.
+  const popOutTab = useCallback(
+    (paneId, tabId) => {
+      const leaf = findLeaf(paneTree, paneId);
+      const tab = leaf?.tabs.find((t) => t.id === tabId);
+      if (!tab) return;
+      closeTab(paneId, tabId);
+      setPoppedOutFileIds((prev) => {
+        const next = new Set(prev);
+        next.add(tab.fileId);
+        return next;
+      });
+    },
+    [paneTree, closeTab]
+  );
+
+  // Fires either when the person closes the popout window natively (see
+  // PopoutWindow's `win.closed` poll) or if a future in-window control
+  // wants to send the note back to the main pane tree — either way, the
+  // note was never removed from `buffers`, so nothing needs reloading.
+  const handlePopoutClosed = useCallback((fileId) => {
+    setPoppedOutFileIds((prev) => {
+      if (!prev.has(fileId)) return prev;
+      const next = new Set(prev);
+      next.delete(fileId);
+      return next;
+    });
+  }, []);
 
   const toggleTabMode = useCallback(
     (paneId, tabId) => {
@@ -1388,6 +1432,7 @@ export default function App() {
               setPaletteMode('switcher');
             }}
             onSplitTab={splitTabDirect}
+            onPopOutTab={popOutTab}
             onCloseOthers={closeOthers}
             onCloseAll={closeAllTabs}
             onSplit={splitPane}
@@ -1410,6 +1455,34 @@ export default function App() {
           />
         </div>
       </div>
+      {Array.from(poppedOutFileIds).map((fileId) => {
+        const file = filesById.get(fileId);
+        // The file was deleted/trashed while it happened to be popped out
+        // — nothing sensible to show, and handlePopoutClosed will run
+        // anyway once the person closes (or already closed) that window.
+        if (!file) return null;
+        return (
+          <PopoutWindow
+            key={fileId}
+            title={file.name.replace(/\.[^.]+$/i, '')}
+            onClose={() => handlePopoutClosed(fileId)}
+          >
+            <PopoutNotePane
+              file={file}
+              buffer={buffers[fileId]}
+              onChange={(value) => handleContentChange(fileId, value)}
+              linkIndex={sync.linkIndex}
+              phantomRecords={phantomRecords}
+              handlers={handlers}
+              backlinkIndex={sync.backlinkIndex}
+              allFiles={sync.filesMeta}
+              getBody={vaultIndex.getBody}
+              pendingRowOpen={pendingRowOpen}
+              onConsumeRowOpen={() => setPendingRowOpen(null)}
+            />
+          </PopoutWindow>
+        );
+      })}
       <StatusBar
         file={activeFileForStatus}
         content={activeContentForStatus}

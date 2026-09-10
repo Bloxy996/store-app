@@ -1,0 +1,23 @@
+.popout-note-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-1);
+}
+
+.popout-note-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 32px;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-1, rgba(255, 255, 255, 0.08));
+  flex-shrink: 0;
+}
+
+.popout-note-pane .editor-panes {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}

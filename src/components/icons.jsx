@@ -99,6 +99,14 @@ const IconMaximize = (p) => (
   </Svg>
 );
 
+const IconExternalLink = (p) => (
+  <Svg {...p}>
+    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+    <polyline points="15 3 21 3 21 9" />
+    <line x1="10" y1="14" x2="21" y2="3" />
+  </Svg>
+);
+
 const IconFilePlus = (p) => (
   <Svg {...p}>
     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
@@ -674,6 +682,6 @@ const IconRedo = (p) => (
 
 const ASSET_KIND_ICONS = { video: IconVideo, audio: IconAudio, file: IconFile, database: IconDatabase, canvas: IconCanvasKind, vector: IconVectorKind };
 
-export { Svg, IconChevronRight, IconChevronDown, IconMenu, IconListTree, IconPalette, IconPlus, IconGraph, IconMaximize, IconFilePlus, IconFolderPlus, IconUpload, IconBraces, IconChartBar, IconChartLine, IconChartPie, IconTimeline, IconMoreVertical, IconEdit, IconTrash, IconX, IconPanelLeft, IconSearch, IconTag, IconStar, IconStarFilled, IconRefresh, IconLogOut, IconFolder, IconDrive, IconSplitVertical, IconSplitHorizontal, IconEye, IconArrowLeft, IconArrowRight, IconSettings, IconHelp, IconSliders, IconInfo, IconImageMissing, IconCheck, IconVideo, IconAudio, IconFile, IconDownload, IconDatabase, IconTable, IconKanban, IconLayoutGrid, IconCalendar, IconHash, IconType, IconAlignLeft, IconCheckSquare, IconChevronsUpDown, IconGripVertical, IconPaperclip, IconLink2, IconTags, IconLoader, IconCommand, IconAlertTriangle, IconCanvasKind, IconZoomIn, IconZoomOut, IconFrame, IconStickyNote, IconImage, IconExpand, IconGrid, IconOfflineAvailable, IconVectorKind, IconCursorTool, IconVertexTool, IconEdgeTool, IconPolylineTool, IconEyedropperTool, IconFillTool, IconUndo, IconRedo, ASSET_KIND_ICONS };
+export { Svg, IconChevronRight, IconChevronDown, IconMenu, IconListTree, IconPalette, IconPlus, IconGraph, IconMaximize, IconExternalLink, IconFilePlus, IconFolderPlus, IconUpload, IconBraces, IconChartBar, IconChartLine, IconChartPie, IconTimeline, IconMoreVertical, IconEdit, IconTrash, IconX, IconPanelLeft, IconSearch, IconTag, IconStar, IconStarFilled, IconRefresh, IconLogOut, IconFolder, IconDrive, IconSplitVertical, IconSplitHorizontal, IconEye, IconArrowLeft, IconArrowRight, IconSettings, IconHelp, IconSliders, IconInfo, IconImageMissing, IconCheck, IconVideo, IconAudio, IconFile, IconDownload, IconDatabase, IconTable, IconKanban, IconLayoutGrid, IconCalendar, IconHash, IconType, IconAlignLeft, IconCheckSquare, IconChevronsUpDown, IconGripVertical, IconPaperclip, IconLink2, IconTags, IconLoader, IconCommand, IconAlertTriangle, IconCanvasKind, IconZoomIn, IconZoomOut, IconFrame, IconStickyNote, IconImage, IconExpand, IconGrid, IconOfflineAvailable, IconVectorKind, IconCursorTool, IconVertexTool, IconEdgeTool, IconPolylineTool, IconEyedropperTool, IconFillTool, IconUndo, IconRedo, ASSET_KIND_ICONS };
 
 
