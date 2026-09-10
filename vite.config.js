@@ -132,10 +132,15 @@ export default defineConfig({
             // Same reasoning as the googleapis.com rule: never cache any
             // of it. Only registered when VITE_BACKEND_URL parses at
             // build time; navigateFallbackDenylist above already covers
-            // /api/ for the same-origin case.
-            urlPattern: ({ url }) => !!backendOrigin && url.origin === backendOrigin,
-            handler: 'NetworkOnly'
-          }
+          },
+          ...(backendOrigin
+            ? [
+                {
+                  urlPattern: new Function('arg', `return arg.url.origin === ${JSON.stringify(backendOrigin)};`),
+                  handler: 'NetworkOnly'
+                }
+              ]
+            : [])
         ]
       },
       devOptions: {

@@ -36,6 +36,7 @@ jobs:
           VITE_GOOGLE_CLIENT_ID: ${{ secrets.VITE_GOOGLE_CLIENT_ID }}
           VITE_GOOGLE_API_KEY: ${{ secrets.VITE_GOOGLE_API_KEY }}
           VITE_GOOGLE_APP_ID: ${{ secrets.VITE_GOOGLE_APP_ID }}
+          VITE_BACKEND_URL: ${{ secrets.VITE_BACKEND_URL }}
 
       - name: Upload build artifact
         uses: actions/upload-pages-artifact@v3
