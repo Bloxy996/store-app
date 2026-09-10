@@ -1,4 +1,4 @@
-import { IconCircleTool, IconCursorTool, IconDownload, IconEdgeTool, IconEye, IconEyedropperTool, IconFillTool, IconGrid, IconMaximize, IconPolylineTool, IconRedo, IconUndo, IconVertexTool, IconZoomIn, IconZoomOut } from '../../components/icons.jsx';
+import { IconCircleTool, IconCursorTool, IconDownload, IconEdgeTool, IconEye, IconEyedropperTool, IconFillTool, IconGrid, IconLayoutGrid, IconMaximize, IconPolylineTool, IconRedo, IconUndo, IconVertexTool, IconZoomIn, IconZoomOut } from '../../components/icons.jsx';
 import { VECTOR_COLORS, VECTOR_RADII, VECTOR_THICKNESSES } from './vectorState.js';
 
 
@@ -27,6 +27,8 @@ function VectorToolbar({
   onSetCanvasBackground,
   axisSnapEnabled,
   onToggleAxisSnap,
+  layersPanelOpen,
+  onToggleLayersPanel,
   viewMode,
   onToggleViewMode,
   onUndo,
@@ -112,6 +114,11 @@ function VectorToolbar({
           <span className="vector-canvas-bg-label">Canvas</span>
         </div>
       </fieldset>
+      <div className="vector-toolbar-group">
+        <button className={`icon-btn ${layersPanelOpen ? 'active' : ''}`} title="Layers" aria-pressed={layersPanelOpen} onClick={onToggleLayersPanel}>
+          <IconLayoutGrid size={15} />
+        </button>
+      </div>
       <div className="vector-toolbar-group">
         <button className={`icon-btn ${viewMode ? 'active' : ''}`} title={viewMode ? 'View mode — vertexes and 0px guides are hidden. Click to switch to Edit mode' : 'Edit mode — click to preview in View mode'} aria-pressed={viewMode} onClick={onToggleViewMode}>
           <IconEye size={15} />

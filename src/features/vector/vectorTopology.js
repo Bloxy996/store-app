@@ -291,6 +291,17 @@ function planarizeForFill(vertices, edges) {
 // fill survive vertices moving: resolveBoundaryPolygon (below) re-derives
 // the actual points from wherever those vertices/edges currently are,
 // every time it's called, instead of a snapshot taken at fill-time.
+//
+// Returns { outer, holes }: `outer` is that boundary spec; `holes` is zero
+// or more ADDITIONAL boundary specs for any other shape that sits entirely
+// disconnected inside the outer face — a ring/frame's cutout, the counter
+// of a letter like "O", a hole drawn as its own separate closed shape with
+// no vertex/edge shared with the outer boundary. Those are real, common
+// vector-art shapes that a single half-edge boundary walk can't represent
+// on its own (it only ever traces one simply-connected loop), which is why
+// clicking inside such a ring used to flood-fill straight through the
+// hole — the fill boundary was only ever the outer shape, nothing told it
+// to subtract the disconnected shape sitting inside it.
 function findFillBoundary(vertices, edges, point) {
   const { vertices: pv, edges: pe, vertexSourceEdges } = planarizeForFill(vertices, edges);
   const faces = traceFaces(pv, pe);
@@ -305,23 +316,52 @@ function findFillBoundary(vertices, edges, point) {
     }
   }
   if (!best) return null;
-  const boundary = best.vertexIds.map((id) => {
-    const crossing = vertexSourceEdges.get(id);
-    return crossing ? { type: 'crossing', edgeA: crossing[0], edgeB: crossing[1] } : { type: 'vertex', id };
-  });
-  return boundary;
+
+  const toBoundarySpec = (f) =>
+    f.vertexIds.map((id) => {
+      const crossing = vertexSourceEdges.get(id);
+      return crossing ? { type: 'crossing', edgeA: crossing[0], edgeB: crossing[1] } : { type: 'vertex', id };
+    });
+
+  const pvMap = new Map(pv.map((v) => [v.id, v]));
+  const components = connectedComponents(pv, pe);
+  const ownComponent = components.find((c) => best.vertexIds.some((id) => c.has(id)));
+  const holes = [];
+  for (const comp of components) {
+    if (comp === ownComponent) continue;
+    const compPoints = [...comp].map((id) => pvMap.get(id)).filter(Boolean);
+    // Every point of the candidate component must fall inside the outer
+    // face for it to count as a hole — a component that isn't fully
+    // enclosed (sitting beside the shape, not inside it) is unrelated.
+    if (!compPoints.length || !compPoints.every((p) => pointInPolygon(p, best.points))) continue;
+    // The component itself has its own inner/outer face pair (same
+    // shape, same area, opposite winding — see the traceFaces module
+    // comment); either represents the hole equally well, so just take
+    // whichever of that component's own faces is smallest, mirroring how
+    // the outer boundary itself was chosen.
+    let holeFace = null, holeArea = Infinity;
+    for (const f of faces) {
+      if (!f.vertexIds.every((id) => comp.has(id))) continue;
+      const area = polygonArea(f.points);
+      if (area < holeArea) {
+        holeArea = area;
+        holeFace = f;
+      }
+    }
+    if (holeFace) holes.push(toBoundarySpec(holeFace));
+  }
+
+  return { outer: toBoundarySpec(best), holes };
 }
 
-// The inverse of findFillBoundary: turns a structural boundary spec back
-// into concrete {x,y} points using the CURRENT vertices/edges. Returns null
-// if anything the boundary depends on no longer exists (a referenced vertex
-// was deleted) or no longer crosses (the two edges at a 'crossing' entry no
-// longer intersect) — callers use a null result to drop the fill.
-function resolveBoundaryPolygon(vertices, edges, boundary) {
+// Resolves ONE boundary loop (outer or a hole) into concrete {x,y} points
+// from the current vertices/edges. Returns null if anything it depends on
+// no longer exists or no longer crosses.
+function resolveComponentPolygon(vertices, edges, loop) {
   const vmap = new Map(vertices.map((v) => [v.id, v]));
   const emap = new Map(edges.map((e) => [e.id, e]));
   const points = [];
-  for (const comp of boundary) {
+  for (const comp of loop) {
     if (comp.type === 'vertex') {
       const v = vmap.get(comp.id);
       if (!v) return null;
@@ -340,11 +380,118 @@ function resolveBoundaryPolygon(vertices, edges, boundary) {
   return points;
 }
 
+// The inverse of findFillBoundary: turns a structural boundary spec back
+// into concrete points using the CURRENT vertices/edges — { outer, holes },
+// each a flat {x,y}[] polygon. Returns null only if the OUTER loop fails to
+// resolve (the fill's shape is gone entirely); a hole that stops resolving
+// (its two crossing edges no longer cross, or a vertex was deleted) just
+// stops being a hole rather than invalidating the whole fill, since the
+// outer shape is still perfectly paintable without it.
+//
+// Accepts a bare array too (the pre-hole-support boundary format, from
+// files saved before this existed) and treats it as an outer loop with no
+// holes, so old files keep resolving exactly as they always did.
+function resolveBoundaryPolygon(vertices, edges, boundary) {
+  const spec = Array.isArray(boundary) ? { outer: boundary, holes: [] } : boundary;
+  const outer = resolveComponentPolygon(vertices, edges, spec.outer);
+  if (!outer) return null;
+  const holes = (spec.holes || []).map((h) => resolveComponentPolygon(vertices, edges, h)).filter(Boolean);
+  return { outer, holes };
+}
+
 // True if every vertex/edge a boundary depends on still exists in the given
 // sets — used to prune fills after a delete without paying for a full
 // segment-intersection re-check (deletion invalidates by ID, not geometry).
 function boundaryReferencesOnly(boundary, vertexIdSet, edgeIdSet) {
-  return boundary.every((comp) => (comp.type === 'vertex' ? vertexIdSet.has(comp.id) : edgeIdSet.has(comp.edgeA) && edgeIdSet.has(comp.edgeB)));
+  const loopOk = (loop) => loop.every((comp) => (comp.type === 'vertex' ? vertexIdSet.has(comp.id) : edgeIdSet.has(comp.edgeA) && edgeIdSet.has(comp.edgeB)));
+  return loopOk(boundary.outer) && boundary.holes.every(loopOk);
+}
+
+// Union-find over vertex ids connected by `edges` — used by findFillBoundary
+// to tell "a disjoint shape that happens to sit inside this face" (a hole)
+// apart from "the face's own boundary" (which shares vertices with itself,
+// trivially one component).
+function connectedComponents(vertices, edges) {
+  const parent = new Map(vertices.map((v) => [v.id, v.id]));
+  const find = (x) => {
+    while (parent.get(x) !== x) {
+      parent.set(x, parent.get(parent.get(x)));
+      x = parent.get(x);
+    }
+    return x;
+  };
+  const union = (a, b) => {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  };
+  for (const e of edges) {
+    if (parent.has(e.v1) && parent.has(e.v2)) union(e.v1, e.v2);
+  }
+  const byRoot = new Map();
+  for (const v of vertices) {
+    const r = find(v.id);
+    if (!byRoot.has(r)) byRoot.set(r, new Set());
+    byRoot.get(r).add(v.id);
+  }
+  return [...byRoot.values()];
+}
+
+// ---------------------------------------------------------------------------
+// Miter joins — where exactly two edges of EQUAL thickness meet at a
+// vertex, plain butt-capped lines leave a visible notch on one side of the
+// corner (and a harmless small overlap on the other). This computes a
+// small triangular wedge that plugs that notch so the join reads as one
+// continuous stroke. Edges of DIFFERING thickness are left alone — the
+// editor's existing thickness-ascending draw order already puts the
+// heavier one visually on top of the lighter one, which is the desired
+// look there (see VectorEditorView's sortedEdges / vectorState's
+// compileVectorSvg) — no wedge needed or wanted in that case.
+//
+// Deliberately a bevel-style fill (a straight line across the two offset
+// corner points) rather than a sharp extended miter point: a true miter
+// spikes further and further out as the angle between the edges gets more
+// acute, which is why real renderers cap it with a "miter limit" and fall
+// back to a bevel past that point anyway — using the bevel unconditionally
+// avoids that failure mode entirely and reads the same at any angle this
+// editor's vertices are likely to actually use.
+// ---------------------------------------------------------------------------
+function computeMiterJoints(vertices, edges) {
+  const vmap = new Map(vertices.map((v) => [v.id, v]));
+  const byVertex = new Map();
+  for (const e of edges) {
+    if (!byVertex.has(e.v1)) byVertex.set(e.v1, []);
+    if (!byVertex.has(e.v2)) byVertex.set(e.v2, []);
+    byVertex.get(e.v1).push(e);
+    byVertex.get(e.v2).push(e);
+  }
+  const joints = [];
+  for (const [vertexId, incident] of byVertex) {
+    if (incident.length !== 2) continue; // only the simple two-edge corner case — 3+ edges at a vertex has no single well-defined pairing to miter
+    const [e1, e2] = incident;
+    if (e1.style.thickness !== e2.style.thickness || e1.style.thickness === 0) continue; // unequal weight, or nothing to miter
+    const v = vmap.get(vertexId);
+    const other1 = vmap.get(e1.v1 === vertexId ? e1.v2 : e1.v1);
+    const other2 = vmap.get(e2.v1 === vertexId ? e2.v2 : e2.v1);
+    if (!v || !other1 || !other2) continue;
+    const len1 = dist(v, other1), len2 = dist(v, other2);
+    if (len1 < 1e-6 || len2 < 1e-6) continue;
+    const d1 = { x: (other1.x - v.x) / len1, y: (other1.y - v.y) / len1 };
+    const d2 = { x: (other2.x - v.x) / len2, y: (other2.y - v.y) / len2 };
+    const cross = d1.x * d2.y - d1.y * d2.x;
+    if (Math.abs(cross) < 1e-6) continue; // collinear (a straight pass-through) — the two strokes' edges already meet flush, nothing to plug
+    const w = e1.style.thickness / 2;
+    const n1 = { x: -d1.y, y: d1.x };
+    const n2 = { x: -d2.y, y: d2.x };
+    const gapA = cross > 0 ? { x: v.x - w * n1.x, y: v.y - w * n1.y } : { x: v.x + w * n1.x, y: v.y + w * n1.y };
+    const gapB = cross > 0 ? { x: v.x + w * n2.x, y: v.y + w * n2.y } : { x: v.x - w * n2.x, y: v.y - w * n2.y };
+    // Equal thickness doesn't mean equal color — follow the same "later
+    // element wins" convention the rest of the editor already uses for
+    // z-order (sortedEdges / compileVectorSvg) by taking whichever of the
+    // two edges appears later in the given `edges` array.
+    const winner = edges.indexOf(e2) > edges.indexOf(e1) ? e2 : e1;
+    joints.push({ vertexId, points: [v, gapA, gapB], color: winner.style.color });
+  }
+  return joints;
 }
 
 // ---------------------------------------------------------------------------
@@ -423,8 +570,10 @@ export {
   incidentEdgeIds,
   traceFaces,
   planarizeForFill,
+  connectedComponents,
   findFillBoundary,
   resolveBoundaryPolygon,
   boundaryReferencesOnly,
+  computeMiterJoints,
   snapCandidate
 };

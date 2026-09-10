@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { IconLoader, IconTrash } from '../../components/icons.jsx';
+import { IconEye, IconLoader, IconPlus, IconTrash } from '../../components/icons.jsx';
 import { VectorToolbar } from './VectorToolbar.jsx';
 import {
   AXIS_SNAP_PX,
@@ -15,6 +15,7 @@ import {
   addCircle,
   addEdge,
   addFillAt,
+  addLayer,
   addVertex,
   bindVertexOntoEdge,
   compileVectorSvg,
@@ -27,18 +28,24 @@ import {
   groupVertices,
   moveCircles,
   moveVertices,
+  moveToLayer,
   parseVectorContent,
+  removeLayer,
+  renameLayer,
+  reorderLayer,
   resizeCircle,
   selectionIsExactlyOneGroup,
   serializeVectorState,
   setCanvasBackground,
   setCircleStyle,
   setEdgeStyle,
+  setLayerVisible,
   severEdgeEndpoint,
   subdivideEdge,
-  ungroupVertices
+  ungroupVertices,
+  loopsToPathData
 } from './vectorState.js';
-import { SpatialGrid, buildVertexAdjacency, closestPointOnSegment, dist, findFillBoundary, resolveBoundaryPolygon, snapCandidate } from './vectorTopology.js';
+import { SpatialGrid, buildVertexAdjacency, closestPointOnSegment, computeMiterJoints, dist, findFillBoundary, resolveBoundaryPolygon, snapCandidate } from './vectorTopology.js';
 import { clamp } from '../../lib/mathUtils.js';
 
 const MOVE_THRESHOLD = 3; // world px before a pointerdown counts as a drag, not a click — same convention as CanvasView
@@ -69,8 +76,13 @@ function snapOpts(zoom, grid, axisSnapEnabled, opts = {}) {
 // without committing it, so callers can fold a whole gesture (e.g. a
 // polyline click that both places a point AND connects it to the previous
 // one) into a single undo step.
-function resolvePlacement(doc, grid, rawPoint, zoom, axisSnapEnabled, opts = {}) {
-  const snap = snapCandidate(doc.vertices, doc.edges, rawPoint, snapOpts(zoom, grid, axisSnapEnabled, opts));
+//
+// `snapVertices`/`snapEdges` are the pool snapCandidate is allowed to
+// consider — separate from `doc` (which this still mutates in full) so the
+// snap-cross-layer toggle can restrict what's snappable without touching
+// what actually gets created (see edgesForSnap/verticesForSnap).
+function resolvePlacement(doc, grid, rawPoint, zoom, axisSnapEnabled, opts = {}, snapVertices = doc.vertices, snapEdges = doc.edges) {
+  const snap = snapCandidate(snapVertices, snapEdges, rawPoint, snapOpts(zoom, grid, axisSnapEnabled, opts));
   if (snap.snappedVertexId) return { nextDoc: doc, vertexId: snap.snappedVertexId, snap };
   if (snap.snappedEdgeId) {
     const nextDoc = subdivideEdge(doc, snap.snappedEdgeId, snap.point);
@@ -133,6 +145,9 @@ function VectorEditorView({ file, content, onChange, loading }) {
   // guide for 0px-weight edges/circles, selection UI) so the canvas reads
   // exactly like the exported SVG. Edit mode is the default.
   const [viewMode, setViewMode] = useState(false);
+  const [activeLayerId, setActiveLayerId] = useState(null); // null = "use doc.layers[0]" (see safeActiveLayerId) — lets a freshly-loaded/undone doc always resolve to a real layer without a mount-order race
+  const [snapCrossLayer, setSnapCrossLayer] = useState(true);
+  const [layersPanelOpen, setLayersPanelOpen] = useState(false);
 
   const containerRef = useRef(null);
   const dragRef = useRef(null);
@@ -198,6 +213,21 @@ function VectorEditorView({ file, content, onChange, loading }) {
   // Edges sorted so heavier strokes draw last (on top) — Dynamic Z-Index.
   const sortedEdges = useMemo(() => [...doc.edges].sort((a, b) => a.style.thickness - b.style.thickness), [doc.edges]);
 
+  // Plugs the butt-cap notch at any vertex where exactly two EQUAL-weight
+  // edges meet — see vectorTopology.js's computeMiterJoints. Computed
+  // per-layer (a Map keyed by layer id) so two edges on different layers
+  // never miter with each other even if they share a vertex — see the
+  // render loop below. Uses verticesForRender (not doc.vertices) so the
+  // wedge follows a vertex's live drag position instead of lagging a
+  // frame behind it.
+  const miterJointsByLayer = useMemo(() => {
+    const map = new Map();
+    for (const layer of doc.layers) {
+      map.set(layer.id, computeMiterJoints(verticesForRender, doc.edges.filter((e) => e.layerId === layer.id)));
+    }
+    return map;
+  }, [doc.layers, doc.edges, verticesForRender]);
+
   // Fills resolve against verticesForRender (not doc.vertices), so a fill
   // visibly tracks its shape live while a drag is in progress, not just
   // after it's dropped — this is also what keeps a fill from "breaking"
@@ -207,7 +237,12 @@ function VectorEditorView({ file, content, onChange, loading }) {
   // resolves to null and is skipped — pruneFills (vectorState.js) removes
   // those from the document outright the next time the graph is edited.
   const resolvedFills = useMemo(() => {
-    return doc.fills.map((f) => ({ fill: f, points: resolveBoundaryPolygon(verticesForRender, doc.edges, f.boundary) })).filter((x) => x.points);
+    // resolveBoundaryPolygon now returns { outer, holes } — see
+    // vectorTopology.js's findFillBoundary. A ring/frame's cutout renders
+    // as an additional subpath under fill-rule="evenodd" rather than a
+    // second element, so a nested hole always punches through regardless
+    // of fill color/z-order.
+    return doc.fills.map((f) => ({ fill: f, resolved: resolveBoundaryPolygon(verticesForRender, doc.edges, f.boundary) })).filter((x) => x.resolved);
   }, [doc.fills, doc.edges, verticesForRender]);
 
   // Circles are independent primitives (not part of the vertex/edge graph),
@@ -223,6 +258,33 @@ function VectorEditorView({ file, content, onChange, loading }) {
   // canvas color, so the alignment-dot grid stays legible against any
   // background the document is set to.
   const dotColor = useMemo(() => contrastDotColor(doc.canvas.background), [doc.canvas.background]);
+
+  // Falls back to the bottom layer whenever activeLayerId hasn't been set
+  // yet, or no longer names a real layer (its layer was just deleted, or a
+  // freshly-loaded/undone doc has a different layer set entirely) —
+  // avoids needing an effect just to keep this in sync.
+  const safeActiveLayerId = doc.layers.some((l) => l.id === activeLayerId) ? activeLayerId : doc.layers[0].id;
+
+  // What snapCandidate/resolvePlacement are allowed to consider — the full
+  // graph when snapCrossLayer is on, or just the active layer's own edges
+  // (plus any vertex not owned by an edge on ANY layer, since a bare
+  // vertex isn't "on" a layer to begin with) when it's off. See the
+  // snap-cross-layer toggle in the toolbar.
+  const edgesForSnap = useMemo(() => (snapCrossLayer ? doc.edges : doc.edges.filter((e) => e.layerId === safeActiveLayerId)), [snapCrossLayer, doc.edges, safeActiveLayerId]);
+  const verticesForSnap = useMemo(() => {
+    if (snapCrossLayer) return doc.vertices;
+    const sameLayer = new Set();
+    const anyLayer = new Set();
+    for (const e of doc.edges) {
+      anyLayer.add(e.v1);
+      anyLayer.add(e.v2);
+      if (e.layerId === safeActiveLayerId) {
+        sameLayer.add(e.v1);
+        sameLayer.add(e.v2);
+      }
+    }
+    return doc.vertices.filter((v) => sameLayer.has(v.id) || !anyLayer.has(v.id));
+  }, [snapCrossLayer, doc.edges, doc.vertices, safeActiveLayerId]);
 
   const scheduleLiveOverrides = useCallback((map) => {
     pendingOverridesRef.current = map;
@@ -366,7 +428,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
 
     if (tool === 'edge') {
       if (edgeChainFirst && edgeChainFirst !== vertexId) {
-        const { state: next, ok } = addEdge(doc, edgeChainFirst, vertexId, activeStyle);
+        const { state: next, ok } = addEdge(doc, edgeChainFirst, vertexId, activeStyle, safeActiveLayerId);
         if (ok) commitState(next);
         setEdgeChainFirst(null);
       } else {
@@ -380,7 +442,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
         // Closing the loop on an existing (already-in-chain) vertex ends the chain.
         const last = polylineChain[polylineChain.length - 1];
         if (last !== vertexId) {
-          const { state: next, ok } = addEdge(doc, last, vertexId, activeStyle);
+          const { state: next, ok } = addEdge(doc, last, vertexId, activeStyle, safeActiveLayerId);
           if (ok) commitState(next);
         }
         setPolylineChain([]);
@@ -388,7 +450,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
       }
       if (polylineChain.length) {
         const last = polylineChain[polylineChain.length - 1];
-        const { state: next, ok } = addEdge(doc, last, vertexId, activeStyle);
+        const { state: next, ok } = addEdge(doc, last, vertexId, activeStyle, safeActiveLayerId);
         if (ok) commitState(next);
       }
       setPolylineChain((chain) => [...chain, vertexId]);
@@ -468,7 +530,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
         let working = next;
         if (polylineChain.length) {
           const last = polylineChain[polylineChain.length - 1];
-          const { state: withEdge, ok } = addEdge(working, last, newVid, activeStyle);
+          const { state: withEdge, ok } = addEdge(working, last, newVid, activeStyle, safeActiveLayerId);
           if (ok) working = withEdge;
         }
         commitState(working);
@@ -579,11 +641,11 @@ function VectorEditorView({ file, content, onChange, loading }) {
       return;
     }
     if (tool === 'polyline') {
-      const { nextDoc, vertexId } = resolvePlacement(doc, grid, world, viewport.zoom, axisSnapEnabled);
+      const { nextDoc, vertexId } = resolvePlacement(doc, grid, world, viewport.zoom, axisSnapEnabled, {}, verticesForSnap, edgesForSnap);
       if (nextDoc !== doc) commitState(nextDoc);
       if (polylineChain.length) {
         const last = polylineChain[polylineChain.length - 1];
-        const { state: withEdge, ok } = addEdge(nextDoc, last, vertexId, activeStyle);
+        const { state: withEdge, ok } = addEdge(nextDoc, last, vertexId, activeStyle, safeActiveLayerId);
         if (ok) commitState(withEdge);
       }
       setPolylineChain((chain) => [...chain, vertexId]);
@@ -595,7 +657,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
       return;
     }
     if (tool === 'fill') {
-      const { state: next, ok } = addFillAt(doc, world, activeStyle.color);
+      const { state: next, ok } = addFillAt(doc, world, activeStyle.color, safeActiveLayerId);
       if (ok) commitState(next);
       return;
     }
@@ -631,7 +693,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
 
     if (drag.mode === 'place-vertex') {
       if (dist(drag.startWorld, world) > MOVE_THRESHOLD / viewport.zoom) drag.moved = true;
-      const snap = snapCandidate(doc.vertices, doc.edges, world, snapOpts(viewport.zoom, grid, axisSnapEnabled));
+      const snap = snapCandidate(verticesForSnap, edgesForSnap, world, snapOpts(viewport.zoom, grid, axisSnapEnabled));
       setSnapPreview(snap);
       return;
     }
@@ -644,7 +706,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
         // edge (bound on drop — see below), or to an axis. Group drags
         // intentionally skip target-snapping and just move by a uniform
         // delta, per "maintaining relative distances".
-        const snap = snapCandidate(doc.vertices, doc.edges, world, snapOpts(viewport.zoom, grid, axisSnapEnabled, { excludeVertexId: drag.singleId }));
+        const snap = snapCandidate(verticesForSnap, edgesForSnap, world, snapOpts(viewport.zoom, grid, axisSnapEnabled, { excludeVertexId: drag.singleId }));
         setSnapPreview(snap);
         scheduleLiveOverrides(new Map([[drag.singleId, snap.point]]));
       } else {
@@ -660,7 +722,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
 
     if (drag.mode === 'spawn-connected') {
       if (dist(drag.startWorld, world) > MOVE_THRESHOLD / viewport.zoom) drag.moved = true;
-      const snap = snapCandidate(doc.vertices, doc.edges, world, snapOpts(viewport.zoom, grid, axisSnapEnabled, { excludeVertexId: drag.fromVertexId }));
+      const snap = snapCandidate(verticesForSnap, edgesForSnap, world, snapOpts(viewport.zoom, grid, axisSnapEnabled, { excludeVertexId: drag.fromVertexId }));
       setSnapPreview(snap);
       return; // preview line follows pointerWorld automatically; the actual vertex/edge is created on pointerup
     }
@@ -734,7 +796,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
 
     if (drag.mode === 'place-vertex') {
       if (!drag.moved && pointerWorld) {
-        const { nextDoc } = resolvePlacement(doc, grid, pointerWorld, viewport.zoom, axisSnapEnabled);
+        const { nextDoc } = resolvePlacement(doc, grid, pointerWorld, viewport.zoom, axisSnapEnabled, {}, verticesForSnap, edgesForSnap);
         if (nextDoc !== doc) commitState(nextDoc);
       }
       return;
@@ -744,8 +806,8 @@ function VectorEditorView({ file, content, onChange, loading }) {
       if (pointerWorld) {
         const dropDist = dist(drag.startWorld, pointerWorld);
         if (dropDist > MOVE_THRESHOLD / viewport.zoom) {
-          const { nextDoc, vertexId } = resolvePlacement(doc, grid, pointerWorld, viewport.zoom, axisSnapEnabled, { excludeVertexId: drag.fromVertexId });
-          const { state: withEdge, ok } = addEdge(nextDoc, drag.fromVertexId, vertexId, activeStyle);
+          const { nextDoc, vertexId } = resolvePlacement(doc, grid, pointerWorld, viewport.zoom, axisSnapEnabled, { excludeVertexId: drag.fromVertexId }, verticesForSnap, edgesForSnap);
+          const { state: withEdge, ok } = addEdge(nextDoc, drag.fromVertexId, vertexId, activeStyle, safeActiveLayerId);
           commitState(ok ? withEdge : nextDoc);
         }
       }
@@ -758,7 +820,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
         // an edge the vertex isn't already part of, Edge Mid-Point
         // Insertion binds it into that edge's topology instead of just
         // leaving it sitting on top.
-        const snap = snapCandidate(doc.vertices, doc.edges, pointerWorld, snapOpts(viewport.zoom, grid, axisSnapEnabled, { excludeVertexId: drag.singleId }));
+        const snap = snapCandidate(verticesForSnap, edgesForSnap, pointerWorld, snapOpts(viewport.zoom, grid, axisSnapEnabled, { excludeVertexId: drag.singleId }));
         let next = moveVertices(doc, new Map([[drag.singleId, snap.point]]));
         if (snap.snappedEdgeId) next = bindVertexOntoEdge(next, snap.snappedEdgeId, drag.singleId);
         commitState(next);
@@ -788,7 +850,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
       // A plain click (no real drag) places a circle at the toolbar's
       // current default radius rather than a near-zero one.
       const placedR = r > MOVE_THRESHOLD / viewport.zoom ? r : activeRadius;
-      commitState(addCircle(doc, drag.startWorld.x, drag.startWorld.y, placedR, activeStyle, activeCircleFill));
+      commitState(addCircle(doc, drag.startWorld.x, drag.startWorld.y, placedR, activeStyle, activeCircleFill, safeActiveLayerId));
       if (r > MOVE_THRESHOLD / viewport.zoom) setActiveRadius(Math.round(placedR)); // drawing calibrates the default for next time
       return;
     }
@@ -955,6 +1017,8 @@ function VectorEditorView({ file, content, onChange, loading }) {
         onSetCanvasBackground={(color) => commitState(setCanvasBackground(doc, color))}
         axisSnapEnabled={axisSnapEnabled}
         onToggleAxisSnap={() => setAxisSnapEnabled((v) => !v)}
+        layersPanelOpen={layersPanelOpen}
+        onToggleLayersPanel={() => setLayersPanelOpen((v) => !v)}
         viewMode={viewMode}
         onToggleViewMode={() => {
           setViewMode((v) => !v);
@@ -1006,54 +1070,134 @@ function VectorEditorView({ file, content, onChange, loading }) {
         <svg className="vector-svg" width="100%" height="100%">
           <rect className="vector-bg-hit" x="0" y="0" width="100%" height="100%" fill="transparent" />
           <g transform={`translate(${viewport.x} ${viewport.y}) scale(${viewport.zoom})`}>
-            {resolvedFills.map(({ fill, points }) => (
-              <polygon key={fill.id} points={points.map((p) => `${p.x},${p.y}`).join(' ')} fill={fill.color} stroke="none" className={`vector-fill ${tool === 'eyedropper' ? 'pickable' : ''}`} onPointerDown={(ev) => onFillPointerDown(ev, fill)} />
-            ))}
+            {/* Layers are a strict z-partition (see vectorState.js) —
+                everything on a lower layer renders fully behind everything
+                on a higher one, so the whole fills → circles → edges →
+                miter-joints stack repeats per layer, bottom to top, rather
+                than once globally. A hidden layer's content isn't
+                rendered (or interactive) at all. */}
+            {doc.layers
+              .filter((layer) => layer.visible !== false)
+              .map((layer) => (
+                <g key={layer.id}>
+                  {resolvedFills
+                    .filter(({ fill }) => fill.layerId === layer.id)
+                    .map(({ fill, resolved }) => (
+                      <path
+                        key={fill.id}
+                        d={loopsToPathData([resolved.outer, ...resolved.holes])}
+                        fill={fill.color}
+                        stroke="none"
+                        fillRule="evenodd"
+                        className={`vector-fill ${tool === 'eyedropper' ? 'pickable' : ''}`}
+                        onPointerDown={(ev) => onFillPointerDown(ev, fill)}
+                      />
+                    ))}
 
-            {circlesForRender.map((c) => {
-              const selected = selectedCircleIds.has(c.id);
-              const isZeroWeight = c.style.thickness === 0;
-              return (
-                <g key={c.id}>
-                  {selected && !viewMode && (
-                    <circle cx={c.cx} cy={c.cy} r={c.r} className="vector-selection-halo" strokeWidth={Math.max(c.style.thickness, 3) + 6 / viewport.zoom} />
-                  )}
-                  {isZeroWeight && !viewMode && (
-                    <circle cx={c.cx} cy={c.cy} r={c.r} className="vector-zero-weight-guide" strokeWidth={1.5 / viewport.zoom} onPointerDown={(ev) => onCirclePointerDown(ev, c.id)} />
-                  )}
-                  <circle
-                    cx={c.cx}
-                    cy={c.cy}
-                    r={c.r}
-                    stroke={c.style.color}
-                    strokeWidth={c.style.thickness}
-                    fill={c.fill && c.fill !== 'none' ? c.fill : 'none'}
-                    className={`vector-circle ${selected ? 'selected' : ''}`}
-                    onPointerDown={viewMode ? undefined : (ev) => onCirclePointerDown(ev, c.id)}
-                  />
-                  {selected && !viewMode && (
-                    <rect
-                      className="vector-scale-handle"
-                      style={{ cursor: 'ew-resize' }}
-                      x={c.cx + c.r - 4 / viewport.zoom}
-                      y={c.cy - 4 / viewport.zoom}
-                      width={8 / viewport.zoom}
-                      height={8 / viewport.zoom}
-                      onPointerDown={(e) => beginCircleResize(e, c.id)}
-                    />
-                  )}
+                  {circlesForRender
+                    .filter((c) => c.layerId === layer.id)
+                    .map((c) => {
+                      const selected = selectedCircleIds.has(c.id);
+                      const isZeroWeight = c.style.thickness === 0;
+                      return (
+                        <g key={c.id}>
+                          {selected && !viewMode && (
+                            <circle cx={c.cx} cy={c.cy} r={c.r} className="vector-selection-halo" strokeWidth={Math.max(c.style.thickness, 3) + 6 / viewport.zoom} />
+                          )}
+                          {isZeroWeight && !viewMode && (
+                            <circle cx={c.cx} cy={c.cy} r={c.r} className="vector-zero-weight-guide" strokeWidth={1.5 / viewport.zoom} onPointerDown={(ev) => onCirclePointerDown(ev, c.id)} />
+                          )}
+                          <circle
+                            cx={c.cx}
+                            cy={c.cy}
+                            r={c.r}
+                            stroke={c.style.color}
+                            strokeWidth={c.style.thickness}
+                            fill={c.fill && c.fill !== 'none' ? c.fill : 'none'}
+                            className={`vector-circle ${selected ? 'selected' : ''}`}
+                            onPointerDown={viewMode ? undefined : (ev) => onCirclePointerDown(ev, c.id)}
+                          />
+                          {selected && !viewMode && (
+                            <rect
+                              className="vector-scale-handle"
+                              style={{ cursor: 'ew-resize' }}
+                              x={c.cx + c.r - 4 / viewport.zoom}
+                              y={c.cy - 4 / viewport.zoom}
+                              width={8 / viewport.zoom}
+                              height={8 / viewport.zoom}
+                              onPointerDown={(e) => beginCircleResize(e, c.id)}
+                            />
+                          )}
+                        </g>
+                      );
+                    })}
+
+                  {sortedEdges
+                    .filter((e) => e.layerId === layer.id)
+                    .map((e) => {
+                      const a = vertexById.get(e.v1);
+                      const b = vertexById.get(e.v2);
+                      if (!a || !b) return null;
+                      const selected = selectedEdgeIds.has(e.id);
+                      const isZeroWeight = e.style.thickness === 0;
+                      return (
+                        <g key={e.id}>
+                          {/* Selection halo — a real extra line rather than only the
+                              CSS filter, since a filter has nothing to shadow on a
+                              true 0px-weight edge (stroke-width:0 paints nothing to
+                              begin with). This is the "edge is selected" indicator. */}
+                          {selected && !viewMode && (
+                            <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="vector-selection-halo" strokeWidth={Math.max(e.style.thickness, 3) + 6 / viewport.zoom} strokeLinecap="round" />
+                          )}
+                          {/* 0px-weight edges paint no real stroke (by design — see
+                              vectorState.js) so they'd otherwise be both invisible
+                              and unclickable; this dashed guide is Edit-mode-only
+                              and disappears in View mode, matching the export. */}
+                          {isZeroWeight && !viewMode && (
+                            <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="vector-zero-weight-guide" strokeWidth={1.5 / viewport.zoom} onPointerDown={(ev) => onEdgePointerDown(ev, e.id)} />
+                          )}
+                          <line
+                            x1={a.x}
+                            y1={a.y}
+                            x2={b.x}
+                            y2={b.y}
+                            stroke={e.style.color}
+                            strokeWidth={e.style.thickness}
+                            strokeLinecap="butt"
+                            strokeLinejoin="miter"
+                            className={`vector-edge ${selected ? 'selected' : ''} ${snapPreview?.snappedEdgeId === e.id ? 'snap-target' : ''}`}
+                            onPointerDown={viewMode ? undefined : (ev) => onEdgePointerDown(ev, e.id)}
+                          />
+                        </g>
+                      );
+                    })}
+
+                  {/* Miter join wedges — see vectorTopology.js's
+                      computeMiterJoints. Computed from THIS layer's own
+                      edges only (a vertex with one edge on this layer and
+                      another on a different layer never miters across
+                      them), and drawn after this layer's own edges. These
+                      are real artwork (they render in the exported SVG
+                      too, see compileVectorSvg), so — unlike the
+                      selection/snap UI below — they stay visible in View
+                      mode as well as Edit mode. */}
+                  {(miterJointsByLayer.get(layer.id) || []).map((j) => (
+                    <polygon key={j.vertexId} points={j.points.map((p) => `${p.x},${p.y}`).join(' ')} fill={j.color} stroke="none" className="vector-miter-joint" />
+                  ))}
                 </g>
-              );
-            })}
+              ))}
+
             {/* In-progress circle draw preview — not yet a real circle in the
                 doc, so it's rendered separately from circlesForRender. */}
             {circleDraft && !circleDraft.id && (
               <circle cx={circleDraft.cx} cy={circleDraft.cy} r={circleDraft.r} className="vector-zero-weight-guide" strokeWidth={1.5 / viewport.zoom} />
             )}
 
-            {/* Selection move hit-area, rendered BEFORE vertices/edges so an
-                individual vertex/edge on top of it still gets pointer
-                priority for its own more-specific click behavior. */}
+            {/* Selection move hit-area, rendered BEFORE vertices so an
+                individual vertex on top of it still gets pointer priority
+                for its own more-specific click behavior. Vertices/edges
+                are layerless selection targets, so this sits above every
+                layer's content rather than inside the loop above. */}
             {selectionBox && (
               <rect
                 className="vector-selection-move-hit"
@@ -1064,44 +1208,6 @@ function VectorEditorView({ file, content, onChange, loading }) {
                 onPointerDown={onSelectionBoxPointerDown}
               />
             )}
-
-            {sortedEdges.map((e) => {
-              const a = vertexById.get(e.v1);
-              const b = vertexById.get(e.v2);
-              if (!a || !b) return null;
-              const selected = selectedEdgeIds.has(e.id);
-              const isZeroWeight = e.style.thickness === 0;
-              return (
-                <g key={e.id}>
-                  {/* Selection halo — a real extra line rather than only the
-                      CSS filter, since a filter has nothing to shadow on a
-                      true 0px-weight edge (stroke-width:0 paints nothing to
-                      begin with). This is the "edge is selected" indicator. */}
-                  {selected && !viewMode && (
-                    <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="vector-selection-halo" strokeWidth={Math.max(e.style.thickness, 3) + 6 / viewport.zoom} strokeLinecap="round" />
-                  )}
-                  {/* 0px-weight edges paint no real stroke (by design — see
-                      vectorState.js) so they'd otherwise be both invisible
-                      and unclickable; this dashed guide is Edit-mode-only
-                      and disappears in View mode, matching the export. */}
-                  {isZeroWeight && !viewMode && (
-                    <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="vector-zero-weight-guide" strokeWidth={1.5 / viewport.zoom} onPointerDown={(ev) => onEdgePointerDown(ev, e.id)} />
-                  )}
-                  <line
-                    x1={a.x}
-                    y1={a.y}
-                    x2={b.x}
-                    y2={b.y}
-                    stroke={e.style.color}
-                    strokeWidth={e.style.thickness}
-                    strokeLinecap="butt"
-                    strokeLinejoin="miter"
-                    className={`vector-edge ${selected ? 'selected' : ''} ${snapPreview?.snappedEdgeId === e.id ? 'snap-target' : ''}`}
-                    onPointerDown={viewMode ? undefined : (ev) => onEdgePointerDown(ev, e.id)}
-                  />
-                </g>
-              );
-            })}
 
             {/* Live preview of the segment about to be created */}
             {tool === 'edge' && edgeChainFirst && pointerWorld && vertexById.get(edgeChainFirst) && (
@@ -1208,12 +1314,120 @@ function VectorEditorView({ file, content, onChange, loading }) {
                 Ungroup
               </button>
             )}
+            {/* Layer reassignment only applies to edges/circles — vertices
+                are layerless shared infrastructure (see vectorState.js),
+                so a pure vertex selection gets no layer-move controls. */}
+            {(selectedEdgeIds.size > 0 || selectedCircleIds.size > 0) && (
+              <>
+                <button
+                  className="icon-btn"
+                  title="Move selection to the layer above"
+                  disabled={doc.layers.findIndex((l) => l.id === safeActiveLayerId) >= doc.layers.length - 1}
+                  onClick={() => {
+                    const i = doc.layers.findIndex((l) => l.id === safeActiveLayerId);
+                    if (i < doc.layers.length - 1) commitState(moveToLayer(doc, { edgeIds: selectedEdgeIds, circleIds: selectedCircleIds }, doc.layers[i + 1].id));
+                  }}
+                >
+                  ↑
+                </button>
+                <button
+                  className="icon-btn"
+                  title="Move selection to the layer below"
+                  disabled={doc.layers.findIndex((l) => l.id === safeActiveLayerId) <= 0}
+                  onClick={() => {
+                    const i = doc.layers.findIndex((l) => l.id === safeActiveLayerId);
+                    if (i > 0) commitState(moveToLayer(doc, { edgeIds: selectedEdgeIds, circleIds: selectedCircleIds }, doc.layers[i - 1].id));
+                  }}
+                >
+                  ↓
+                </button>
+              </>
+            )}
             <button className="icon-btn" onClick={deleteSelection} title="Delete">
               <IconTrash size={14} />
             </button>
           </div>
         )}
       </div>
+
+      {layersPanelOpen && (
+        <div className="vector-layers-panel">
+          <div className="vector-layers-panel-header">
+            <span>Layers</span>
+            <button
+              className="icon-btn"
+              title="Add layer"
+              onClick={() => {
+                const next = addLayer(doc, undefined);
+                commitState(next);
+                setActiveLayerId(next._newLayerId);
+              }}
+            >
+              <IconPlus size={13} />
+            </button>
+          </div>
+          <div className="vector-layers-list">
+            {/* Rendered top-to-bottom (reverse of the stored bottom-to-top
+                z-order) so the layer that's visually on top is listed
+                first, matching how every other layers panel reads. */}
+            {[...doc.layers].reverse().map((layer) => {
+              const i = doc.layers.findIndex((l) => l.id === layer.id);
+              return (
+                <div key={layer.id} className={`vector-layer-row ${layer.id === safeActiveLayerId ? 'active' : ''}`} onClick={() => setActiveLayerId(layer.id)}>
+                  <button
+                    className="icon-btn"
+                    title={layer.visible === false ? 'Show layer' : 'Hide layer'}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      commitState(setLayerVisible(doc, layer.id, layer.visible === false));
+                    }}
+                  >
+                    <IconEye size={13} style={layer.visible === false ? { opacity: 0.35 } : undefined} />
+                  </button>
+                  <input className="vector-layer-name-input" value={layer.name} onClick={(e) => e.stopPropagation()} onChange={(e) => commitState(renameLayer(doc, layer.id, e.target.value))} />
+                  <button
+                    className="icon-btn"
+                    title="Move layer up"
+                    disabled={i === doc.layers.length - 1}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      commitState(reorderLayer(doc, layer.id, 'up'));
+                    }}
+                  >
+                    ↑
+                  </button>
+                  <button
+                    className="icon-btn"
+                    title="Move layer down"
+                    disabled={i === 0}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      commitState(reorderLayer(doc, layer.id, 'down'));
+                    }}
+                  >
+                    ↓
+                  </button>
+                  <button
+                    className="icon-btn"
+                    title="Delete layer"
+                    disabled={doc.layers.length <= 1}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      commitState(removeLayer(doc, layer.id));
+                    }}
+                  >
+                    <IconTrash size={13} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          <label className="vector-layers-snap-toggle">
+            <input type="checkbox" checked={snapCrossLayer} onChange={(e) => setSnapCrossLayer(e.target.checked)} />
+            Snap across all layers
+          </label>
+        </div>
+      )}
     </div>
   );
 }

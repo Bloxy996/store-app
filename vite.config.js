@@ -126,16 +126,16 @@ export default defineConfig({
               url.origin === 'https://apis.google.com',
             handler: 'NetworkOnly'
           },
-          {
-            // store's own backend (server/) — Drive content and session
-            // auth now flow through here (see the header comment above).
-            // Same reasoning as the googleapis.com rule: never cache any
-            // of it. Only registered when VITE_BACKEND_URL parses at
-            // build time; navigateFallbackDenylist above already covers
-          },
           ...(backendOrigin
             ? [
                 {
+                  // store's own backend (server/) — Drive content and
+                  // session auth now flow through here (see the header
+                  // comment above). Same reasoning as the googleapis.com
+                  // rule: never cache any of it. Baked in as a literal
+                  // (via new Function) rather than closing over
+                  // backendOrigin directly — see the comment on that
+                  // variable's declaration above.
                   urlPattern: new Function('arg', `return arg.url.origin === ${JSON.stringify(backendOrigin)};`),
                   handler: 'NetworkOnly'
                 }
