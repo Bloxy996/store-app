@@ -10,6 +10,7 @@ import { boundaryReferencesOnly, buildVertexAdjacency, findFillBoundary, inciden
 //     vertices: [ { id, x, y } ],
 //     edges:    [ { id, v1, v2, style: { color, thickness } } ],
 //     fills:    [ { id, boundary: [...], color } ],
+//     circles:  [ { id, cx, cy, r, style: { color, thickness }, fill } ],
 //     groups:   [ { id, vertexIds: [...] } ] }
 //
 // Design notes (see also the rewritten build spec this ships against):
@@ -17,6 +18,15 @@ import { boundaryReferencesOnly, buildVertexAdjacency, findFillBoundary, inciden
 //    is no vertex style and no inheritance, so there's never a conflict to
 //    resolve when an edge's two endpoints belong to differently-styled
 //    edges elsewhere in the graph.
+//  - An edge's (or circle's) `style.thickness` may be exactly 0 — a
+//    deliberately "inkless" edge/outline that compiles to a real
+//    stroke-width:0 stroke in the exported SVG (i.e. genuinely invisible,
+//    not just thin). The editor still shows a dashed guide for these in
+//    Edit mode so they stay findable/selectable; View mode hides that
+//    guide so the canvas matches the export. See VectorEditorView.jsx.
+//  - Circles are independent primitives — not part of the vertex/edge
+//    graph, no snapping into it, no fill-boundary participation. Always
+//    perfect circles (single radius), never ellipses.
 //  - A fill's `boundary` is a STRUCTURAL reference, not a snapshot of
 //    coordinates: each entry is either a real vertex id, or (at a fill-only
 //    crossing — see vectorTopology.js's planarizeForFill) the two real edge
@@ -34,9 +44,18 @@ import { boundaryReferencesOnly, buildVertexAdjacency, findFillBoundary, inciden
 
 const VECTOR_COLORS = ['#e0555a', '#e0a63d', '#d8c34a', '#6fcf97', '#4fb0c6', '#9b7fd1', '#dcddde'];
 
-const VECTOR_THICKNESSES = [1, 2, 3, 5, 8, 12];
+// 0 is a real, meaningful option here (see the schema note above) — it must
+// stay first-class through parse/serialize, not fall back to a "truthy"
+// default the way `x || DEFAULT` would.
+const VECTOR_THICKNESSES = [0, 1, 2, 3, 5, 8, 12];
+
+const VECTOR_RADII = [4, 8, 12, 20, 30, 50, 80, 120];
 
 const DEFAULT_STYLE = { color: VECTOR_COLORS[6], thickness: 2 };
+
+const DEFAULT_CIRCLE_STYLE = { color: VECTOR_COLORS[6], thickness: 2 };
+const DEFAULT_CIRCLE_FILL = 'none';
+const DEFAULT_CIRCLE_RADIUS = 30;
 
 const VECTOR_ZOOM_MIN = 0.1;
 const VECTOR_ZOOM_MAX = 6;
@@ -64,8 +83,17 @@ function makeDefaultVectorState(title) {
     vertices: [],
     edges: [],
     fills: [],
+    circles: [],
     groups: []
   };
+}
+
+// Parses a thickness value keeping an explicit 0 intact — `Number(x) || d`
+// would silently coerce a real 0 into the fallback default, which is wrong
+// now that 0 is a legitimate, distinct thickness.
+function parseThickness(raw, fallback) {
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 
@@ -92,13 +120,25 @@ function parseVectorContent(content) {
     const edges = Array.isArray(p?.edges)
       ? p.edges
           .filter((e) => e && e.id && vertexIds.has(e.v1) && vertexIds.has(e.v2) && e.v1 !== e.v2)
-          .map((e) => ({ id: e.id, v1: e.v1, v2: e.v2, style: { color: e.style?.color || DEFAULT_STYLE.color, thickness: Number(e.style?.thickness) || DEFAULT_STYLE.thickness } }))
+          .map((e) => ({ id: e.id, v1: e.v1, v2: e.v2, style: { color: e.style?.color || DEFAULT_STYLE.color, thickness: parseThickness(e.style?.thickness, DEFAULT_STYLE.thickness) } }))
       : [];
     const edgeIds = new Set(edges.map((e) => e.id));
     const fills = Array.isArray(p?.fills)
       ? p.fills
           .map((f) => (f && f.id && f.color ? { id: f.id, color: f.color, boundary: parseFillBoundary(f.boundary, vertexIds, edgeIds) } : null))
           .filter((f) => f && f.boundary)
+      : [];
+    const circles = Array.isArray(p?.circles)
+      ? p.circles
+          .filter((c) => c && c.id && Number.isFinite(Number(c.cx)) && Number.isFinite(Number(c.cy)))
+          .map((c) => ({
+            id: c.id,
+            cx: Number(c.cx) || 0,
+            cy: Number(c.cy) || 0,
+            r: Math.max(0.5, Number(c.r) || DEFAULT_CIRCLE_RADIUS),
+            style: { color: c.style?.color || DEFAULT_CIRCLE_STYLE.color, thickness: parseThickness(c.style?.thickness, DEFAULT_CIRCLE_STYLE.thickness) },
+            fill: typeof c.fill === 'string' ? c.fill : DEFAULT_CIRCLE_FILL
+          }))
       : [];
     const groups = Array.isArray(p?.groups)
       ? p.groups.filter((g) => g && g.id && Array.isArray(g.vertexIds)).map((g) => ({ id: g.id, vertexIds: g.vertexIds.filter((id) => vertexIds.has(id)) })).filter((g) => g.vertexIds.length > 1)
@@ -110,6 +150,7 @@ function parseVectorContent(content) {
       vertices,
       edges,
       fills,
+      circles,
       groups
     };
   } catch {
@@ -120,7 +161,7 @@ function parseVectorContent(content) {
 
 function serializeVectorState(state) {
   return JSON.stringify(
-    { title: state.title, description: state.description, canvas: state.canvas, vertices: state.vertices, edges: state.edges, fills: state.fills, groups: state.groups },
+    { title: state.title, description: state.description, canvas: state.canvas, vertices: state.vertices, edges: state.edges, fills: state.fills, circles: state.circles, groups: state.groups },
     null,
     2
   );
@@ -308,6 +349,61 @@ function cryptoRandomId() {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
+// ---------------------------------------------------------------------------
+// Circles — always perfect circles (one radius, never an ellipse). Kept as
+// their own array rather than folded into the vertex/edge graph: no
+// snapping onto them, no fill-boundary participation, just an independent
+// primitive with a stroke (color/thickness) and an optional fill.
+// ---------------------------------------------------------------------------
+function addCircle(state, cx, cy, r, style, fill) {
+  const circle = { id: `c-${cryptoRandomId()}`, cx, cy, r: Math.max(0.5, r), style: { ...DEFAULT_CIRCLE_STYLE, ...style }, fill: fill ?? DEFAULT_CIRCLE_FILL };
+  return { ...state, circles: [...state.circles, circle], _newCircleId: circle.id };
+}
+
+// Bulk move, same "Map(id -> absolute new position)" convention as
+// moveVertices.
+function moveCircles(state, deltas) {
+  if (!deltas.size) return state;
+  return { ...state, circles: state.circles.map((c) => (deltas.has(c.id) ? { ...c, ...deltas.get(c.id) } : c)) };
+}
+
+function resizeCircle(state, circleId, r) {
+  return { ...state, circles: state.circles.map((c) => (c.id === circleId ? { ...c, r: Math.max(0.5, r) } : c)) };
+}
+
+function setCircleStyle(state, circleId, patch) {
+  return {
+    ...state,
+    circles: state.circles.map((c) => {
+      if (c.id !== circleId) return c;
+      const next = { ...c };
+      if (patch.style) next.style = { ...c.style, ...patch.style };
+      if ('fill' in patch) next.fill = patch.fill;
+      return next;
+    })
+  };
+}
+
+function deleteCircles(state, circleIds) {
+  if (!circleIds.size) return state;
+  return { ...state, circles: state.circles.filter((c) => !circleIds.has(c.id)) };
+}
+
+// Picks black or white — whichever contrasts more — for the grid-dot
+// texture painted behind the artwork, so the alignment dots stay visible
+// against any canvas background color instead of just using a fixed theme
+// color that could wash out against a similarly-toned background.
+function contrastDotColor(hex) {
+  const clean = (hex || '').replace('#', '');
+  const full = clean.length === 3 ? clean.split('').map((ch) => ch + ch).join('') : clean;
+  const r = parseInt(full.slice(0, 2), 16);
+  const g = parseInt(full.slice(2, 4), 16);
+  const b = parseInt(full.slice(4, 6), 16);
+  if ([r, g, b].some((n) => Number.isNaN(n))) return '#ffffff';
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return luminance > 0.55 ? '#000000' : '#ffffff';
+}
+
 
 // ---------------------------------------------------------------------------
 // SVG export (spec section 6) — edges compile to <line>, fills to
@@ -332,6 +428,12 @@ function compileVectorSvg(state) {
     })
     .filter(Boolean)
     .join('\n');
+  // A thickness of exactly 0 compiles to a real stroke-width:0 stroke,
+  // which SVG renders as no stroke at all — genuinely invisible edges/
+  // outlines, not just very thin ones (see the schema note up top).
+  const circlesMarkup = state.circles
+    .map((c) => `  <circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" stroke="${c.style.color}" stroke-width="${c.style.thickness}" fill="${c.fill && c.fill !== 'none' ? c.fill : 'none'}" />`)
+    .join('\n');
   const vertexById = new Map(state.vertices.map((v) => [v.id, v]));
   const edgesMarkup = sortedEdges
     .map((e) => {
@@ -342,13 +444,17 @@ function compileVectorSvg(state) {
     })
     .filter(Boolean)
     .join('\n');
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">\n  <rect x="0" y="0" width="${width}" height="${height}" fill="${background}" />\n${fillsMarkup ? fillsMarkup + '\n' : ''}${edgesMarkup}\n</svg>\n`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">\n  <rect x="0" y="0" width="${width}" height="${height}" fill="${background}" />\n${fillsMarkup ? fillsMarkup + '\n' : ''}${circlesMarkup ? circlesMarkup + '\n' : ''}${edgesMarkup}\n</svg>\n`;
 }
 
 export {
   VECTOR_COLORS,
   VECTOR_THICKNESSES,
+  VECTOR_RADII,
   DEFAULT_STYLE,
+  DEFAULT_CIRCLE_STYLE,
+  DEFAULT_CIRCLE_FILL,
+  DEFAULT_CIRCLE_RADIUS,
   VECTOR_ZOOM_MIN,
   VECTOR_ZOOM_MAX,
   VERTEX_SNAP_PX,
@@ -378,5 +484,11 @@ export {
   groupIdForVertex,
   groupVertexIds,
   selectionIsExactlyOneGroup,
+  addCircle,
+  moveCircles,
+  resizeCircle,
+  setCircleStyle,
+  deleteCircles,
+  contrastDotColor,
   compileVectorSvg
 };

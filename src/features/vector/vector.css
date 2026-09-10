@@ -40,6 +40,21 @@
 .vector-color-swatch.active {
   border-color: var(--text-normal);
 }
+.vector-fill-none {
+  background: repeating-linear-gradient(45deg, var(--bg-3) 0 3px, transparent 3px 6px);
+  background-color: var(--bg-2);
+}
+/* display:contents keeps the fieldset itself out of the toolbar's flex
+   layout — its children lay out exactly as if the fieldset weren't there —
+   while still getting the free "disable everything inside" behavior when
+   View mode is on. */
+.vector-toolbar-fieldset {
+  display: contents;
+}
+.vector-toolbar-fieldset:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
 .vector-thickness-select {
   background: var(--bg-2);
   color: var(--text-normal);
@@ -102,8 +117,16 @@
   min-height: 0;
   position: relative;
   overflow: hidden;
-  background-color: var(--bg-1);
-  background-image: radial-gradient(var(--bg-4) 1px, transparent 1px);
+  /* background-color is the document's own canvas.background, set inline
+     per-file (VectorEditorView) — the canvas is just that color filling the
+     whole surface, not a bounded box drawn inside it. The fallback below
+     only matters before the doc has loaded. */
+  background-color: #1e1e1e;
+  /* --vector-dot-color is computed per-file too (contrastDotColor in
+     vectorState.js) so the alignment dots stay legible against whatever
+     color the canvas is set to, instead of a fixed theme color that could
+     blend into a similarly-toned background. */
+  background-image: radial-gradient(var(--vector-dot-color, var(--bg-4)) 1px, transparent 1px);
   background-size: 22px 22px;
   background-position: 0 0;
   cursor: default;
@@ -128,14 +151,36 @@
 .vector-edge.snap-target {
   filter: drop-shadow(0 0 0 1.5px var(--accent));
 }
+/* Selection halo — a real extra line rather than only the drop-shadow
+   filter above, since a filter has nothing to shadow on a true 0px-weight
+   edge/circle (stroke-width:0 paints no pixels for it to work with). Used
+   for both edges and circles. */
+.vector-selection-halo {
+  stroke: var(--accent);
+  opacity: 0.35;
+  fill: none;
+  pointer-events: none;
+}
+/* The dashed "this edge/circle exists but carries no ink" guide shown only
+   in Edit mode for 0px-weight edges/circles — hidden in View mode so the
+   canvas matches what actually exports. */
+.vector-zero-weight-guide {
+  stroke: var(--accent);
+  stroke-dasharray: 4 3;
+  fill: none;
+  cursor: pointer;
+}
 .vector-preview-line {
   stroke: var(--accent);
   stroke-width: 1.5;
   stroke-dasharray: 4 3;
   pointer-events: none;
 }
-.vector-page {
-  pointer-events: none;
+.vector-circle {
+  cursor: pointer;
+}
+.vector-circle.selected {
+  filter: drop-shadow(0 0 0 1px var(--accent)) brightness(1.15);
 }
 .vector-fill {
   pointer-events: none; /* clicks pass through to whatever tool is active underneath, by default */

@@ -4,27 +4,35 @@ import { IconLoader, IconTrash } from '../../components/icons.jsx';
 import { VectorToolbar } from './VectorToolbar.jsx';
 import {
   AXIS_SNAP_PX,
+  DEFAULT_CIRCLE_FILL,
+  DEFAULT_CIRCLE_RADIUS,
   DEFAULT_STYLE,
   EDGE_SNAP_PX,
   SEVER_THRESHOLD_PX,
   VECTOR_ZOOM_MAX,
   VECTOR_ZOOM_MIN,
   VERTEX_SNAP_PX,
+  addCircle,
   addEdge,
   addFillAt,
   addVertex,
   bindVertexOntoEdge,
   compileVectorSvg,
+  contrastDotColor,
+  deleteCircles,
   deleteEdges,
   deleteVertices,
   groupIdForVertex,
   groupVertexIds,
   groupVertices,
+  moveCircles,
   moveVertices,
   parseVectorContent,
+  resizeCircle,
   selectionIsExactlyOneGroup,
   serializeVectorState,
   setCanvasBackground,
+  setCircleStyle,
   setEdgeStyle,
   severEdgeEndpoint,
   subdivideEdge,
@@ -107,16 +115,24 @@ function VectorEditorView({ file, content, onChange, loading }) {
   const [axisSnapEnabled, setAxisSnapEnabled] = useState(true);
   const [selectedVertexIds, setSelectedVertexIds] = useState(() => new Set());
   const [selectedEdgeIds, setSelectedEdgeIds] = useState(() => new Set());
+  const [selectedCircleIds, setSelectedCircleIds] = useState(() => new Set());
   const [localEditGroupId, setLocalEditGroupId] = useState(null);
   const [edgeChainFirst, setEdgeChainFirst] = useState(null);
   const [polylineChain, setPolylineChain] = useState([]);
   const [liveOverrides, setLiveOverrides] = useState(null);
+  const [circleDraft, setCircleDraft] = useState(null); // live preview while drawing/moving/resizing a circle: { id?, cx, cy, r }
   const [marquee, setMarquee] = useState(null);
   const [pointerWorld, setPointerWorld] = useState(null);
   const [snapPreview, setSnapPreview] = useState(null);
   const [spaceDown, setSpaceDown] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
   const [historyTick, setHistoryTick] = useState(0);
+  const [activeRadius, setActiveRadius] = useState(DEFAULT_CIRCLE_RADIUS);
+  const [activeCircleFill, setActiveCircleFill] = useState(DEFAULT_CIRCLE_FILL);
+  // View mode hides the editing-only overlay (vertex dots, the dashed
+  // guide for 0px-weight edges/circles, selection UI) so the canvas reads
+  // exactly like the exported SVG. Edit mode is the default.
+  const [viewMode, setViewMode] = useState(false);
 
   const containerRef = useRef(null);
   const dragRef = useRef(null);
@@ -193,6 +209,20 @@ function VectorEditorView({ file, content, onChange, loading }) {
   const resolvedFills = useMemo(() => {
     return doc.fills.map((f) => ({ fill: f, points: resolveBoundaryPolygon(verticesForRender, doc.edges, f.boundary) })).filter((x) => x.points);
   }, [doc.fills, doc.edges, verticesForRender]);
+
+  // Circles are independent primitives (not part of the vertex/edge graph),
+  // so their live-drag preview is a simple single-circle draft rather than
+  // the batched liveOverrides map above — there's only ever one being
+  // dragged/resized/drawn at a time.
+  const circlesForRender = useMemo(() => {
+    if (!circleDraft || !circleDraft.id) return doc.circles;
+    return doc.circles.map((c) => (c.id === circleDraft.id ? { ...c, ...circleDraft } : c));
+  }, [doc.circles, circleDraft]);
+
+  // Picks whichever of black/white contrasts more against the current
+  // canvas color, so the alignment-dot grid stays legible against any
+  // background the document is set to.
+  const dotColor = useMemo(() => contrastDotColor(doc.canvas.background), [doc.canvas.background]);
 
   const scheduleLiveOverrides = useCallback((map) => {
     pendingOverridesRef.current = map;
@@ -296,11 +326,16 @@ function VectorEditorView({ file, content, onChange, loading }) {
       setSelectedEdgeIds(new Set());
       return;
     }
+    if (selectedCircleIds.size) {
+      commitState(deleteCircles(doc, selectedCircleIds));
+      setSelectedCircleIds(new Set());
+      return;
+    }
     if (selectedVertexIds.size) {
       commitState(deleteVertices(doc, selectedVertexIds));
       setSelectedVertexIds(new Set());
     }
-  }, [doc, selectedVertexIds, selectedEdgeIds, commitState]);
+  }, [doc, selectedVertexIds, selectedEdgeIds, selectedCircleIds, commitState]);
 
   // ---------------------------------------------------------------------
   // Pointer handling
@@ -412,6 +447,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
       beginPan(e);
       return;
     }
+    if (viewMode) return;
     if (tool === 'eyedropper') {
       const edge = doc.edges.find((ed) => ed.id === edgeId);
       if (edge) setActiveStyle((s) => ({ ...s, ...edge.style }));
@@ -452,9 +488,59 @@ function VectorEditorView({ file, content, onChange, loading }) {
 
   const onFillPointerDown = (e, fill) => {
     e.stopPropagation();
+    if (viewMode) return;
     if (tool === 'eyedropper') {
       setActiveStyle((s) => ({ ...s, color: fill.color })); // fills have no thickness — eyedropper on a fill only carries color
     }
+  };
+
+  const onCirclePointerDown = (e, circleId) => {
+    e.stopPropagation();
+    if (spaceDown) {
+      beginPan(e);
+      return;
+    }
+    if (viewMode) return;
+    containerRef.current.focus();
+    const circle = doc.circles.find((c) => c.id === circleId);
+    if (!circle) return;
+
+    if (tool === 'eyedropper') {
+      // The eyedropper logs a circle's radius too, not just its outline
+      // color/weight and fill — so the next circle you draw matches size
+      // as well as style.
+      setActiveStyle((s) => ({ ...s, ...circle.style }));
+      setActiveCircleFill(circle.fill || 'none');
+      setActiveRadius(Math.round(circle.r));
+      return;
+    }
+
+    if (tool !== 'select') return;
+
+    containerRef.current.setPointerCapture(e.pointerId);
+    const world = screenToWorld(e.clientX, e.clientY);
+    setSelectedCircleIds((prev) => {
+      if (!e.shiftKey) return new Set([circleId]);
+      const next = new Set(prev);
+      next.has(circleId) ? next.delete(circleId) : next.add(circleId);
+      return next;
+    });
+    setSelectedVertexIds(new Set());
+    setSelectedEdgeIds(new Set());
+    dragRef.current = { mode: 'move-circle', circleId, startWorld: world, startCx: circle.cx, startCy: circle.cy, moved: false };
+  };
+
+  // Resize handle drag: radius is always recomputed as the plain distance
+  // from the (fixed) center to the pointer, regardless of drag direction —
+  // that's what keeps it a perfect circle rather than letting it stretch
+  // into an oval.
+  const beginCircleResize = (e, circleId) => {
+    e.stopPropagation();
+    if (viewMode) return;
+    containerRef.current.setPointerCapture(e.pointerId);
+    const circle = doc.circles.find((c) => c.id === circleId);
+    if (!circle) return;
+    dragRef.current = { mode: 'resize-circle', circleId, cx: circle.cx, cy: circle.cy };
   };
 
   // Selection bounding-box body: dragging it anywhere (not just by grabbing
@@ -465,6 +551,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
       beginPan(e);
       return;
     }
+    if (viewMode) return;
     containerRef.current.setPointerCapture(e.pointerId);
     const world = screenToWorld(e.clientX, e.clientY);
     const ids = selectedVertexIds;
@@ -479,6 +566,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
       beginPan(e);
       return;
     }
+    if (viewMode) return; // View mode is look-only, aside from pan (handled above) and zoom
     containerRef.current.setPointerCapture(e.pointerId);
     const world = screenToWorld(e.clientX, e.clientY);
 
@@ -501,6 +589,11 @@ function VectorEditorView({ file, content, onChange, loading }) {
       setPolylineChain((chain) => [...chain, vertexId]);
       return;
     }
+    if (tool === 'circle') {
+      dragRef.current = { mode: 'draw-circle', startWorld: world };
+      setCircleDraft({ cx: world.x, cy: world.y, r: 0 });
+      return;
+    }
     if (tool === 'fill') {
       const { state: next, ok } = addFillAt(doc, world, activeStyle.color);
       if (ok) commitState(next);
@@ -511,6 +604,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
     // select tool: start a marquee
     setSelectedVertexIds(new Set());
     setSelectedEdgeIds(new Set());
+    setSelectedCircleIds(new Set());
     if (localEditGroupId) setLocalEditGroupId(null);
     dragRef.current = { mode: 'marquee', startWorld: world };
     setMarquee({ x0: world.x, y0: world.y, x1: world.x, y1: world.y });
@@ -569,6 +663,24 @@ function VectorEditorView({ file, content, onChange, loading }) {
       const snap = snapCandidate(doc.vertices, doc.edges, world, snapOpts(viewport.zoom, grid, axisSnapEnabled, { excludeVertexId: drag.fromVertexId }));
       setSnapPreview(snap);
       return; // preview line follows pointerWorld automatically; the actual vertex/edge is created on pointerup
+    }
+
+    if (drag.mode === 'draw-circle') {
+      setCircleDraft({ cx: drag.startWorld.x, cy: drag.startWorld.y, r: dist(drag.startWorld, world) });
+      return;
+    }
+
+    if (drag.mode === 'move-circle') {
+      if (dist(drag.startWorld, world) > MOVE_THRESHOLD / viewport.zoom) drag.moved = true;
+      const dx = world.x - drag.startWorld.x;
+      const dy = world.y - drag.startWorld.y;
+      setCircleDraft({ id: drag.circleId, cx: drag.startCx + dx, cy: drag.startCy + dy });
+      return;
+    }
+
+    if (drag.mode === 'resize-circle') {
+      setCircleDraft({ id: drag.circleId, cx: drag.cx, cy: drag.cy, r: dist({ x: drag.cx, y: drag.cy }, world) });
+      return;
     }
 
     if (drag.mode === 'tearaway-pending') {
@@ -669,6 +781,37 @@ function VectorEditorView({ file, content, onChange, loading }) {
       // Threshold never crossed — treat as a no-op (nothing to undo, nothing moved).
       return;
     }
+
+    if (drag.mode === 'draw-circle') {
+      setCircleDraft(null);
+      const r = pointerWorld ? dist(drag.startWorld, pointerWorld) : 0;
+      // A plain click (no real drag) places a circle at the toolbar's
+      // current default radius rather than a near-zero one.
+      const placedR = r > MOVE_THRESHOLD / viewport.zoom ? r : activeRadius;
+      commitState(addCircle(doc, drag.startWorld.x, drag.startWorld.y, placedR, activeStyle, activeCircleFill));
+      if (r > MOVE_THRESHOLD / viewport.zoom) setActiveRadius(Math.round(placedR)); // drawing calibrates the default for next time
+      return;
+    }
+
+    if (drag.mode === 'move-circle') {
+      setCircleDraft(null);
+      if (drag.moved && pointerWorld) {
+        const dx = pointerWorld.x - drag.startWorld.x;
+        const dy = pointerWorld.y - drag.startWorld.y;
+        commitState(moveCircles(doc, new Map([[drag.circleId, { cx: drag.startCx + dx, cy: drag.startCy + dy }]])));
+      }
+      return;
+    }
+
+    if (drag.mode === 'resize-circle') {
+      setCircleDraft(null);
+      if (pointerWorld) {
+        const r = dist({ x: drag.cx, y: drag.cy }, pointerWorld);
+        commitState(resizeCircle(doc, drag.circleId, r));
+        setActiveRadius(Math.round(r));
+      }
+      return;
+    }
   };
 
   // ---------------------------------------------------------------------
@@ -722,12 +865,14 @@ function VectorEditorView({ file, content, onChange, loading }) {
   // Keyboard
   // ---------------------------------------------------------------------
   const onKeyDown = (e) => {
+    if (viewMode) return; // View mode is look-only — undo/redo/shortcuts don't apply since nothing can be selected or edited
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
       deleteSelection();
     } else if (e.key === 'Escape') {
       setSelectedVertexIds(new Set());
       setSelectedEdgeIds(new Set());
+      setSelectedCircleIds(new Set());
       clearToolInProgress();
       setLocalEditGroupId(null);
     } else if (e.key === 'Enter' && polylineChain.length) {
@@ -745,7 +890,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
       e.preventDefault();
       commitState(e.shiftKey ? ungroupVertices(doc, selectedVertexIds) : groupVertices(doc, selectedVertexIds));
     } else if (!e.metaKey && !e.ctrlKey && !e.target.closest('select')) {
-      const map = { v: 'select', p: 'vertex', e: 'edge', l: 'polyline', i: 'eyedropper', f: 'fill' };
+      const map = { v: 'select', p: 'vertex', e: 'edge', l: 'polyline', c: 'circle', i: 'eyedropper', f: 'fill' };
       const next = map[e.key.toLowerCase()];
       if (next) {
         setTool(next);
@@ -773,7 +918,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
     );
   }
 
-  const selectionBox = tool === 'select' && selectedVertexIds.size > 1 ? bboxOf(verticesForRender, selectedVertexIds) : null;
+  const selectionBox = !viewMode && tool === 'select' && selectedVertexIds.size > 1 ? bboxOf(verticesForRender, selectedVertexIds) : null;
   const canGroup = selectedVertexIds.size > 1 && !selectionIsExactlyOneGroup(doc, selectedVertexIds);
   const canUngroup = selectionIsExactlyOneGroup(doc, selectedVertexIds);
 
@@ -789,15 +934,40 @@ function VectorEditorView({ file, content, onChange, loading }) {
         onSetColor={(color) => {
           setActiveStyle((s) => ({ ...s, color }));
           if (selectedEdgeIds.size) commitState(Array.from(selectedEdgeIds).reduce((d, id) => setEdgeStyle(d, id, { color }), doc));
+          if (selectedCircleIds.size) commitState(Array.from(selectedCircleIds).reduce((d, id) => setCircleStyle(d, id, { style: { color } }), doc));
         }}
         onSetThickness={(thickness) => {
           setActiveStyle((s) => ({ ...s, thickness }));
           if (selectedEdgeIds.size) commitState(Array.from(selectedEdgeIds).reduce((d, id) => setEdgeStyle(d, id, { thickness }), doc));
+          if (selectedCircleIds.size) commitState(Array.from(selectedCircleIds).reduce((d, id) => setCircleStyle(d, id, { style: { thickness } }), doc));
+        }}
+        activeRadius={activeRadius}
+        onSetRadius={(r) => {
+          setActiveRadius(r);
+          if (selectedCircleIds.size) commitState(Array.from(selectedCircleIds).reduce((d, id) => resizeCircle(d, id, r), doc));
+        }}
+        circleFill={activeCircleFill}
+        onSetCircleFill={(fill) => {
+          setActiveCircleFill(fill);
+          if (selectedCircleIds.size) commitState(Array.from(selectedCircleIds).reduce((d, id) => setCircleStyle(d, id, { fill }), doc));
         }}
         canvasBackground={doc.canvas.background}
         onSetCanvasBackground={(color) => commitState(setCanvasBackground(doc, color))}
         axisSnapEnabled={axisSnapEnabled}
         onToggleAxisSnap={() => setAxisSnapEnabled((v) => !v)}
+        viewMode={viewMode}
+        onToggleViewMode={() => {
+          setViewMode((v) => !v);
+          // Reset to a neutral tool and clear every selection/in-progress
+          // gesture on the way in OR out — otherwise edit-only UI (handles,
+          // 0px dashed guides, an in-progress polyline) could pop back with
+          // stale state the moment the user returns to Edit mode.
+          setTool('select');
+          setSelectedVertexIds(new Set());
+          setSelectedEdgeIds(new Set());
+          setSelectedCircleIds(new Set());
+          clearToolInProgress();
+        }}
         onUndo={undo}
         onRedo={redo}
         canUndo={pastRef.current.length > 0}
@@ -816,7 +986,17 @@ function VectorEditorView({ file, content, onChange, loading }) {
         className={`vector-surface ${isPanning || spaceDown ? 'panning' : ''}`}
         ref={containerRef}
         tabIndex={0}
-        style={{ backgroundPosition: `${viewport.x}px ${viewport.y}px`, backgroundSize: `${22 * viewport.zoom}px ${22 * viewport.zoom}px` }}
+        style={{
+          // The canvas is just this color filling the whole surface — not a
+          // bounded box drawn inside it (see the removed vector-page rect
+          // below) — with the alignment-dot texture picked to contrast
+          // against whatever that color is.
+          backgroundColor: doc.canvas.background,
+          backgroundImage: viewMode ? 'none' : undefined, // the dot grid is an editing aid, not artwork — View mode hides it like everything else edit-only
+          '--vector-dot-color': dotColor,
+          backgroundPosition: `${viewport.x}px ${viewport.y}px`,
+          backgroundSize: `${22 * viewport.zoom}px ${22 * viewport.zoom}px`
+        }}
         onPointerDown={onBackgroundPointerDown}
         onPointerMove={onContainerPointerMove}
         onPointerUp={onContainerPointerUp}
@@ -826,11 +1006,50 @@ function VectorEditorView({ file, content, onChange, loading }) {
         <svg className="vector-svg" width="100%" height="100%">
           <rect className="vector-bg-hit" x="0" y="0" width="100%" height="100%" fill="transparent" />
           <g transform={`translate(${viewport.x} ${viewport.y}) scale(${viewport.zoom})`}>
-            <rect className="vector-page" x={0} y={0} width={doc.canvas.width} height={doc.canvas.height} fill={doc.canvas.background} />
-
             {resolvedFills.map(({ fill, points }) => (
               <polygon key={fill.id} points={points.map((p) => `${p.x},${p.y}`).join(' ')} fill={fill.color} stroke="none" className={`vector-fill ${tool === 'eyedropper' ? 'pickable' : ''}`} onPointerDown={(ev) => onFillPointerDown(ev, fill)} />
             ))}
+
+            {circlesForRender.map((c) => {
+              const selected = selectedCircleIds.has(c.id);
+              const isZeroWeight = c.style.thickness === 0;
+              return (
+                <g key={c.id}>
+                  {selected && !viewMode && (
+                    <circle cx={c.cx} cy={c.cy} r={c.r} className="vector-selection-halo" strokeWidth={Math.max(c.style.thickness, 3) + 6 / viewport.zoom} />
+                  )}
+                  {isZeroWeight && !viewMode && (
+                    <circle cx={c.cx} cy={c.cy} r={c.r} className="vector-zero-weight-guide" strokeWidth={1.5 / viewport.zoom} onPointerDown={(ev) => onCirclePointerDown(ev, c.id)} />
+                  )}
+                  <circle
+                    cx={c.cx}
+                    cy={c.cy}
+                    r={c.r}
+                    stroke={c.style.color}
+                    strokeWidth={c.style.thickness}
+                    fill={c.fill && c.fill !== 'none' ? c.fill : 'none'}
+                    className={`vector-circle ${selected ? 'selected' : ''}`}
+                    onPointerDown={viewMode ? undefined : (ev) => onCirclePointerDown(ev, c.id)}
+                  />
+                  {selected && !viewMode && (
+                    <rect
+                      className="vector-scale-handle"
+                      style={{ cursor: 'ew-resize' }}
+                      x={c.cx + c.r - 4 / viewport.zoom}
+                      y={c.cy - 4 / viewport.zoom}
+                      width={8 / viewport.zoom}
+                      height={8 / viewport.zoom}
+                      onPointerDown={(e) => beginCircleResize(e, c.id)}
+                    />
+                  )}
+                </g>
+              );
+            })}
+            {/* In-progress circle draw preview — not yet a real circle in the
+                doc, so it's rendered separately from circlesForRender. */}
+            {circleDraft && !circleDraft.id && (
+              <circle cx={circleDraft.cx} cy={circleDraft.cy} r={circleDraft.r} className="vector-zero-weight-guide" strokeWidth={1.5 / viewport.zoom} />
+            )}
 
             {/* Selection move hit-area, rendered BEFORE vertices/edges so an
                 individual vertex/edge on top of it still gets pointer
@@ -850,20 +1069,37 @@ function VectorEditorView({ file, content, onChange, loading }) {
               const a = vertexById.get(e.v1);
               const b = vertexById.get(e.v2);
               if (!a || !b) return null;
+              const selected = selectedEdgeIds.has(e.id);
+              const isZeroWeight = e.style.thickness === 0;
               return (
-                <line
-                  key={e.id}
-                  x1={a.x}
-                  y1={a.y}
-                  x2={b.x}
-                  y2={b.y}
-                  stroke={e.style.color}
-                  strokeWidth={e.style.thickness}
-                  strokeLinecap="butt"
-                  strokeLinejoin="miter"
-                  className={`vector-edge ${selectedEdgeIds.has(e.id) ? 'selected' : ''} ${snapPreview?.snappedEdgeId === e.id ? 'snap-target' : ''}`}
-                  onPointerDown={(ev) => onEdgePointerDown(ev, e.id)}
-                />
+                <g key={e.id}>
+                  {/* Selection halo — a real extra line rather than only the
+                      CSS filter, since a filter has nothing to shadow on a
+                      true 0px-weight edge (stroke-width:0 paints nothing to
+                      begin with). This is the "edge is selected" indicator. */}
+                  {selected && !viewMode && (
+                    <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="vector-selection-halo" strokeWidth={Math.max(e.style.thickness, 3) + 6 / viewport.zoom} strokeLinecap="round" />
+                  )}
+                  {/* 0px-weight edges paint no real stroke (by design — see
+                      vectorState.js) so they'd otherwise be both invisible
+                      and unclickable; this dashed guide is Edit-mode-only
+                      and disappears in View mode, matching the export. */}
+                  {isZeroWeight && !viewMode && (
+                    <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="vector-zero-weight-guide" strokeWidth={1.5 / viewport.zoom} onPointerDown={(ev) => onEdgePointerDown(ev, e.id)} />
+                  )}
+                  <line
+                    x1={a.x}
+                    y1={a.y}
+                    x2={b.x}
+                    y2={b.y}
+                    stroke={e.style.color}
+                    strokeWidth={e.style.thickness}
+                    strokeLinecap="butt"
+                    strokeLinejoin="miter"
+                    className={`vector-edge ${selected ? 'selected' : ''} ${snapPreview?.snappedEdgeId === e.id ? 'snap-target' : ''}`}
+                    onPointerDown={viewMode ? undefined : (ev) => onEdgePointerDown(ev, e.id)}
+                  />
+                </g>
               );
             })}
 
@@ -893,34 +1129,36 @@ function VectorEditorView({ file, content, onChange, loading }) {
             {/* Snapping guidelines: full-length dashed lines through whichever
                 vertex produced an axis snap, plus a highlight ring/marker on
                 a snapped vertex or edge point. */}
-            {snapPreview?.axisSnapVertexX != null && vertexById.get(snapPreview.axisSnapVertexX) && (
+            {!viewMode && snapPreview?.axisSnapVertexX != null && vertexById.get(snapPreview.axisSnapVertexX) && (
               <line className="vector-snap-guide" x1={snapPreview.point.x} y1={-GUIDE_LINE_SPAN} x2={snapPreview.point.x} y2={GUIDE_LINE_SPAN} />
             )}
-            {snapPreview?.axisSnapVertexY != null && vertexById.get(snapPreview.axisSnapVertexY) && (
+            {!viewMode && snapPreview?.axisSnapVertexY != null && vertexById.get(snapPreview.axisSnapVertexY) && (
               <line className="vector-snap-guide" x1={-GUIDE_LINE_SPAN} y1={snapPreview.point.y} x2={GUIDE_LINE_SPAN} y2={snapPreview.point.y} />
             )}
-            {snapPreview?.snappedVertexId && vertexById.get(snapPreview.snappedVertexId) && (
+            {!viewMode && snapPreview?.snappedVertexId && vertexById.get(snapPreview.snappedVertexId) && (
               <circle className="vector-snap-marker" cx={snapPreview.point.x} cy={snapPreview.point.y} r={9 / viewport.zoom} />
             )}
-            {snapPreview?.snappedEdgeId && <circle className="vector-snap-marker" cx={snapPreview.point.x} cy={snapPreview.point.y} r={5 / viewport.zoom} />}
+            {!viewMode && snapPreview?.snappedEdgeId && <circle className="vector-snap-marker" cx={snapPreview.point.x} cy={snapPreview.point.y} r={5 / viewport.zoom} />}
 
-            {verticesForRender.map((v) => {
-              const selected = selectedVertexIds.has(v.id);
-              const gid = groupIdForVertex(doc, v.id);
-              return (
-                <circle
-                  key={v.id}
-                  cx={v.x}
-                  cy={v.y}
-                  r={5 / viewport.zoom}
-                  className={`vector-vertex ${selected ? 'selected' : ''} ${gid ? 'grouped' : ''} ${polylineChain.includes(v.id) ? 'in-chain' : ''}`}
-                  onPointerDown={(e) => onVertexPointerDown(e, v.id)}
-                  onDoubleClick={(e) => onVertexDoubleClick(e, v.id)}
-                />
-              );
-            })}
+            {/* Vertex dots are an editing aid, not artwork — hidden in View mode. */}
+            {!viewMode &&
+              verticesForRender.map((v) => {
+                const selected = selectedVertexIds.has(v.id);
+                const gid = groupIdForVertex(doc, v.id);
+                return (
+                  <circle
+                    key={v.id}
+                    cx={v.x}
+                    cy={v.y}
+                    r={5 / viewport.zoom}
+                    className={`vector-vertex ${selected ? 'selected' : ''} ${gid ? 'grouped' : ''} ${polylineChain.includes(v.id) ? 'in-chain' : ''}`}
+                    onPointerDown={(e) => onVertexPointerDown(e, v.id)}
+                    onDoubleClick={(e) => onVertexDoubleClick(e, v.id)}
+                  />
+                );
+              })}
 
-            {marquee && (
+            {!viewMode && marquee && (
               <rect
                 className="vector-marquee"
                 x={Math.min(marquee.x0, marquee.x1)}
@@ -958,7 +1196,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
           </g>
         </svg>
 
-        {(selectedVertexIds.size > 0 || selectedEdgeIds.size > 0) && (
+        {!viewMode && (selectedVertexIds.size > 0 || selectedEdgeIds.size > 0 || selectedCircleIds.size > 0) && (
           <div className="vector-selection-toolbar">
             {canGroup && (
               <button className="text-action" onClick={() => commitState(groupVertices(doc, selectedVertexIds))} title="Group (G)">

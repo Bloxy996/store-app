@@ -666,6 +666,18 @@ const IconFillTool = (p) => (
   </Svg>
 );
 
+const IconCircleTool = (p) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="7" />
+  </Svg>
+);
+
+// A separate export statement (rather than editing the long-form export
+// list below) so this addition doesn't depend on matching that entire
+// line verbatim — ES modules are fine with a name being exported from
+// more than one `export { }` statement in the same file.
+export { IconCircleTool };
+
 const IconUndo = (p) => (
   <Svg {...p}>
     <path d="M8 7 3 12l5 5" />
