@@ -1,12 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { IconEye, IconLoader, IconPlus, IconTrash } from '../../components/icons.jsx';
+import { IconEye, IconLoader, IconPlus, IconTrash, IconType, IconX } from '../../components/icons.jsx';
+import { MiniMarkdownEditor } from '../../components/MiniMarkdownEditor.jsx';
+import { PropertiesPanel } from '../../components/PropertiesPanel.jsx';
+import { parseFrontmatter } from '../../lib/markdownParse.js';
 import { VectorToolbar } from './VectorToolbar.jsx';
 import {
   AXIS_SNAP_PX,
   DEFAULT_CIRCLE_FILL,
   DEFAULT_CIRCLE_RADIUS,
   DEFAULT_STYLE,
+  DEFAULT_TEXT_ALIGN,
+  DEFAULT_TEXT_COLOR,
+  DEFAULT_TEXT_FONT_SIZE,
+  DEFAULT_TEXT_HEIGHT,
+  DEFAULT_TEXT_WIDTH,
   EDGE_SNAP_PX,
   SEVER_THRESHOLD_PX,
   VECTOR_ZOOM_MAX,
@@ -16,12 +24,14 @@ import {
   addEdge,
   addFillAt,
   addLayer,
+  addText,
   addVertex,
   bindVertexOntoEdge,
   compileVectorSvg,
   contrastDotColor,
   deleteCircles,
   deleteEdges,
+  deleteTexts,
   deleteVertices,
   groupIdForVertex,
   groupVertexIds,
@@ -34,18 +44,22 @@ import {
   renameLayer,
   reorderLayer,
   resizeCircle,
+  resolveTextQuad,
   selectionIsExactlyOneGroup,
   serializeVectorState,
   setCanvasBackground,
   setCircleStyle,
+  setDescription,
   setEdgeStyle,
   setLayerVisible,
+  setTextContent,
+  setTextStyle,
   severEdgeEndpoint,
   subdivideEdge,
   ungroupVertices,
   loopsToPathData
 } from './vectorState.js';
-import { SpatialGrid, buildVertexAdjacency, closestPointOnSegment, computeMiterJoints, dist, findFillBoundary, resolveBoundaryPolygon, snapCandidate } from './vectorTopology.js';
+import { SpatialGrid, buildVertexAdjacency, closestPointOnSegment, computeMiterJoints, computeQuadWarpMatrix3d, dist, findFillBoundary, resolveBoundaryPolygon, snapCandidate } from './vectorTopology.js';
 import { clamp } from '../../lib/mathUtils.js';
 
 const MOVE_THRESHOLD = 3; // world px before a pointerdown counts as a drag, not a click — same convention as CanvasView
@@ -119,7 +133,7 @@ function handleConfigsFor(box) {
 }
 
 
-function VectorEditorView({ file, content, onChange, loading }) {
+function VectorEditorView({ file, content, onChange, loading, handlers, linkIndex }) {
   const [doc, setDoc] = useState(() => parseVectorContent(content));
   const [viewport, setViewport] = useState({ x: 0, y: 0, zoom: 1 });
   const [tool, setTool] = useState('select');
@@ -148,6 +162,15 @@ function VectorEditorView({ file, content, onChange, loading }) {
   const [activeLayerId, setActiveLayerId] = useState(null); // null = "use doc.layers[0]" (see safeActiveLayerId) — lets a freshly-loaded/undone doc always resolve to a real layer without a mount-order race
   const [snapCrossLayer, setSnapCrossLayer] = useState(true);
   const [layersPanelOpen, setLayersPanelOpen] = useState(false);
+  const [descriptionPanelOpen, setDescriptionPanelOpen] = useState(false);
+  const [activeTextStyle, setActiveTextStyle] = useState({ color: DEFAULT_TEXT_COLOR, fontSize: DEFAULT_TEXT_FONT_SIZE, align: DEFAULT_TEXT_ALIGN });
+  const [textDraft, setTextDraft] = useState(null); // { x0, y0, x1, y1 } — rectangle preview while drawing a new text box
+  // The id of the text currently being typed into, plus a local editing
+  // buffer separate from doc.texts — content only commits on blur/Escape
+  // (see the plain-<textarea> overlay below), same "don't push a save per
+  // keystroke" convention as MiniMarkdownEditor.
+  const [editingTextId, setEditingTextId] = useState(null);
+  const [editingTextBuffer, setEditingTextBuffer] = useState('');
 
   const containerRef = useRef(null);
   const dragRef = useRef(null);
@@ -259,6 +282,13 @@ function VectorEditorView({ file, content, onChange, loading }) {
   // background the document is set to.
   const dotColor = useMemo(() => contrastDotColor(doc.canvas.background), [doc.canvas.background]);
 
+  // handlers/linkIndex come from the parent editor pane (same props the
+  // note editor and Canvas view already receive) — optional here since a
+  // caller that hasn't threaded them through yet still gets a working
+  // (if link/tag-inert) description editor rather than a crash.
+  const safeHandlers = useMemo(() => handlers || { onOpenById: () => {}, onCreateOrOpenByName: () => {}, onOpenTag: () => {} }, [handlers]);
+  const frontmatterProperties = useMemo(() => parseFrontmatter(doc.description).properties, [doc.description]);
+
   // Falls back to the bottom layer whenever activeLayerId hasn't been set
   // yet, or no longer names a real layer (its layer was just deleted, or a
   // freshly-loaded/undone doc has a different layer set entirely) —
@@ -303,6 +333,14 @@ function VectorEditorView({ file, content, onChange, loading }) {
     },
     [viewport]
   );
+
+  // Inverse of screenToWorld, but container-relative rather than
+  // page-relative — for positioning a plain HTML overlay (the text-content
+  // edit <textarea>) as an absolutely-positioned child of .vector-surface
+  // itself, alongside the <svg>, rather than inside its world-transformed
+  // <g> (that overlay is deliberately NOT warped by a text's quad
+  // transform — see the Text section of vectorState.js for why).
+  const worldToLocal = useCallback((wx, wy) => ({ x: wx * viewport.zoom + viewport.x, y: wy * viewport.zoom + viewport.y }), [viewport]);
 
   const zoomBy = useCallback((factor, centerScreen) => {
     setViewport((v) => {
@@ -605,6 +643,48 @@ function VectorEditorView({ file, content, onChange, loading }) {
     dragRef.current = { mode: 'resize-circle', circleId, cx: circle.cx, cy: circle.cy };
   };
 
+  // Clicking a text's rendered body (not one of its 4 corner dots)
+  // selects all 4 corners at once — the existing multi-vertex selection
+  // system then gives the bounding-box scale/rotate handles "for free"
+  // (see the Text section of vectorState.js). Grabbing a single corner
+  // dot directly still goes through the ordinary onVertexPointerDown path
+  // and produces the independent-corner skew instead.
+  const onTextPointerDown = (e, text) => {
+    e.stopPropagation();
+    if (spaceDown) {
+      beginPan(e);
+      return;
+    }
+    if (viewMode) return;
+
+    if (tool === 'eyedropper') {
+      setActiveTextStyle({ color: text.color, fontSize: text.fontSize, align: text.align });
+      return;
+    }
+    if (tool !== 'select') return;
+
+    const corners = new Set([text.v1, text.v2, text.v3, text.v4]);
+    setSelectedVertexIds((prev) => {
+      if (!e.shiftKey) return corners;
+      const next = new Set(prev);
+      const allSelected = [...corners].every((id) => next.has(id));
+      corners.forEach((id) => (allSelected ? next.delete(id) : next.add(id)));
+      return next;
+    });
+    setSelectedEdgeIds(new Set());
+    setSelectedCircleIds(new Set());
+  };
+
+  const beginTextEdit = (text) => {
+    setEditingTextId(text.id);
+    setEditingTextBuffer(text.content);
+  };
+
+  const commitTextEdit = () => {
+    if (editingTextId) commitState(setTextContent(doc, editingTextId, editingTextBuffer));
+    setEditingTextId(null);
+  };
+
   // Selection bounding-box body: dragging it anywhere (not just by grabbing
   // an individual vertex dot) moves the whole selection.
   const onSelectionBoxPointerDown = (e) => {
@@ -654,6 +734,11 @@ function VectorEditorView({ file, content, onChange, loading }) {
     if (tool === 'circle') {
       dragRef.current = { mode: 'draw-circle', startWorld: world };
       setCircleDraft({ cx: world.x, cy: world.y, r: 0 });
+      return;
+    }
+    if (tool === 'text') {
+      dragRef.current = { mode: 'draw-text', startWorld: world };
+      setTextDraft({ x0: world.x, y0: world.y, x1: world.x, y1: world.y });
       return;
     }
     if (tool === 'fill') {
@@ -742,6 +827,11 @@ function VectorEditorView({ file, content, onChange, loading }) {
 
     if (drag.mode === 'resize-circle') {
       setCircleDraft({ id: drag.circleId, cx: drag.cx, cy: drag.cy, r: dist({ x: drag.cx, y: drag.cy }, world) });
+      return;
+    }
+
+    if (drag.mode === 'draw-text') {
+      setTextDraft({ x0: drag.startWorld.x, y0: drag.startWorld.y, x1: world.x, y1: world.y });
       return;
     }
 
@@ -874,6 +964,37 @@ function VectorEditorView({ file, content, onChange, loading }) {
       }
       return;
     }
+
+    if (drag.mode === 'draw-text') {
+      setTextDraft(null);
+      const end = pointerWorld || drag.startWorld;
+      const dragged = dist(drag.startWorld, end) > MOVE_THRESHOLD / viewport.zoom;
+      // A plain click (no real drag) places a default-sized box anchored
+      // at the click point, same "click for a default, drag for a custom
+      // size" convention as the circle tool.
+      const x0 = drag.startWorld.x;
+      const y0 = drag.startWorld.y;
+      const x1 = dragged ? end.x : x0 + DEFAULT_TEXT_WIDTH;
+      const y1 = dragged ? end.y : y0 + DEFAULT_TEXT_HEIGHT;
+      const left = Math.min(x0, x1), right = Math.max(x0, x1);
+      const top = Math.min(y0, y1), bottom = Math.max(y0, y1);
+      const corners = [
+        { x: left, y: top },
+        { x: right, y: top },
+        { x: right, y: bottom },
+        { x: left, y: bottom }
+      ];
+      const next = addText(doc, corners, '', activeTextStyle, safeActiveLayerId);
+      commitState(next);
+      // Drop straight into content editing and back to the select tool —
+      // an empty text box has no visible outline of its own (see the
+      // Text section of vectorState.js), so leaving the user in the text
+      // tool staring at a blank spot isn't useful; typing immediately is.
+      setEditingTextId(next._newTextId);
+      setEditingTextBuffer('');
+      setTool('select');
+      return;
+    }
   };
 
   // ---------------------------------------------------------------------
@@ -952,7 +1073,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
       e.preventDefault();
       commitState(e.shiftKey ? ungroupVertices(doc, selectedVertexIds) : groupVertices(doc, selectedVertexIds));
     } else if (!e.metaKey && !e.ctrlKey && !e.target.closest('select')) {
-      const map = { v: 'select', p: 'vertex', e: 'edge', l: 'polyline', c: 'circle', i: 'eyedropper', f: 'fill' };
+      const map = { v: 'select', p: 'vertex', e: 'edge', l: 'polyline', c: 'circle', t: 'text', i: 'eyedropper', f: 'fill' };
       const next = map[e.key.toLowerCase()];
       if (next) {
         setTool(next);
@@ -981,7 +1102,16 @@ function VectorEditorView({ file, content, onChange, loading }) {
   }
 
   const selectionBox = !viewMode && tool === 'select' && selectedVertexIds.size > 1 ? bboxOf(verticesForRender, selectedVertexIds) : null;
-  const canGroup = selectedVertexIds.size > 1 && !selectionIsExactlyOneGroup(doc, selectedVertexIds);
+  // A text counts as "selected" once ALL 4 of its corners are — see
+  // onTextPointerDown and the Text section of vectorState.js. Used for the
+  // toolbar's text style controls and the layer-move buttons below; a
+  // partial-corner vertex selection (e.g. mid-marquee) doesn't count.
+  const selectedTextIds = new Set(doc.texts.filter((t) => [t.v1, t.v2, t.v3, t.v4].every((id) => selectedVertexIds.has(id))).map((t) => t.id));
+  // A text's 4 corners must stay independently draggable (that's what
+  // produces the skew/trapezoid effect) — grouping them would make moving
+  // one drag the whole group instead, silently breaking that. So Group
+  // is unavailable whenever the selection includes a fully-selected text.
+  const canGroup = selectedVertexIds.size > 1 && !selectionIsExactlyOneGroup(doc, selectedVertexIds) && selectedTextIds.size === 0;
   const canUngroup = selectionIsExactlyOneGroup(doc, selectedVertexIds);
 
   return (
@@ -1013,12 +1143,27 @@ function VectorEditorView({ file, content, onChange, loading }) {
           setActiveCircleFill(fill);
           if (selectedCircleIds.size) commitState(Array.from(selectedCircleIds).reduce((d, id) => setCircleStyle(d, id, { fill }), doc));
         }}
+        activeTextStyle={activeTextStyle}
+        onSetTextColor={(color) => {
+          setActiveTextStyle((s) => ({ ...s, color }));
+          if (selectedTextIds.size) commitState(Array.from(selectedTextIds).reduce((d, id) => setTextStyle(d, id, { color }), doc));
+        }}
+        onSetTextFontSize={(fontSize) => {
+          setActiveTextStyle((s) => ({ ...s, fontSize }));
+          if (selectedTextIds.size) commitState(Array.from(selectedTextIds).reduce((d, id) => setTextStyle(d, id, { fontSize }), doc));
+        }}
+        onSetTextAlign={(align) => {
+          setActiveTextStyle((s) => ({ ...s, align }));
+          if (selectedTextIds.size) commitState(Array.from(selectedTextIds).reduce((d, id) => setTextStyle(d, id, { align }), doc));
+        }}
         canvasBackground={doc.canvas.background}
         onSetCanvasBackground={(color) => commitState(setCanvasBackground(doc, color))}
         axisSnapEnabled={axisSnapEnabled}
         onToggleAxisSnap={() => setAxisSnapEnabled((v) => !v)}
         layersPanelOpen={layersPanelOpen}
         onToggleLayersPanel={() => setLayersPanelOpen((v) => !v)}
+        descriptionPanelOpen={descriptionPanelOpen}
+        onToggleDescriptionPanel={() => setDescriptionPanelOpen((v) => !v)}
         viewMode={viewMode}
         onToggleViewMode={() => {
           setViewMode((v) => !v);
@@ -1132,6 +1277,47 @@ function VectorEditorView({ file, content, onChange, loading }) {
                       );
                     })}
 
+                  {doc.texts
+                    .filter((t) => t.layerId === layer.id)
+                    .map((t) => {
+                      const quad = resolveTextQuad(verticesForRender, t);
+                      if (!quad) return null;
+                      const matrix = computeQuadWarpMatrix3d(quad, DEFAULT_TEXT_WIDTH, DEFAULT_TEXT_HEIGHT);
+                      const allCornersSelected = [t.v1, t.v2, t.v3, t.v4].every((id) => selectedVertexIds.has(id));
+                      const isEmpty = !t.content;
+                      return (
+                        <g key={t.id}>
+                          {allCornersSelected && !viewMode && (
+                            <polygon points={quad.map((p) => `${p.x},${p.y}`).join(' ')} className="vector-selection-halo" fill="none" strokeWidth={2 / viewport.zoom} />
+                          )}
+                          <foreignObject x="0" y="0" width={DEFAULT_TEXT_WIDTH} height={DEFAULT_TEXT_HEIGHT} overflow="visible" style={{ transform: matrix, transformOrigin: '0 0', pointerEvents: viewMode || editingTextId === t.id ? 'none' : 'auto' }}>
+                            <div
+                              xmlns="http://www.w3.org/1999/xhtml"
+                              className="vector-text-body"
+                              style={{
+                                width: DEFAULT_TEXT_WIDTH,
+                                height: DEFAULT_TEXT_HEIGHT,
+                                color: isEmpty ? undefined : t.color,
+                                fontSize: t.fontSize,
+                                textAlign: t.align
+                              }}
+                              onPointerDown={(ev) => onTextPointerDown(ev, t)}
+                              onDoubleClick={(ev) => {
+                                ev.stopPropagation();
+                                if (!viewMode && tool === 'select') beginTextEdit(t);
+                              }}
+                            >
+                              {/* An empty text is genuinely blank in the exported artwork (see
+                                  compileVectorSvg) — this placeholder is Edit-mode-only, same
+                                  spirit as the 0px-weight dashed guide, so it never leaks into
+                                  View mode or the export. */}
+                              {isEmpty ? (!viewMode && <span className="vector-text-placeholder">Double-click to edit</span>) : t.content}
+                            </div>
+                          </foreignObject>
+                        </g>
+                      );
+                    })}
+
                   {sortedEdges
                     .filter((e) => e.layerId === layer.id)
                     .map((e) => {
@@ -1191,6 +1377,20 @@ function VectorEditorView({ file, content, onChange, loading }) {
                 doc, so it's rendered separately from circlesForRender. */}
             {circleDraft && !circleDraft.id && (
               <circle cx={circleDraft.cx} cy={circleDraft.cy} r={circleDraft.r} className="vector-zero-weight-guide" strokeWidth={1.5 / viewport.zoom} />
+            )}
+
+            {/* In-progress text draw preview — just a plain rectangle
+                outline; the actual quad-warp rendering only applies once
+                it's a real text with real corner vertices. */}
+            {textDraft && (
+              <rect
+                x={Math.min(textDraft.x0, textDraft.x1)}
+                y={Math.min(textDraft.y0, textDraft.y1)}
+                width={Math.abs(textDraft.x1 - textDraft.x0)}
+                height={Math.abs(textDraft.y1 - textDraft.y0)}
+                className="vector-zero-weight-guide"
+                strokeWidth={1.5 / viewport.zoom}
+              />
             )}
 
             {/* Selection move hit-area, rendered BEFORE vertices so an
@@ -1302,6 +1502,46 @@ function VectorEditorView({ file, content, onChange, loading }) {
           </g>
         </svg>
 
+        {/* Text content editing overlay — deliberately a plain, unwarped
+            <textarea> positioned near (not exactly matching) the quad's
+            on-screen bounds, rather than making the warped foreignObject
+            itself directly editable. Caret/selection behavior inside a
+            CSS matrix3d-transformed contentEditable is inconsistent
+            across browsers; a flat textarea sidesteps that entirely while
+            still satisfying "edit the content even after a transform has
+            occurred" — the transform only ever affects how the committed
+            text is DISPLAYED, never how it's typed. */}
+        {editingTextId &&
+          (() => {
+            const editingText = doc.texts.find((t) => t.id === editingTextId);
+            if (!editingText) return null;
+            const quad = resolveTextQuad(verticesForRender, editingText);
+            if (!quad) return null;
+            const screenPts = quad.map((p) => worldToLocal(p.x, p.y));
+            const minX = Math.min(...screenPts.map((p) => p.x));
+            const minY = Math.min(...screenPts.map((p) => p.y));
+            const maxX = Math.max(...screenPts.map((p) => p.x));
+            const maxY = Math.max(...screenPts.map((p) => p.y));
+            return (
+              <textarea
+                className="vector-text-edit-overlay"
+                style={{ left: minX, top: minY, width: Math.max(80, maxX - minX), height: Math.max(40, maxY - minY) }}
+                value={editingTextBuffer}
+                autoFocus
+                onChange={(e) => setEditingTextBuffer(e.target.value)}
+                onPointerDown={(e) => e.stopPropagation()}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    commitTextEdit();
+                  }
+                }}
+                onBlur={commitTextEdit}
+              />
+            );
+          })()}
+
         {!viewMode && (selectedVertexIds.size > 0 || selectedEdgeIds.size > 0 || selectedCircleIds.size > 0) && (
           <div className="vector-selection-toolbar">
             {canGroup && (
@@ -1314,10 +1554,11 @@ function VectorEditorView({ file, content, onChange, loading }) {
                 Ungroup
               </button>
             )}
-            {/* Layer reassignment only applies to edges/circles — vertices
-                are layerless shared infrastructure (see vectorState.js),
-                so a pure vertex selection gets no layer-move controls. */}
-            {(selectedEdgeIds.size > 0 || selectedCircleIds.size > 0) && (
+            {/* Layer reassignment applies to edges/circles/texts — a pure
+                (non-text) vertex selection is layerless shared
+                infrastructure (see vectorState.js) and gets no layer-move
+                controls; a fully-selected text counts via selectedTextIds. */}
+            {(selectedEdgeIds.size > 0 || selectedCircleIds.size > 0 || selectedTextIds.size > 0) && (
               <>
                 <button
                   className="icon-btn"
@@ -1325,7 +1566,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
                   disabled={doc.layers.findIndex((l) => l.id === safeActiveLayerId) >= doc.layers.length - 1}
                   onClick={() => {
                     const i = doc.layers.findIndex((l) => l.id === safeActiveLayerId);
-                    if (i < doc.layers.length - 1) commitState(moveToLayer(doc, { edgeIds: selectedEdgeIds, circleIds: selectedCircleIds }, doc.layers[i + 1].id));
+                    if (i < doc.layers.length - 1) commitState(moveToLayer(doc, { edgeIds: selectedEdgeIds, circleIds: selectedCircleIds, textIds: selectedTextIds }, doc.layers[i + 1].id));
                   }}
                 >
                   ↑
@@ -1336,7 +1577,7 @@ function VectorEditorView({ file, content, onChange, loading }) {
                   disabled={doc.layers.findIndex((l) => l.id === safeActiveLayerId) <= 0}
                   onClick={() => {
                     const i = doc.layers.findIndex((l) => l.id === safeActiveLayerId);
-                    if (i > 0) commitState(moveToLayer(doc, { edgeIds: selectedEdgeIds, circleIds: selectedCircleIds }, doc.layers[i - 1].id));
+                    if (i > 0) commitState(moveToLayer(doc, { edgeIds: selectedEdgeIds, circleIds: selectedCircleIds, textIds: selectedTextIds }, doc.layers[i - 1].id));
                   }}
                 >
                   ↓
@@ -1426,6 +1667,36 @@ function VectorEditorView({ file, content, onChange, loading }) {
             <input type="checkbox" checked={snapCrossLayer} onChange={(e) => setSnapCrossLayer(e.target.checked)} />
             Snap across all layers
           </label>
+        </div>
+      )}
+
+      {/* Description sidebar — the document's own raw markdown text (see
+          setDescription), edited exactly like a note's content: frontmatter
+          block, tags, and wikilinks all live in that one text, with
+          PropertiesPanel giving the same clickable read display a note's
+          frontmatter gets elsewhere, and MiniMarkdownEditor giving the same
+          inline-styled editing experience (not full markdown rendering —
+          same "lighter than the full note editor" scope MiniMarkdownEditor
+          already has everywhere else it's used). */}
+      {descriptionPanelOpen && (
+        <div className="vector-description-panel">
+          <div className="vector-description-panel-header">
+            <span>Description</span>
+            <button className="icon-btn" title="Close" onClick={() => setDescriptionPanelOpen(false)}>
+              <IconX size={13} />
+            </button>
+          </div>
+          <div className="vector-description-panel-body">
+            {frontmatterProperties.length > 0 && <PropertiesPanel properties={frontmatterProperties} handlers={safeHandlers} linkIndex={linkIndex} />}
+            <MiniMarkdownEditor
+              value={doc.description}
+              onCommit={(text) => commitState(setDescription(doc, text))}
+              placeholderText="Describe this piece — frontmatter, tags, links…"
+              linkIndex={linkIndex}
+              allTags={safeHandlers.allTags || []}
+              className="vector-description-editor"
+            />
+          </div>
         </div>
       )}
     </div>

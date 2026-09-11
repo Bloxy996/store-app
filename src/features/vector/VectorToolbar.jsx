@@ -1,6 +1,7 @@
-import { IconCircleTool, IconCursorTool, IconDownload, IconEdgeTool, IconEye, IconEyedropperTool, IconFillTool, IconGrid, IconLayoutGrid, IconMaximize, IconPolylineTool, IconRedo, IconUndo, IconVertexTool, IconZoomIn, IconZoomOut } from '../../components/icons.jsx';
+import { IconCircleTool, IconCursorTool, IconDownload, IconEdgeTool, IconEye, IconEyedropperTool, IconFillTool, IconGrid, IconLayoutGrid, IconMaximize, IconPolylineTool, IconRedo, IconStickyNote, IconType, IconUndo, IconVertexTool, IconZoomIn, IconZoomOut } from '../../components/icons.jsx';
 import { VECTOR_COLORS, VECTOR_RADII, VECTOR_THICKNESSES } from './vectorState.js';
 
+const TEXT_FONT_SIZES = [12, 16, 20, 24, 32, 48, 64, 96];
 
 const TOOLS = [
   { id: 'select', label: 'Select (V)', Icon: IconCursorTool },
@@ -8,7 +9,8 @@ const TOOLS = [
   { id: 'edge', label: 'Edge — click two vertices in turn (E)', Icon: IconEdgeTool },
   { id: 'polyline', label: 'Polyline — click to chain vertices, click the start point or press Enter/Escape to finish (L)', Icon: IconPolylineTool },
   { id: 'circle', label: 'Circle — click to place, drag to set radius (C)', Icon: IconCircleTool },
-  { id: 'eyedropper', label: 'Eyedropper — sample an edge, fill, or circle\u2019s style (I)', Icon: IconEyedropperTool },
+  { id: 'text', label: 'Text — click to place, drag to size the box (T)', Icon: IconType },
+  { id: 'eyedropper', label: 'Eyedropper — sample an edge, fill, circle, or text\u2019s style (I)', Icon: IconEyedropperTool },
   { id: 'fill', label: 'Flood fill — click an enclosed region; click a filled region again to recolor it (F)', Icon: IconFillTool }
 ];
 
@@ -23,12 +25,18 @@ function VectorToolbar({
   onSetRadius,
   circleFill,
   onSetCircleFill,
+  activeTextStyle,
+  onSetTextColor,
+  onSetTextFontSize,
+  onSetTextAlign,
   canvasBackground,
   onSetCanvasBackground,
   axisSnapEnabled,
   onToggleAxisSnap,
   layersPanelOpen,
   onToggleLayersPanel,
+  descriptionPanelOpen,
+  onToggleDescriptionPanel,
   viewMode,
   onToggleViewMode,
   onUndo,
@@ -108,6 +116,32 @@ function VectorToolbar({
           </label>
         </div>
         <div className="vector-toolbar-group">
+          {VECTOR_COLORS.map((c) => (
+            <button
+              key={`text-${c}`}
+              className={`vector-color-swatch ${activeTextStyle.color === c ? 'active' : ''}`}
+              style={{ background: c }}
+              title="Text color for the next text box you draw"
+              onClick={() => onSetTextColor(c)}
+            />
+          ))}
+          <label className="vector-color-custom" title="Custom text color" style={{ background: activeTextStyle.color }}>
+            <input type="color" value={activeTextStyle.color} onChange={(e) => onSetTextColor(e.target.value)} />
+          </label>
+          <select className="vector-thickness-select" value={activeTextStyle.fontSize} onChange={(e) => onSetTextFontSize(Number(e.target.value))} title="Font size for the next text box you draw">
+            {TEXT_FONT_SIZES.map((s) => (
+              <option key={s} value={s}>
+                {s}px
+              </option>
+            ))}
+          </select>
+          <select className="vector-thickness-select" value={activeTextStyle.align} onChange={(e) => onSetTextAlign(e.target.value)} title="Text alignment">
+            <option value="left">Left</option>
+            <option value="center">Center</option>
+            <option value="right">Right</option>
+          </select>
+        </div>
+        <div className="vector-toolbar-group">
           <label className="vector-canvas-bg" title="Canvas background color" style={{ background: canvasBackground }}>
             <input type="color" value={canvasBackground} onChange={(e) => onSetCanvasBackground(e.target.value)} />
           </label>
@@ -117,6 +151,9 @@ function VectorToolbar({
       <div className="vector-toolbar-group">
         <button className={`icon-btn ${layersPanelOpen ? 'active' : ''}`} title="Layers" aria-pressed={layersPanelOpen} onClick={onToggleLayersPanel}>
           <IconLayoutGrid size={15} />
+        </button>
+        <button className={`icon-btn ${descriptionPanelOpen ? 'active' : ''}`} title="Description" aria-pressed={descriptionPanelOpen} onClick={onToggleDescriptionPanel}>
+          <IconStickyNote size={15} />
         </button>
       </div>
       <div className="vector-toolbar-group">

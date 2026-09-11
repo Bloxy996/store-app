@@ -1,4 +1,4 @@
-import { boundaryReferencesOnly, buildVertexAdjacency, computeMiterJoints, findFillBoundary, incidentEdgeIds, resolveBoundaryPolygon } from './vectorTopology.js';
+import { boundaryReferencesOnly, buildVertexAdjacency, computeMiterJoints, computeQuadWarpMatrix3d, findFillBoundary, incidentEdgeIds, resolveBoundaryPolygon } from './vectorTopology.js';
 
 // ============================================================================
 // VECTOR ART DOCUMENT — a strict node/edge graph, stored as JSON inside a
@@ -57,6 +57,12 @@ const DEFAULT_CIRCLE_STYLE = { color: VECTOR_COLORS[6], thickness: 2 };
 const DEFAULT_CIRCLE_FILL = 'none';
 const DEFAULT_CIRCLE_RADIUS = 30;
 
+const DEFAULT_TEXT_COLOR = '#ffffff';
+const DEFAULT_TEXT_FONT_SIZE = 24;
+const DEFAULT_TEXT_ALIGN = 'left';
+const DEFAULT_TEXT_WIDTH = 160;
+const DEFAULT_TEXT_HEIGHT = 60;
+
 const VECTOR_ZOOM_MIN = 0.1;
 const VECTOR_ZOOM_MAX = 6;
 
@@ -84,6 +90,7 @@ function makeDefaultVectorState(title) {
     edges: [],
     fills: [],
     circles: [],
+    texts: [],
     groups: [],
     layers: [{ id: 'layer-1', name: 'Layer 1', visible: true }]
   };
@@ -173,6 +180,25 @@ function parseVectorContent(content) {
             layerId: layerIds.has(c.layerId) ? c.layerId : defaultLayerId
           }))
       : [];
+    // A text's 4 corners are real vertex ids (see addText) — a text whose
+    // corners aren't all still valid vertices is dropped rather than
+    // rendered broken.
+    const texts = Array.isArray(p?.texts)
+      ? p.texts
+          .filter((t) => t && t.id && [t.v1, t.v2, t.v3, t.v4].every((id) => vertexIds.has(id)))
+          .map((t) => ({
+            id: t.id,
+            v1: t.v1,
+            v2: t.v2,
+            v3: t.v3,
+            v4: t.v4,
+            content: typeof t.content === 'string' ? t.content : '',
+            color: typeof t.color === 'string' ? t.color : DEFAULT_TEXT_COLOR,
+            fontSize: Number(t.fontSize) > 0 ? Number(t.fontSize) : DEFAULT_TEXT_FONT_SIZE,
+            align: ['left', 'center', 'right'].includes(t.align) ? t.align : DEFAULT_TEXT_ALIGN,
+            layerId: layerIds.has(t.layerId) ? t.layerId : defaultLayerId
+          }))
+      : [];
     const groups = Array.isArray(p?.groups)
       ? p.groups.filter((g) => g && g.id && Array.isArray(g.vertexIds)).map((g) => ({ id: g.id, vertexIds: g.vertexIds.filter((id) => vertexIds.has(id)) })).filter((g) => g.vertexIds.length > 1)
       : [];
@@ -184,6 +210,7 @@ function parseVectorContent(content) {
       edges,
       fills,
       circles,
+      texts,
       groups,
       layers
     };
@@ -195,7 +222,7 @@ function parseVectorContent(content) {
 
 function serializeVectorState(state) {
   return JSON.stringify(
-    { title: state.title, description: state.description, canvas: state.canvas, vertices: state.vertices, edges: state.edges, fills: state.fills, circles: state.circles, groups: state.groups, layers: state.layers },
+    { title: state.title, description: state.description, canvas: state.canvas, vertices: state.vertices, edges: state.edges, fills: state.fills, circles: state.circles, texts: state.texts, groups: state.groups, layers: state.layers },
     null,
     2
   );
@@ -243,6 +270,13 @@ function setEdgeStyle(state, edgeId, style) {
 
 function setCanvasBackground(state, background) {
   return { ...state, canvas: { ...state.canvas, background } };
+}
+
+// The document's own description — a full raw markdown string (frontmatter
+// block plus body), edited the same way a note's content is. See
+// VectorEditorView's description sidebar.
+function setDescription(state, description) {
+  return { ...state, description };
 }
 
 // Vertex Insertion (Subdivision): E(v1,v2) -> V_new + E1(v1,V_new) +
@@ -300,9 +334,12 @@ function pruneFills(state) {
   return fills.length === state.fills.length ? state : { ...state, fills };
 }
 
-// Deletes vertices (and every edge/fill that depended on them). Edges are
-// found via the adjacency index, not a full-array scan, so this stays
-// O(degree) per removed vertex rather than O(E).
+// Deletes vertices (and every edge/fill/text that depended on them). Edges
+// are found via the adjacency index, not a full-array scan, so this stays
+// O(degree) per removed vertex rather than O(E). A text loses ALL 4 of its
+// corners together whenever ANY one of them is deleted here — a 3- (or
+// fewer-) cornered text quad isn't a meaningful shape, so there's no
+// partial-survival case to handle.
 function deleteVertices(state, vertexIds) {
   if (!vertexIds.size) return state;
   const { adj } = buildVertexAdjacency(state.vertices, state.edges);
@@ -310,8 +347,9 @@ function deleteVertices(state, vertexIds) {
   for (const id of vertexIds) for (const eid of incidentEdgeIds(adj, id)) doomedEdgeIds.add(eid);
   const vertices = state.vertices.filter((v) => !vertexIds.has(v.id));
   const edges = state.edges.filter((e) => !doomedEdgeIds.has(e.id));
+  const texts = state.texts.filter((t) => ![t.v1, t.v2, t.v3, t.v4].some((id) => vertexIds.has(id)));
   const groups = state.groups.map((g) => ({ ...g, vertexIds: g.vertexIds.filter((id) => !vertexIds.has(id)) })).filter((g) => g.vertexIds.length > 1);
-  return pruneFills({ ...state, vertices, edges, groups });
+  return pruneFills({ ...state, vertices, edges, texts, groups });
 }
 
 function deleteEdges(state, edgeIds) {
@@ -446,6 +484,72 @@ function deleteCircles(state, circleIds) {
 }
 
 // ---------------------------------------------------------------------------
+// Text — deliberately NOT its own graph-independent primitive the way a
+// circle is. A text's 4 corners (TL, TR, BR, BL) are 4 REAL vertices in
+// state.vertices, which is what gives it "move/rotate/scale, and drag any
+// one corner independently to squish/stretch it into a trapezoid" for
+// free: it's exactly the existing multi-vertex selection/marquee/group/
+// transform-handle system (see VectorEditorView), plus the existing
+// single-vertex drag for one corner, with no new selection model needed.
+// Deleting any one corner (deleteVertices, updated above) takes the whole
+// text with it, same as an edge loses its shape if either endpoint goes.
+//
+// Rendering warps a <foreignObject> onto those 4 corners via a CSS
+// matrix3d homography (vectorTopology.js's computeQuadWarpMatrix3d) rather
+// than storing position/rotation/scale fields — the quad IS the source of
+// truth, so there's nothing else to keep in sync when a corner moves.
+// ---------------------------------------------------------------------------
+function addText(state, corners, content, style, layerId) {
+  const v1 = { id: `v-${cryptoRandomId()}`, x: corners[0].x, y: corners[0].y };
+  const v2 = { id: `v-${cryptoRandomId()}`, x: corners[1].x, y: corners[1].y };
+  const v3 = { id: `v-${cryptoRandomId()}`, x: corners[2].x, y: corners[2].y };
+  const v4 = { id: `v-${cryptoRandomId()}`, x: corners[3].x, y: corners[3].y };
+  const text = {
+    id: `t-${cryptoRandomId()}`,
+    v1: v1.id,
+    v2: v2.id,
+    v3: v3.id,
+    v4: v4.id,
+    content: content || '',
+    color: style?.color ?? DEFAULT_TEXT_COLOR,
+    fontSize: style?.fontSize ?? DEFAULT_TEXT_FONT_SIZE,
+    align: style?.align ?? DEFAULT_TEXT_ALIGN,
+    layerId: layerId || state.layers[0].id
+  };
+  return { ...state, vertices: [...state.vertices, v1, v2, v3, v4], texts: [...state.texts, text], _newTextId: text.id, _newTextCornerIds: [v1.id, v2.id, v3.id, v4.id] };
+}
+
+function setTextContent(state, textId, content) {
+  return { ...state, texts: state.texts.map((t) => (t.id === textId ? { ...t, content } : t)) };
+}
+
+function setTextStyle(state, textId, patch) {
+  return { ...state, texts: state.texts.map((t) => (t.id === textId ? { ...t, ...patch } : t)) };
+}
+
+// Convenience wrapper — deletes a text by deleting its corners, which
+// cascades through the ordinary deleteVertices path (including pruning any
+// fill that happened to also reference one of those points).
+function deleteTexts(state, textIds) {
+  if (!textIds.size) return state;
+  const cornerIds = new Set();
+  for (const t of state.texts) {
+    if (textIds.has(t.id)) [t.v1, t.v2, t.v3, t.v4].forEach((id) => cornerIds.add(id));
+  }
+  return deleteVertices(state, cornerIds);
+}
+
+// Resolves a text's 4 live corner points from the current vertex
+// positions — null if any corner vertex is missing (shouldn't normally
+// happen given the deleteVertices cascade above, but rendering stays
+// defensive the same way resolveBoundaryPolygon is for fills).
+function resolveTextQuad(vertices, text) {
+  const vmap = new Map(vertices.map((v) => [v.id, v]));
+  const corners = [vmap.get(text.v1), vmap.get(text.v2), vmap.get(text.v3), vmap.get(text.v4)];
+  return corners.every(Boolean) ? corners.map((v) => ({ x: v.x, y: v.y })) : null;
+}
+
+// ---------------------------------------------------------------------------
 // Layers — a strict, ordered z-partition: everything on a lower layer
 // renders and hit-tests entirely behind everything on a higher one,
 // regardless of that content's own thickness (which still governs z-order
@@ -500,11 +604,12 @@ function reorderLayer(state, layerId, direction) {
 // selection model never mixes vertex selection with edge/circle selection —
 // see VectorEditorView — so there's no ambiguity about what "move this
 // selection" refers to).
-function moveToLayer(state, { edgeIds, circleIds }, layerId) {
+function moveToLayer(state, { edgeIds, circleIds, textIds }, layerId) {
   return {
     ...state,
     edges: state.edges.map((e) => (edgeIds?.has(e.id) ? { ...e, layerId } : e)),
-    circles: state.circles.map((c) => (circleIds?.has(c.id) ? { ...c, layerId } : c))
+    circles: state.circles.map((c) => (circleIds?.has(c.id) ? { ...c, layerId } : c)),
+    texts: state.texts.map((t) => (textIds?.has(t.id) ? { ...t, layerId } : t))
   };
 }
 
@@ -549,6 +654,12 @@ function loopsToPathData(loops) {
     .join(' ');
 }
 
+// Minimal XML-escaping for text dropped into a foreignObject's XHTML —
+// only the 5 characters that are ever structurally significant there.
+function escapeXml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+
 function compileVectorSvg(state) {
   const { width, height, background } = state.canvas;
   const vertexById = new Map(state.vertices.map((v) => [v.id, v]));
@@ -583,6 +694,30 @@ function compileVectorSvg(state) {
         .map((c) => `  <circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" stroke="${c.style.color}" stroke-width="${c.style.thickness}" fill="${c.fill && c.fill !== 'none' ? c.fill : 'none'}" />`)
         .join('\n');
 
+      const layerTexts = state.texts.filter((t) => t.layerId === layer.id);
+      // A foreignObject warped onto the 4 corners via the same
+      // matrix3d homography the editor uses (computeQuadWarpMatrix3d) —
+      // see the schema note on the "Text" section for why the export
+      // stays a real, editable <div> of text rather than converting to
+      // outlined paths (a much bigger undertaking most SVG consumers,
+      // including browsers, don't actually require).
+      const textsMarkup = layerTexts
+        .map((t) => {
+          const quad = resolveTextQuad(state.vertices, t);
+          if (!quad) return '';
+          const matrix = computeQuadWarpMatrix3d(quad, DEFAULT_TEXT_WIDTH, DEFAULT_TEXT_HEIGHT);
+          const style = `width:${DEFAULT_TEXT_WIDTH}px;height:${DEFAULT_TEXT_HEIGHT}px;transform:${matrix};transform-origin:0 0;color:${t.color};font-size:${t.fontSize}px;text-align:${t.align};white-space:pre-wrap;word-wrap:break-word;font-family:sans-serif;line-height:1.25;`;
+          // The foreignObject's own box only needs to be big enough not to
+          // clip the warped div inside it (the div's CSS transform is what
+          // actually positions/shapes it, via transform-origin:0 0) — the
+          // full canvas size is a generous, simple bound for that, with
+          // overflow="visible" as a second guard for a quad dragged
+          // slightly outside the canvas.
+          return `  <foreignObject x="0" y="0" width="${width}" height="${height}" overflow="visible"><div xmlns="http://www.w3.org/1999/xhtml" style="${style}">${escapeXml(t.content)}</div></foreignObject>`;
+        })
+        .filter(Boolean)
+        .join('\n');
+
       const edgesMarkup = sortedEdges
         .map((e) => {
           const a = vertexById.get(e.v1);
@@ -600,7 +735,7 @@ function compileVectorSvg(state) {
         .map((j) => `  <polygon points="${j.points.map((p) => `${p.x},${p.y}`).join(' ')}" fill="${j.color}" stroke="none" />`)
         .join('\n');
 
-      return [fillsMarkup, circlesMarkup, edgesMarkup, miterMarkup].filter(Boolean).join('\n');
+      return [fillsMarkup, circlesMarkup, textsMarkup, edgesMarkup, miterMarkup].filter(Boolean).join('\n');
     })
     .filter(Boolean)
     .join('\n');
@@ -653,6 +788,12 @@ export {
   setCircleStyle,
   deleteCircles,
   contrastDotColor,
+  addText,
+  setTextContent,
+  setTextStyle,
+  deleteTexts,
+  resolveTextQuad,
+  setDescription,
   addLayer,
   removeLayer,
   renameLayer,

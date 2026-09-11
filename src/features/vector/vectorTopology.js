@@ -455,6 +455,53 @@ function connectedComponents(vertices, edges) {
 // avoids that failure mode entirely and reads the same at any angle this
 // editor's vertices are likely to actually use.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Text quad warp — a text element's 4 corners are 4 REAL vertices (see
+// vectorState.js's addText), so dragging one independently already
+// produces a non-rectangular trapezoid/skew, not just move/rotate/uniform
+// scale. Rendering that requires a genuine planar PROJECTIVE transform
+// (a homography), which plain SVG/CSS 2D `transform` can't express — only
+// `matrix3d` can, via a 3D transform with no visible depth. This computes
+// that matrix: the standard "unit square to quadrilateral" homography
+// (Heckbert), generalized from a unit square source to a `width`x`height`
+// source rect and re-expressed as CSS's column-major matrix3d() argument
+// order, so `foreignObject` content laid out at that WxH size maps exactly
+// onto the 4 target corners (TL, TR, BR, BL) whatever shape they've been
+// dragged into.
+function computeQuadWarpMatrix3d(corners, width, height) {
+  const [p0, p1, p2, p3] = corners; // TL, TR, BR, BL — matches unit-square corners (0,0),(1,0),(1,1),(0,1)
+  const x0 = p0.x, y0 = p0.y, x1 = p1.x, y1 = p1.y, x2 = p2.x, y2 = p2.y, x3 = p3.x, y3 = p3.y;
+  const dx1 = x1 - x2, dx2 = x3 - x2, sx = x0 - x1 + x2 - x3;
+  const dy1 = y1 - y2, dy2 = y3 - y2, sy = y0 - y1 + y2 - y3;
+  let a, b, c, d, e, f, g, h;
+  if (Math.abs(sx) < 1e-9 && Math.abs(sy) < 1e-9) {
+    // Degenerates to a plain affine map (the 4 corners form a
+    // parallelogram — e.g. plain move/rotate/scale with no skew at all).
+    a = x1 - x0; b = x2 - x1; c = x0;
+    d = y1 - y0; e = y2 - y1; f = y0;
+    g = 0; h = 0;
+  } else {
+    const denom = dx1 * dy2 - dx2 * dy1;
+    g = (sx * dy2 - dx2 * sy) / denom;
+    h = (dx1 * sy - sx * dy1) / denom;
+    a = x1 - x0 + g * x1;
+    b = x3 - x0 + h * x3;
+    c = x0;
+    d = y1 - y0 + g * y1;
+    e = y3 - y0 + h * y3;
+    f = y0;
+  }
+  // Folds the (0,width)x(0,height) -> unit-square scale into the
+  // homography so it maps straight from local (0..width, 0..height)
+  // foreignObject coordinates rather than a unit square.
+  const a2 = a / width, b2 = b / height;
+  const d2 = d / width, e2 = e / height;
+  const g2 = g / width, h2 = h / height;
+  // CSS matrix3d(...) takes 4 columns of 4 in order; a flat/planar map (no
+  // real depth) keeps the z row as identity (0,0,1,0).
+  return `matrix3d(${a2},${d2},0,${g2}, ${b2},${e2},0,${h2}, 0,0,1,0, ${c},${f},0,1)`;
+}
+
 function computeMiterJoints(vertices, edges) {
   const vmap = new Map(vertices.map((v) => [v.id, v]));
   const byVertex = new Map();
@@ -575,5 +622,6 @@ export {
   resolveBoundaryPolygon,
   boundaryReferencesOnly,
   computeMiterJoints,
+  computeQuadWarpMatrix3d,
   snapCandidate
 };
