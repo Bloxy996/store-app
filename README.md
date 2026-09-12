@@ -61,7 +61,7 @@ deployment for changes to take effect.
 
 ## Architecture
 
-See [`CLAUDE.md`](./docs/CLAUDE.md) for the full set of architecture
+See [`CLAUDE.md`](./CLAUDE.md) for the full set of architecture
 decisions and conventions (tech stack, the zero-local-note-storage
 rule, file layout, performance notes).
 
