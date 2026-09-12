@@ -29,6 +29,33 @@
   align-items: center;
   gap: 2px;
 }
+.vector-snap-menu-anchor {
+  position: relative;
+}
+.vector-snap-menu {
+  position: absolute;
+  top: 28px;
+  left: 0;
+  z-index: 6;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  padding: 6px 0;
+  min-width: 200px;
+}
+.vector-snap-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.vector-snap-menu-row:hover {
+  background: var(--bg-3);
+}
 .vector-color-swatch {
   width: 16px;
   height: 16px;
@@ -333,6 +360,17 @@
   stroke: var(--accent);
   stroke-width: 1.5;
   pointer-events: none;
+}
+.vector-snap-axis {
+  stroke: var(--text-muted);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+  opacity: 0.6;
+  cursor: pointer;
+}
+.vector-snap-axis.selected {
+  stroke: var(--accent);
+  opacity: 1;
 }
 
 .vector-vertex {

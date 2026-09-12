@@ -555,6 +555,31 @@ function projectOntoLine(point, p1, p2) {
   return { point: proj, distance: dist(point, proj) };
 }
 
+// Builds candidate snap lines anchored at `anchor` that run either
+// PARALLEL or PERPENDICULAR to each of `referenceEdges` — used so a new or
+// dragged edge from `anchor` can snap to exactly match, or exactly cross,
+// another edge's direction. Two edges pointing the same or opposite way
+// produce the same line, so results are deduplicated by angle (mod 180°)
+// to avoid offering the same candidate twice.
+function perpendicularParallelLines(anchor, referenceEdges) {
+  const seenAngles = [];
+  const lines = [];
+  for (const { p1, p2 } of referenceEdges) {
+    const dx = p2.x - p1.x, dy = p2.y - p1.y;
+    if (Math.abs(dx) < 1e-9 && Math.abs(dy) < 1e-9) continue;
+    for (const [ex, ey] of [
+      [dx, dy], // parallel
+      [-dy, dx] // perpendicular (90° rotation)
+    ]) {
+      const angle = ((Math.atan2(ey, ex) % Math.PI) + Math.PI) % Math.PI; // 0..π, so opposite directions collapse together
+      if (seenAngles.some((a) => Math.abs(a - angle) < 1e-6)) continue;
+      seenAngles.push(angle);
+      lines.push({ p1: anchor, p2: { x: anchor.x + ex, y: anchor.y + ey } });
+    }
+  }
+  return lines;
+}
+
 // ---------------------------------------------------------------------------
 // Snapping — priority order per the editor's rules: an existing Vertex
 // within threshold wins outright; otherwise a point on an existing Edge
@@ -659,5 +684,6 @@ export {
   boundaryReferencesOnly,
   computeMiterJoints,
   computeQuadWarpMatrix3d,
+  perpendicularParallelLines,
   snapCandidate
 };

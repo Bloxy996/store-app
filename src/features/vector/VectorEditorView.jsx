@@ -24,6 +24,7 @@ import {
   addEdge,
   addFillAt,
   addLayer,
+  addSnapAxis,
   addText,
   addVertex,
   bindVertexOntoEdge,
@@ -33,6 +34,7 @@ import {
   deleteCircles,
   deleteEdges,
   deleteFills,
+  deleteSnapAxes,
   deleteTexts,
   deleteVertices,
   disconnectVertex,
@@ -40,6 +42,7 @@ import {
   groupVertexIds,
   groupVertices,
   moveCircles,
+  moveSnapAxis,
   moveVertices,
   moveToLayer,
   parseVectorContent,
@@ -57,6 +60,7 @@ import {
   setEdgeStyle,
   setFillColor,
   setLayerVisible,
+  setSnapAxisEndpoint,
   setTextContent,
   setTextStyle,
   severEdgeEndpoint,
@@ -65,7 +69,7 @@ import {
   ungroupVertices,
   loopsToPathData
 } from './vectorState.js';
-import { SpatialGrid, buildVertexAdjacency, closestPointOnSegment, computeMiterJoints, computeQuadWarpMatrix3d, dist, findFillBoundary, resolveBoundaryPolygon, snapCandidate } from './vectorTopology.js';
+import { SpatialGrid, buildVertexAdjacency, closestPointOnSegment, computeMiterJoints, computeQuadWarpMatrix3d, dist, findFillBoundary, perpendicularParallelLines, resolveBoundaryPolygon, snapCandidate } from './vectorTopology.js';
 import { clamp } from '../../lib/mathUtils.js';
 
 const MOVE_THRESHOLD = 3; // world px before a pointerdown counts as a drag, not a click — same convention as CanvasView
@@ -80,16 +84,20 @@ const GUIDE_LINE_SPAN = 4000;
 // gets divided by the current zoom right before use — otherwise "14px" of
 // slack would mean 14 world units regardless of zoom, i.e. a hit target
 // that's way too generous zoomed in and way too tight zoomed out.
-function snapOpts(zoom, grid, axisSnapEnabled, opts = {}) {
+function snapOpts(zoom, grid, snapToggles, opts = {}) {
+  const { vertexSnapEnabled = true, edgeSnapEnabled = true, axisSnapEnabled = true } = snapToggles;
   return {
     grid,
-    vertexPx: (opts.vertexPx ?? VERTEX_SNAP_PX) / zoom,
-    edgePx: opts.allowSubdivide === false ? -1 : EDGE_SNAP_PX / zoom,
+    vertexPx: vertexSnapEnabled ? (opts.vertexPx ?? VERTEX_SNAP_PX) / zoom : -1,
+    edgePx: !edgeSnapEnabled || opts.allowSubdivide === false ? -1 : EDGE_SNAP_PX / zoom,
     axisPx: axisSnapEnabled && opts.allowAxisSnap !== false ? AXIS_SNAP_PX / zoom : -1,
-    // The "straighten"/"preserve direction" candidate lines share the plain
-    // axis snap's on/off toggle and threshold — they're both "axis
-    // alignment" snapping in spirit, just against a line derived from this
-    // vertex's own topology instead of a generic horizontal/vertical guide.
+    // The "straighten"/"preserve direction"/custom-axis/perpendicular-
+    // parallel candidate lines (opts.lines, assembled by the caller —
+    // see onVertexPointerDown) all share the plain axis snap's threshold,
+    // since they're all "axis alignment" snapping in spirit, just against
+    // a line other than a generic horizontal/vertical guide. Each
+    // category of line has its OWN on/off toggle controlling whether the
+    // caller includes it in opts.lines in the first place.
     linePx: axisSnapEnabled && opts.allowAxisSnap !== false ? AXIS_SNAP_PX / zoom : -1,
     lines: opts.lines,
     excludeVertexId: opts.excludeVertexId
@@ -107,8 +115,8 @@ function snapOpts(zoom, grid, axisSnapEnabled, opts = {}) {
 // consider — separate from `doc` (which this still mutates in full) so the
 // snap-cross-layer toggle can restrict what's snappable without touching
 // what actually gets created (see edgesForSnap/verticesForSnap).
-function resolvePlacement(doc, grid, rawPoint, zoom, axisSnapEnabled, opts = {}, snapVertices = doc.vertices, snapEdges = doc.edges) {
-  const snap = snapCandidate(snapVertices, snapEdges, rawPoint, snapOpts(zoom, grid, axisSnapEnabled, opts));
+function resolvePlacement(doc, grid, rawPoint, zoom, snapToggles, opts = {}, snapVertices = doc.vertices, snapEdges = doc.edges) {
+  const snap = snapCandidate(snapVertices, snapEdges, rawPoint, snapOpts(zoom, grid, snapToggles, opts));
   if (snap.snappedVertexId) return { nextDoc: doc, vertexId: snap.snappedVertexId, snap };
   if (snap.snappedEdgeId) {
     const nextDoc = subdivideEdge(doc, snap.snappedEdgeId, snap.point);
@@ -151,6 +159,16 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   const [tool, setTool] = useState('select');
   const [activeStyle, setActiveStyle] = useState(DEFAULT_STYLE);
   const [axisSnapEnabled, setAxisSnapEnabled] = useState(true);
+  // Snap-type toggles — see the toolbar's snap-settings popover. Vertex
+  // and edge(-subdivide) snap default on since they're the two most
+  // fundamental kinds; the rest mirror axisSnapEnabled's default.
+  const [vertexSnapEnabled, setVertexSnapEnabled] = useState(true);
+  const [edgeSnapEnabled, setEdgeSnapEnabled] = useState(true);
+  const [customAxisSnapEnabled, setCustomAxisSnapEnabled] = useState(true);
+  const [perpParallelSnapEnabled, setPerpParallelSnapEnabled] = useState(true);
+  const [snapMenuOpen, setSnapMenuOpen] = useState(false);
+  const [selectedAxisIds, setSelectedAxisIds] = useState(() => new Set());
+  const [axisDraft, setAxisDraft] = useState(null); // { x1, y1, x2, y2 } — preview while drawing a new snap axis
   const [selectedVertexIds, setSelectedVertexIds] = useState(() => new Set());
   const [selectedEdgeIds, setSelectedEdgeIds] = useState(() => new Set());
   const [selectedCircleIds, setSelectedCircleIds] = useState(() => new Set());
@@ -298,6 +316,11 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     return doc.circles.map((c) => (c.id === circleDraft.id ? { ...c, ...circleDraft } : c));
   }, [doc.circles, circleDraft]);
 
+  const axesForRender = useMemo(() => {
+    if (!axisDraft || !axisDraft.id) return doc.snapAxes;
+    return doc.snapAxes.map((a) => (a.id === axisDraft.id ? { ...a, ...axisDraft } : a));
+  }, [doc.snapAxes, axisDraft]);
+
   // Picks whichever of black/white contrasts more against the current
   // canvas color, so the alignment-dot grid stays legible against any
   // background the document is set to.
@@ -442,6 +465,11 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   };
 
   const deleteSelection = useCallback(() => {
+    if (selectedAxisIds.size) {
+      commitState(deleteSnapAxes(doc, selectedAxisIds));
+      setSelectedAxisIds(new Set());
+      return;
+    }
     if (selectedFillIds.size) {
       commitState(deleteFills(doc, selectedFillIds));
       setSelectedFillIds(new Set());
@@ -564,14 +592,31 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     let candidateLines = null;
     if (singleId) {
       const v0 = vertexById.get(singleId);
-      const others = doc.edges
-        .filter((e) => e.v1 === singleId || e.v2 === singleId)
-        .map((e) => vertexById.get(e.v1 === singleId ? e.v2 : e.v1))
-        .filter(Boolean);
+      const incidentEdges = doc.edges.filter((e) => e.v1 === singleId || e.v2 === singleId);
+      const others = incidentEdges.map((e) => vertexById.get(e.v1 === singleId ? e.v2 : e.v1)).filter(Boolean);
+      candidateLines = [];
       if (v0 && others.length) {
-        candidateLines = others.map((p) => ({ p1: p, p2: v0 }));
+        candidateLines.push(...others.map((p) => ({ p1: p, p2: v0 })));
         if (others.length === 2) candidateLines.push({ p1: others[0], p2: others[1] });
       }
+      // Custom user-drawn snap axes are always-available candidate lines,
+      // independent of this vertex's own topology — see the Snap axes
+      // section of vectorState.js.
+      if (customAxisSnapEnabled) {
+        candidateLines.push(...doc.snapAxes.map((a) => ({ p1: { x: a.x1, y: a.y1 }, p2: { x: a.x2, y: a.y2 } })));
+      }
+      // Perpendicular/parallel snap: only meaningful for a degree-1 vertex
+      // (a single dangling edge V-P) — anchor the candidate lines at the
+      // FIXED far endpoint P, matching every OTHER edge in the document
+      // (excluding this one, which would trivially match itself).
+      if (perpParallelSnapEnabled && v0 && others.length === 1) {
+        const referenceEdges = doc.edges
+          .filter((e) => !incidentEdges.includes(e))
+          .map((e) => ({ p1: vertexById.get(e.v1), p2: vertexById.get(e.v2) }))
+          .filter((e) => e.p1 && e.p2);
+        candidateLines.push(...perpendicularParallelLines(others[0], referenceEdges));
+      }
+      if (!candidateLines.length) candidateLines = null;
     }
     dragRef.current = { mode: 'move', ids, startPositions, startWorld: world, moved: false, singleId, candidateLines };
   };
@@ -747,6 +792,40 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     setEditingTextId(null);
   };
 
+  // Snap axes are an editing aid (see vectorState.js), so — like most
+  // other pointer handlers here — they're inert outside the select tool
+  // and in View mode. Clicking the axis LINE itself selects/moves it as a
+  // whole; its two endpoint handles (rendered only when selected) resize
+  // it — see beginAxisEndpointDrag.
+  const onAxisPointerDown = (e, axis) => {
+    e.stopPropagation();
+    if (spaceDown) {
+      beginPan(e);
+      return;
+    }
+    if (viewMode || tool !== 'select') return;
+    containerRef.current.setPointerCapture(e.pointerId);
+    const world = screenToWorld(e.clientX, e.clientY);
+    setSelectedAxisIds((prev) => {
+      if (!e.shiftKey) return new Set([axis.id]);
+      const next = new Set(prev);
+      next.has(axis.id) ? next.delete(axis.id) : next.add(axis.id);
+      return next;
+    });
+    setSelectedVertexIds(new Set());
+    setSelectedEdgeIds(new Set());
+    setSelectedCircleIds(new Set());
+    setSelectedFillIds(new Set());
+    dragRef.current = { mode: 'move-axis', axisId: axis.id, startWorld: world, x1: axis.x1, y1: axis.y1, x2: axis.x2, y2: axis.y2 };
+  };
+
+  const beginAxisEndpointDrag = (e, axisId, which) => {
+    e.stopPropagation();
+    if (viewMode) return;
+    containerRef.current.setPointerCapture(e.pointerId);
+    dragRef.current = { mode: 'resize-axis', axisId, which };
+  };
+
   // The selection bounding-box's dedicated MOVE handle (a stem+circle
   // below the box, mirroring the rotate handle's stem+circle above it —
   // see the render block). Deliberately NOT "click anywhere in the box
@@ -790,7 +869,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       return;
     }
     if (tool === 'polyline') {
-      const { nextDoc, vertexId } = resolvePlacement(doc, grid, world, viewport.zoom, axisSnapEnabled, {}, verticesForSnap, edgesForSnap);
+      const { nextDoc, vertexId } = resolvePlacement(doc, grid, world, viewport.zoom, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, {}, verticesForSnap, edgesForSnap);
       if (nextDoc !== doc) commitState(nextDoc);
       if (polylineChain.length) {
         const last = polylineChain[polylineChain.length - 1];
@@ -810,6 +889,11 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       setTextDraft({ x0: world.x, y0: world.y, x1: world.x, y1: world.y });
       return;
     }
+    if (tool === 'axis') {
+      dragRef.current = { mode: 'draw-axis', startWorld: world };
+      setAxisDraft({ x1: world.x, y1: world.y, x2: world.x, y2: world.y });
+      return;
+    }
     if (tool === 'fill') {
       const { state: next, ok } = addFillAt(doc, world, activeStyle.color, safeActiveLayerId);
       if (ok) commitState(next);
@@ -822,6 +906,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     setSelectedEdgeIds(new Set());
     setSelectedFillIds(new Set());
     setSelectedCircleIds(new Set());
+    setSelectedAxisIds(new Set());
     if (localEditGroupId) setLocalEditGroupId(null);
     dragRef.current = { mode: 'marquee', startWorld: world };
     setMarquee({ x0: world.x, y0: world.y, x1: world.x, y1: world.y });
@@ -848,7 +933,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
 
     if (drag.mode === 'place-vertex') {
       if (dist(drag.startWorld, world) > MOVE_THRESHOLD / viewport.zoom) drag.moved = true;
-      const snap = snapCandidate(verticesForSnap, edgesForSnap, world, snapOpts(viewport.zoom, grid, axisSnapEnabled));
+      const snap = snapCandidate(verticesForSnap, edgesForSnap, world, snapOpts(viewport.zoom, grid, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }));
       setSnapPreview(snap);
       return;
     }
@@ -861,7 +946,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
         // edge (bound on drop — see below), or to an axis. Group drags
         // intentionally skip target-snapping and just move by a uniform
         // delta, per "maintaining relative distances".
-        const snap = snapCandidate(verticesForSnap, edgesForSnap, world, snapOpts(viewport.zoom, grid, axisSnapEnabled, { excludeVertexId: drag.singleId, lines: drag.candidateLines }));
+        const snap = snapCandidate(verticesForSnap, edgesForSnap, world, snapOpts(viewport.zoom, grid, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, { excludeVertexId: drag.singleId, lines: drag.candidateLines }));
         setSnapPreview(snap);
         scheduleLiveOverrides(new Map([[drag.singleId, snap.point]]));
       } else {
@@ -877,7 +962,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
 
     if (drag.mode === 'spawn-connected') {
       if (dist(drag.startWorld, world) > MOVE_THRESHOLD / viewport.zoom) drag.moved = true;
-      const snap = snapCandidate(verticesForSnap, edgesForSnap, world, snapOpts(viewport.zoom, grid, axisSnapEnabled, { excludeVertexId: drag.fromVertexId }));
+      const snap = snapCandidate(verticesForSnap, edgesForSnap, world, snapOpts(viewport.zoom, grid, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, { excludeVertexId: drag.fromVertexId }));
       setSnapPreview(snap);
       return; // preview line follows pointerWorld automatically; the actual vertex/edge is created on pointerup
     }
@@ -902,6 +987,25 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
 
     if (drag.mode === 'draw-text') {
       setTextDraft({ x0: drag.startWorld.x, y0: drag.startWorld.y, x1: world.x, y1: world.y });
+      return;
+    }
+
+    if (drag.mode === 'draw-axis') {
+      setAxisDraft({ x1: drag.startWorld.x, y1: drag.startWorld.y, x2: world.x, y2: world.y });
+      return;
+    }
+
+    if (drag.mode === 'move-axis') {
+      const dx = world.x - drag.startWorld.x;
+      const dy = world.y - drag.startWorld.y;
+      setAxisDraft({ id: drag.axisId, x1: drag.x1 + dx, y1: drag.y1 + dy, x2: drag.x2 + dx, y2: drag.y2 + dy });
+      return;
+    }
+
+    if (drag.mode === 'resize-axis') {
+      const fixed = drag.which === 'p1' ? { x2: drag.x2, y2: drag.y2 } : { x1: drag.x1, y1: drag.y1 };
+      const moving = drag.which === 'p1' ? { x1: world.x, y1: world.y } : { x2: world.x, y2: world.y };
+      setAxisDraft({ id: drag.axisId, ...fixed, ...moving });
       return;
     }
 
@@ -956,7 +1060,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
 
     if (drag.mode === 'place-vertex') {
       if (!drag.moved && pointerWorld) {
-        const { nextDoc } = resolvePlacement(doc, grid, pointerWorld, viewport.zoom, axisSnapEnabled, {}, verticesForSnap, edgesForSnap);
+        const { nextDoc } = resolvePlacement(doc, grid, pointerWorld, viewport.zoom, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, {}, verticesForSnap, edgesForSnap);
         if (nextDoc !== doc) commitState(nextDoc);
       }
       return;
@@ -966,7 +1070,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       if (pointerWorld) {
         const dropDist = dist(drag.startWorld, pointerWorld);
         if (dropDist > MOVE_THRESHOLD / viewport.zoom) {
-          const { nextDoc, vertexId } = resolvePlacement(doc, grid, pointerWorld, viewport.zoom, axisSnapEnabled, { excludeVertexId: drag.fromVertexId }, verticesForSnap, edgesForSnap);
+          const { nextDoc, vertexId } = resolvePlacement(doc, grid, pointerWorld, viewport.zoom, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, { excludeVertexId: drag.fromVertexId }, verticesForSnap, edgesForSnap);
           const { state: withEdge, ok } = addEdge(nextDoc, drag.fromVertexId, vertexId, activeStyle, safeActiveLayerId);
           commitState(ok ? withEdge : nextDoc);
         }
@@ -980,7 +1084,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
         // an edge the vertex isn't already part of, Edge Mid-Point
         // Insertion binds it into that edge's topology instead of just
         // leaving it sitting on top.
-        const snap = snapCandidate(verticesForSnap, edgesForSnap, pointerWorld, snapOpts(viewport.zoom, grid, axisSnapEnabled, { excludeVertexId: drag.singleId }));
+        const snap = snapCandidate(verticesForSnap, edgesForSnap, pointerWorld, snapOpts(viewport.zoom, grid, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, { excludeVertexId: drag.singleId }));
         let next = moveVertices(doc, new Map([[drag.singleId, snap.point]]));
         if (snap.snappedEdgeId) next = bindVertexOntoEdge(next, snap.snappedEdgeId, drag.singleId);
         commitState(next);
@@ -1065,6 +1169,34 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       setTool('select');
       return;
     }
+
+    if (drag.mode === 'draw-axis') {
+      setAxisDraft(null);
+      const end = pointerWorld || drag.startWorld;
+      if (dist(drag.startWorld, end) > MOVE_THRESHOLD / viewport.zoom) {
+        const next = addSnapAxis(doc, drag.startWorld.x, drag.startWorld.y, end.x, end.y);
+        commitState(next);
+        setSelectedAxisIds(new Set([next._newSnapAxisId]));
+        setTool('select');
+      }
+      return;
+    }
+
+    if (drag.mode === 'move-axis') {
+      setAxisDraft(null);
+      if (pointerWorld) {
+        const dx = pointerWorld.x - drag.startWorld.x;
+        const dy = pointerWorld.y - drag.startWorld.y;
+        if (Math.abs(dx) > 1e-6 || Math.abs(dy) > 1e-6) commitState(moveSnapAxis(doc, drag.axisId, dx, dy));
+      }
+      return;
+    }
+
+    if (drag.mode === 'resize-axis') {
+      setAxisDraft(null);
+      if (pointerWorld) commitState(setSnapAxisEndpoint(doc, drag.axisId, drag.which, pointerWorld));
+      return;
+    }
   };
 
   // ---------------------------------------------------------------------
@@ -1127,6 +1259,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       setSelectedEdgeIds(new Set());
       setSelectedFillIds(new Set());
       setSelectedCircleIds(new Set());
+      setSelectedAxisIds(new Set());
       clearToolInProgress();
       setLocalEditGroupId(null);
     } else if (e.key === 'Enter' && polylineChain.length) {
@@ -1165,7 +1298,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       e.preventDefault();
       commitState(e.shiftKey ? ungroupVertices(doc, selectedVertexIds) : groupVertices(doc, selectedVertexIds));
     } else if (!e.metaKey && !e.ctrlKey && !e.target.closest('select')) {
-      const map = { v: 'select', p: 'vertex', e: 'edge', l: 'polyline', c: 'circle', t: 'text', i: 'eyedropper', f: 'fill' };
+      const map = { v: 'select', p: 'vertex', e: 'edge', l: 'polyline', c: 'circle', t: 'text', x: 'axis', i: 'eyedropper', f: 'fill' };
       const next = map[e.key.toLowerCase()];
       if (next) {
         setTool(next);
@@ -1267,6 +1400,16 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
         onSetCanvasBackground={(color) => commitState(setCanvasBackground(doc, color))}
         axisSnapEnabled={axisSnapEnabled}
         onToggleAxisSnap={() => setAxisSnapEnabled((v) => !v)}
+        vertexSnapEnabled={vertexSnapEnabled}
+        onToggleVertexSnap={() => setVertexSnapEnabled((v) => !v)}
+        edgeSnapEnabled={edgeSnapEnabled}
+        onToggleEdgeSnap={() => setEdgeSnapEnabled((v) => !v)}
+        customAxisSnapEnabled={customAxisSnapEnabled}
+        onToggleCustomAxisSnap={() => setCustomAxisSnapEnabled((v) => !v)}
+        perpParallelSnapEnabled={perpParallelSnapEnabled}
+        onTogglePerpParallelSnap={() => setPerpParallelSnapEnabled((v) => !v)}
+        snapMenuOpen={snapMenuOpen}
+        onToggleSnapMenu={() => setSnapMenuOpen((v) => !v)}
         layersPanelOpen={layersPanelOpen}
         onToggleLayersPanel={() => setLayersPanelOpen((v) => !v)}
         descriptionPanelOpen={descriptionPanelOpen}
@@ -1283,6 +1426,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
           setSelectedEdgeIds(new Set());
           setSelectedFillIds(new Set());
           setSelectedCircleIds(new Set());
+          setSelectedAxisIds(new Set());
           clearToolInProgress();
         }}
         onUndo={undo}
@@ -1552,6 +1696,40 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
             )}
             {!viewMode && snapPreview?.snappedEdgeId && <circle className="vector-snap-marker" cx={snapPreview.point.x} cy={snapPreview.point.y} r={5 / viewport.zoom} />}
 
+            {/* User-drawn snap axes — an editing aid, always visible (as a
+                dotted line, extended to a fixed span so it reads as the
+                infinite reference line it acts as) in Edit mode, hidden in
+                View mode and never part of the export (see the Snap axes
+                section of vectorState.js). */}
+            {!viewMode &&
+              axesForRender.map((a) => {
+                const selected = selectedAxisIds.has(a.id);
+                const dx = a.x2 - a.x1, dy = a.y2 - a.y1;
+                const len = Math.hypot(dx, dy) || 1;
+                const ux = (dx / len) * GUIDE_LINE_SPAN, uy = (dy / len) * GUIDE_LINE_SPAN;
+                return (
+                  <g key={a.id}>
+                    {selected && <line className="vector-selection-halo" x1={a.x1 - ux} y1={a.y1 - uy} x2={a.x2 + ux} y2={a.y2 + uy} strokeWidth={3 / viewport.zoom} />}
+                    <line
+                      className={`vector-snap-axis ${selected ? 'selected' : ''}`}
+                      x1={a.x1 - ux}
+                      y1={a.y1 - uy}
+                      x2={a.x2 + ux}
+                      y2={a.y2 + uy}
+                      onPointerDown={(e) => onAxisPointerDown(e, a)}
+                    />
+                    {selected && (
+                      <>
+                        <circle className="vector-scale-handle" cx={a.x1} cy={a.y1} r={5 / viewport.zoom} style={{ cursor: 'move' }} onPointerDown={(e) => beginAxisEndpointDrag(e, a.id, 'p1')} />
+                        <circle className="vector-scale-handle" cx={a.x2} cy={a.y2} r={5 / viewport.zoom} style={{ cursor: 'move' }} onPointerDown={(e) => beginAxisEndpointDrag(e, a.id, 'p2')} />
+                      </>
+                    )}
+                  </g>
+                );
+              })}
+            {/* In-progress axis draw preview — not yet a real axis. */}
+            {axisDraft && !axisDraft.id && <line className="vector-snap-axis" x1={axisDraft.x1} y1={axisDraft.y1} x2={axisDraft.x2} y2={axisDraft.y2} />}
+
             {/* Vertex dots are an editing aid, not artwork — hidden in View mode. */}
             {!viewMode &&
               verticesForRender.map((v) => {
@@ -1667,7 +1845,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
             );
           })()}
 
-        {!viewMode && (selectedVertexIds.size > 0 || selectedEdgeIds.size > 0 || selectedCircleIds.size > 0 || selectedFillIds.size > 0) && (
+        {!viewMode && (selectedVertexIds.size > 0 || selectedEdgeIds.size > 0 || selectedCircleIds.size > 0 || selectedFillIds.size > 0 || selectedAxisIds.size > 0) && (
           <div className="vector-selection-toolbar">
             {canGroup && (
               <button className="text-action" onClick={() => commitState(groupVertices(doc, selectedVertexIds))} title="Group (G)">

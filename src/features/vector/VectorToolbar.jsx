@@ -3,6 +3,18 @@ import { VECTOR_COLORS, VECTOR_RADII, VECTOR_THICKNESSES } from './vectorState.j
 
 const TEXT_FONT_SIZES = [12, 16, 20, 24, 32, 48, 64, 96];
 
+// A small local icon — kept here rather than added to the shared icons.jsx
+// module, since that file's giant single-line export statement is fragile
+// to patch against (see icons.jsx's own IconCircleTool for the same
+// reasoning) and this glyph is only ever used by this one tool button.
+const IconAxisTool = (p) => (
+  <svg width={p.size ?? 16} height={p.size ?? 16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" style={{ flexShrink: 0 }}>
+    <line x1="3" y1="21" x2="21" y2="3" strokeDasharray="2.5 3" />
+    <circle cx="7" cy="17" r="1.6" fill="currentColor" stroke="none" />
+    <circle cx="17" cy="7" r="1.6" fill="currentColor" stroke="none" />
+  </svg>
+);
+
 const TOOLS = [
   { id: 'select', label: 'Select (V)', Icon: IconCursorTool },
   { id: 'vertex', label: 'Vertex — click to place, click an edge to subdivide it (P)', Icon: IconVertexTool },
@@ -10,46 +22,56 @@ const TOOLS = [
   { id: 'polyline', label: 'Polyline — click to chain vertices, click the start point or press Enter/Escape to finish (L)', Icon: IconPolylineTool },
   { id: 'circle', label: 'Circle — click to place, drag to set radius (C)', Icon: IconCircleTool },
   { id: 'text', label: 'Text — click to place, drag to size the box (T)', Icon: IconType },
+  { id: 'axis', label: 'Snap axis — draw a persistent reference/snap line, always visible in Edit mode (X)', Icon: IconAxisTool },
   { id: 'eyedropper', label: 'Eyedropper — sample an edge, fill, circle, or text\u2019s style (I)', Icon: IconEyedropperTool },
   { id: 'fill', label: 'Flood fill — click an enclosed region; click a filled region again to recolor it (F)', Icon: IconFillTool }
 ];
 
+const SNAP_TOGGLES = [
+  { key: 'vertexSnapEnabled', onKey: 'onToggleVertexSnap', label: 'Vertices' },
+  { key: 'edgeSnapEnabled', onKey: 'onToggleEdgeSnap', label: 'Edges (subdivide)' },
+  { key: 'axisSnapEnabled', onKey: 'onToggleAxisSnap', label: 'Horizontal / vertical' },
+  { key: 'customAxisSnapEnabled', onKey: 'onToggleCustomAxisSnap', label: 'Your snap axes' },
+  { key: 'perpParallelSnapEnabled', onKey: 'onTogglePerpParallelSnap', label: 'Perpendicular / parallel to edges' }
+];
 
-function VectorToolbar({
-  tool,
-  onSetTool,
-  activeStyle,
-  onSetColor,
-  onSetThickness,
-  activeRadius,
-  onSetRadius,
-  circleFill,
-  onSetCircleFill,
-  activeTextStyle,
-  onSetTextColor,
-  onSetTextFontSize,
-  onSetTextAlign,
-  canvasBackground,
-  onSetCanvasBackground,
-  axisSnapEnabled,
-  onToggleAxisSnap,
-  layersPanelOpen,
-  onToggleLayersPanel,
-  descriptionPanelOpen,
-  onToggleDescriptionPanel,
-  viewMode,
-  onToggleViewMode,
-  onUndo,
-  onRedo,
-  canUndo,
-  canRedo,
-  zoom,
-  onZoomIn,
-  onZoomOut,
-  onZoomReset,
-  onFitToContent,
-  onExportSvg
-}) {
+
+function VectorToolbar(props) {
+  const {
+    tool,
+    onSetTool,
+    activeStyle,
+    onSetColor,
+    onSetThickness,
+    activeRadius,
+    onSetRadius,
+    circleFill,
+    onSetCircleFill,
+    activeTextStyle,
+    onSetTextColor,
+    onSetTextFontSize,
+    onSetTextAlign,
+    canvasBackground,
+    onSetCanvasBackground,
+    snapMenuOpen,
+    onToggleSnapMenu,
+    layersPanelOpen,
+    onToggleLayersPanel,
+    descriptionPanelOpen,
+    onToggleDescriptionPanel,
+    viewMode,
+    onToggleViewMode,
+    onUndo,
+    onRedo,
+    canUndo,
+    canRedo,
+    zoom,
+    onZoomIn,
+    onZoomOut,
+    onZoomReset,
+    onFitToContent,
+    onExportSvg
+  } = props;
   return (
     <div className="vector-toolbar">
       {/* Everything inside this fieldset is inert while View mode is on —
@@ -89,9 +111,21 @@ function VectorToolbar({
               </option>
             ))}
           </select>
-          <button className={`icon-btn ${axisSnapEnabled ? 'active' : ''}`} title={axisSnapEnabled ? 'Axis/alignment snap: on' : 'Axis/alignment snap: off'} aria-pressed={axisSnapEnabled} onClick={onToggleAxisSnap}>
-            <IconGrid size={15} />
-          </button>
+          <div className="vector-snap-menu-anchor">
+            <button className={`icon-btn ${snapMenuOpen ? 'active' : ''}`} title="Snapping settings" aria-pressed={snapMenuOpen} onClick={onToggleSnapMenu}>
+              <IconGrid size={15} />
+            </button>
+            {snapMenuOpen && (
+              <div className="vector-snap-menu">
+                {SNAP_TOGGLES.map(({ key, onKey, label }) => (
+                  <label key={key} className="vector-snap-menu-row">
+                    <input type="checkbox" checked={props[key]} onChange={() => props[onKey]()} />
+                    {label}
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
         <div className="vector-toolbar-group">
           <select className="vector-thickness-select" value={activeRadius} onChange={(e) => onSetRadius(Number(e.target.value))} title="Radius for the next circle you draw">

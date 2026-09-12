@@ -92,7 +92,8 @@ function makeDefaultVectorState(title) {
     circles: [],
     texts: [],
     groups: [],
-    layers: [{ id: 'layer-1', name: 'Layer 1', visible: true }]
+    layers: [{ id: 'layer-1', name: 'Layer 1', visible: true }],
+    snapAxes: []
   };
 }
 
@@ -202,6 +203,15 @@ function parseVectorContent(content) {
     const groups = Array.isArray(p?.groups)
       ? p.groups.filter((g) => g && g.id && Array.isArray(g.vertexIds)).map((g) => ({ id: g.id, vertexIds: g.vertexIds.filter((id) => vertexIds.has(id)) })).filter((g) => g.vertexIds.length > 1)
       : [];
+    // User-drawn persistent snap axes — an editing aid, not artwork (they
+    // never appear in compileVectorSvg's output), so they're just two raw
+    // points, not vertex references: unlike everything else in this
+    // schema they aren't meant to be part of the topology at all.
+    const snapAxes = Array.isArray(p?.snapAxes)
+      ? p.snapAxes
+          .filter((a) => a && a.id && [a.x1, a.y1, a.x2, a.y2].every((n) => Number.isFinite(Number(n))))
+          .map((a) => ({ id: a.id, x1: Number(a.x1), y1: Number(a.y1), x2: Number(a.x2), y2: Number(a.y2) }))
+      : [];
     return {
       title: typeof p?.title === 'string' ? p.title : 'Untitled',
       description: typeof p?.description === 'string' ? p.description : '',
@@ -212,7 +222,8 @@ function parseVectorContent(content) {
       circles,
       texts,
       groups,
-      layers
+      layers,
+      snapAxes
     };
   } catch {
     return makeDefaultVectorState();
@@ -222,7 +233,19 @@ function parseVectorContent(content) {
 
 function serializeVectorState(state) {
   return JSON.stringify(
-    { title: state.title, description: state.description, canvas: state.canvas, vertices: state.vertices, edges: state.edges, fills: state.fills, circles: state.circles, texts: state.texts, groups: state.groups, layers: state.layers },
+    {
+      title: state.title,
+      description: state.description,
+      canvas: state.canvas,
+      vertices: state.vertices,
+      edges: state.edges,
+      fills: state.fills,
+      circles: state.circles,
+      texts: state.texts,
+      groups: state.groups,
+      layers: state.layers,
+      snapAxes: state.snapAxes
+    },
     null,
     2
   );
@@ -546,6 +569,37 @@ function deleteFills(state, fillIds) {
 
 function setFillColor(state, fillId, color) {
   return { ...state, fills: state.fills.map((f) => (f.id === fillId ? { ...f, color } : f)) };
+}
+
+// ---------------------------------------------------------------------------
+// Snap axes — user-drawn reference lines that are always visible (as a
+// dotted guide) in Edit mode and always available as a snap target,
+// regardless of what's currently being dragged. Purely an editing aid:
+// two raw points, no vertex/topology involvement, never rendered in
+// compileVectorSvg's export output — the same "not real artwork" status
+// as the vertex dots or a 0px-weight edge's dashed guide.
+// ---------------------------------------------------------------------------
+function addSnapAxis(state, x1, y1, x2, y2) {
+  const axis = { id: `axis-${cryptoRandomId()}`, x1, y1, x2, y2 };
+  return { ...state, snapAxes: [...state.snapAxes, axis], _newSnapAxisId: axis.id };
+}
+
+function deleteSnapAxes(state, axisIds) {
+  if (!axisIds.size) return state;
+  return { ...state, snapAxes: state.snapAxes.filter((a) => !axisIds.has(a.id)) };
+}
+
+function moveSnapAxis(state, axisId, dx, dy) {
+  return { ...state, snapAxes: state.snapAxes.map((a) => (a.id === axisId ? { ...a, x1: a.x1 + dx, y1: a.y1 + dy, x2: a.x2 + dx, y2: a.y2 + dy } : a)) };
+}
+
+// `which` is 'p1' or 'p2' — lets either endpoint be dragged independently
+// to re-aim the axis, same spirit as a circle's single resize handle.
+function setSnapAxisEndpoint(state, axisId, which, point) {
+  return {
+    ...state,
+    snapAxes: state.snapAxes.map((a) => (a.id === axisId ? { ...a, ...(which === 'p1' ? { x1: point.x, y1: point.y } : { x2: point.x, y2: point.y }) } : a))
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -936,6 +990,10 @@ export {
   deleteCircles,
   deleteFills,
   setFillColor,
+  addSnapAxis,
+  deleteSnapAxes,
+  moveSnapAxis,
+  setSnapAxisEndpoint,
   contrastDotColor,
   addText,
   setTextContent,
