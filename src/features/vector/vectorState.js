@@ -57,11 +57,11 @@ const DEFAULT_CIRCLE_STYLE = { color: VECTOR_COLORS[6], thickness: 2 };
 const DEFAULT_CIRCLE_FILL = 'none';
 const DEFAULT_CIRCLE_RADIUS = 30;
 
-const DEFAULT_TEXT_COLOR = '#ffffff';
-const DEFAULT_TEXT_FONT_SIZE = 24;
-const DEFAULT_TEXT_ALIGN = 'left';
-const DEFAULT_TEXT_WIDTH = 160;
-const DEFAULT_TEXT_HEIGHT = 60;
+export const DEFAULT_TEXT_COLOR = '#ffffff';
+export const DEFAULT_TEXT_FONT_SIZE = 24;
+export const DEFAULT_TEXT_ALIGN = 'left';
+export const DEFAULT_TEXT_WIDTH = 160;
+export const DEFAULT_TEXT_HEIGHT = 60;
 
 const VECTOR_ZOOM_MIN = 0.1;
 const VECTOR_ZOOM_MAX = 6;
