@@ -541,14 +541,31 @@ function computeMiterJoints(vertices, edges) {
   return joints;
 }
 
+// Perpendicular projection of `point` onto the INFINITE line through
+// p1,p2 (not the segment — these lines are conceptual axes, not real
+// edges) — used for the "straighten"/"preserve direction" snap axes
+// below, which are genuine arbitrary-angle lines, not just the horizontal/
+// vertical alignment the plain axis snap further down handles.
+function projectOntoLine(point, p1, p2) {
+  const dx = p2.x - p1.x, dy = p2.y - p1.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq < 1e-9) return null; // p1 and p2 coincide — no line to project onto
+  const t = ((point.x - p1.x) * dx + (point.y - p1.y) * dy) / lenSq;
+  const proj = { x: p1.x + t * dx, y: p1.y + t * dy };
+  return { point: proj, distance: dist(point, proj) };
+}
+
 // ---------------------------------------------------------------------------
 // Snapping — priority order per the editor's rules: an existing Vertex
 // within threshold wins outright; otherwise a point on an existing Edge
-// (which subdivides it); otherwise axis/alignment snap against nearby
-// vertices; otherwise the raw point.
+// (which subdivides it); otherwise a "straighten"/"preserve direction" axis
+// line derived from the moving vertex's own pre-move topology (opts.lines
+// — see VectorEditorView's candidateLines); otherwise plain horizontal/
+// vertical axis/alignment snap against nearby vertices; otherwise the raw
+// point.
 // ---------------------------------------------------------------------------
 function snapCandidate(vertices, edges, rawPoint, opts) {
-  const { grid, vertexPx, edgePx, axisPx, excludeVertexId } = opts;
+  const { grid, vertexPx, edgePx, axisPx, linePx, lines, excludeVertexId } = opts;
 
   const nearVertexIds = grid ? grid.queryRadius(rawPoint.x, rawPoint.y, vertexPx) : vertices.map((v) => v.id);
   let bestVertex = null, bestVertexDist = Infinity;
@@ -579,6 +596,25 @@ function snapCandidate(vertices, edges, rawPoint, opts) {
     }
   }
   if (bestEdge) return { point: bestEdgePoint, snappedEdgeId: bestEdge.id, snappedEdgeT: bestEdgeT };
+
+  // Axis-LINE snap: candidate infinite lines derived from the vertex's own
+  // pre-move topology (e.g. the straight line a bent A-B-C would form if B
+  // moved back onto it, or an edge's original direction extended through
+  // its far endpoint — see VectorEditorView's candidateLines). Takes
+  // priority over the plain horizontal/vertical axis snap below since
+  // it's derived from this specific vertex's own shape rather than a
+  // generic alignment against whatever else happens to be nearby.
+  if (lines && lines.length && linePx > 0) {
+    let bestLine = null, bestLineDist = linePx;
+    for (const line of lines) {
+      const res = projectOntoLine(rawPoint, line.p1, line.p2);
+      if (res && res.distance < bestLineDist) {
+        bestLineDist = res.distance;
+        bestLine = { point: res.point, p1: line.p1, p2: line.p2 };
+      }
+    }
+    if (bestLine) return { point: bestLine.point, lineSnapped: true, snapLineP1: bestLine.p1, snapLineP2: bestLine.p2 };
+  }
 
   // Axis/alignment snap: pull the raw point onto a nearby vertex's x or y
   // if it's close on just that one axis. Tracks which vertex produced each

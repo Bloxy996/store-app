@@ -324,6 +324,62 @@ function severEdgeEndpoint(state, edgeId, vertexIdBeingPulled, point) {
   };
 }
 
+// Disconnect: a discrete, click-based counterpart to the tear-away drag
+// above — for a vertex with exactly one or two incident edges, removes it
+// from the path entirely rather than peeling off one edge at a time.
+//   - degree 0 (already isolated): no-op.
+//   - degree 1 (a dead end, A-V): removes that edge; V is left isolated.
+//   - degree 2 (a through-point, A-V-C): removes both edges and adds a
+//     direct A-C edge instead (using whichever edge's style is later in
+//     the array, same convention as everywhere else in this file that
+//     needs to pick one of two — see computeMiterJoints); V is left
+//     isolated. If A-C already exists, or A and C are the same vertex
+//     (a degenerate A-V-A loop), there's nothing valid to bypass with, so
+//     both edges are just removed and V is left isolated either way.
+//   - degree 3+: no single well-defined bypass pairing (which two of the
+//     three-plus edges would it connect?), so this is a no-op — same
+//     scope boundary already established for computeMiterJoints.
+function disconnectVertex(state, vertexId) {
+  const incident = state.edges.filter((e) => e.v1 === vertexId || e.v2 === vertexId);
+  if (incident.length === 0 || incident.length > 2) return state;
+  const incidentIds = new Set(incident.map((e) => e.id));
+  if (incident.length === 1) {
+    return pruneFills({ ...state, edges: state.edges.filter((e) => !incidentIds.has(e.id)) });
+  }
+  const [e1, e2] = incident;
+  const other1 = e1.v1 === vertexId ? e1.v2 : e1.v1;
+  const other2 = e2.v1 === vertexId ? e2.v2 : e2.v1;
+  const withoutBoth = state.edges.filter((e) => !incidentIds.has(e.id));
+  const bypassAlreadyExists = withoutBoth.some((e) => (e.v1 === other1 && e.v2 === other2) || (e.v1 === other2 && e.v2 === other1));
+  if (other1 === other2 || bypassAlreadyExists) {
+    return pruneFills({ ...state, edges: withoutBoth });
+  }
+  const bypass = { id: `e-${cryptoRandomId()}`, v1: other1, v2: other2, style: { ...e2.style }, layerId: e2.layerId };
+  return pruneFills({ ...state, edges: [...withoutBoth, bypass] });
+}
+
+// Split: the discrete counterpart to dragging an edge endpoint past
+// SEVER_THRESHOLD_PX — splits a shared vertex into as many independent,
+// exactly-coincident vertices as it has incident edges, in one step
+// rather than one drag per edge. The first incident edge keeps the
+// original vertex id; every other gets its own brand-new vertex at the
+// same point, ready to be dragged apart. No-op below degree 2 (nothing to
+// split a single edge — or a bare vertex — into).
+function splitVertex(state, vertexId) {
+  const v = state.vertices.find((vv) => vv.id === vertexId);
+  const incident = state.edges.filter((e) => e.v1 === vertexId || e.v2 === vertexId);
+  if (!v || incident.length < 2) return state;
+  const newVertices = [];
+  let edges = state.edges;
+  for (let i = 1; i < incident.length; i++) {
+    const edgeId = incident[i].id;
+    const newVertex = { id: `v-${cryptoRandomId()}`, x: v.x, y: v.y };
+    newVertices.push(newVertex);
+    edges = edges.map((e) => (e.id === edgeId ? { ...e, v1: e.v1 === vertexId ? newVertex.id : e.v1, v2: e.v2 === vertexId ? newVertex.id : e.v2 } : e));
+  }
+  return { ...state, vertices: [...state.vertices, ...newVertices], edges, _newVertexIds: newVertices.map((nv) => nv.id) };
+}
+
 // Drops any fill whose boundary depends on a vertex/edge id no longer
 // present — called after every delete so a fill never silently orphans
 // itself against a shape that no longer exists.
@@ -483,6 +539,15 @@ function deleteCircles(state, circleIds) {
   return { ...state, circles: state.circles.filter((c) => !circleIds.has(c.id)) };
 }
 
+function deleteFills(state, fillIds) {
+  if (!fillIds.size) return state;
+  return { ...state, fills: state.fills.filter((f) => !fillIds.has(f.id)) };
+}
+
+function setFillColor(state, fillId, color) {
+  return { ...state, fills: state.fills.map((f) => (f.id === fillId ? { ...f, color } : f)) };
+}
+
 // ---------------------------------------------------------------------------
 // Text — deliberately NOT its own graph-independent primitive the way a
 // circle is. A text's 4 corners (TL, TR, BR, BL) are 4 REAL vertices in
@@ -610,6 +675,86 @@ function moveToLayer(state, { edgeIds, circleIds, textIds }, layerId) {
     edges: state.edges.map((e) => (edgeIds?.has(e.id) ? { ...e, layerId } : e)),
     circles: state.circles.map((c) => (circleIds?.has(c.id) ? { ...c, layerId } : c)),
     texts: state.texts.map((t) => (textIds?.has(t.id) ? { ...t, layerId } : t))
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Copy/paste — a plain, portable snapshot (still-original ids, no
+// remapping yet) of a selection's vertices/edges/circles/texts/groups.
+// Deliberately excludes fills: a fill is just a flood-fill record over
+// whatever boundary happens to close up at a point, not something users
+// select directly (there's no fill-selection UI), and the pasted copy's
+// identical shape can always be filled again with one click if wanted.
+// An edge/text is only included if EVERY vertex it depends on is also in
+// the selection — copying "half" a dangling edge/text wouldn't be a
+// meaningful, independently-pasteable shape.
+function copySelection(state, { vertexIds, circleIds, textIds }) {
+  const vSet = vertexIds || new Set();
+  const cSet = circleIds || new Set();
+  const tSet = textIds || new Set();
+  return {
+    vertices: state.vertices.filter((v) => vSet.has(v.id)),
+    edges: state.edges.filter((e) => vSet.has(e.v1) && vSet.has(e.v2)),
+    circles: state.circles.filter((c) => cSet.has(c.id)),
+    texts: state.texts.filter((t) => tSet.has(t.id)),
+    groups: state.groups.filter((g) => g.vertexIds.every((id) => vSet.has(id)))
+  };
+}
+
+// The inverse: takes a copySelection() snapshot and adds a fresh,
+// independent copy of it to `state` — every id remapped (so pasting
+// doesn't collide with the originals, and pasting the same clipboard
+// twice doesn't collide with itself either), shifted by `offset`, all
+// landing on `layerId`. Returns the new ids too, so the caller can select
+// the pasted copy the way every other "create" mutation's _newXId does.
+function pasteClipboard(state, clipboard, offset, layerId) {
+  const vertexIdMap = new Map();
+  const vertices = clipboard.vertices.map((v) => {
+    const id = `v-${cryptoRandomId()}`;
+    vertexIdMap.set(v.id, id);
+    return { id, x: v.x + offset.x, y: v.y + offset.y };
+  });
+  const edges = clipboard.edges.map((e) => ({
+    id: `e-${cryptoRandomId()}`,
+    v1: vertexIdMap.get(e.v1),
+    v2: vertexIdMap.get(e.v2),
+    style: { ...e.style },
+    layerId
+  }));
+  const circles = clipboard.circles.map((c) => ({
+    id: `c-${cryptoRandomId()}`,
+    cx: c.cx + offset.x,
+    cy: c.cy + offset.y,
+    r: c.r,
+    style: { ...c.style },
+    fill: c.fill,
+    layerId
+  }));
+  const texts = clipboard.texts.map((t) => ({
+    id: `t-${cryptoRandomId()}`,
+    v1: vertexIdMap.get(t.v1),
+    v2: vertexIdMap.get(t.v2),
+    v3: vertexIdMap.get(t.v3),
+    v4: vertexIdMap.get(t.v4),
+    content: t.content,
+    color: t.color,
+    fontSize: t.fontSize,
+    align: t.align,
+    layerId
+  }));
+  const groups = clipboard.groups.map((g) => ({ id: `g-${cryptoRandomId()}`, vertexIds: g.vertexIds.map((id) => vertexIdMap.get(id)) }));
+  return {
+    state: {
+      ...state,
+      vertices: [...state.vertices, ...vertices],
+      edges: [...state.edges, ...edges],
+      circles: [...state.circles, ...circles],
+      texts: [...state.texts, ...texts],
+      groups: [...state.groups, ...groups]
+    },
+    pastedVertexIds: vertices.map((v) => v.id),
+    pastedCircleIds: circles.map((c) => c.id),
+    pastedTextIds: texts.map((t) => t.id)
   };
 }
 
@@ -771,6 +916,8 @@ export {
   subdivideEdge,
   bindVertexOntoEdge,
   severEdgeEndpoint,
+  disconnectVertex,
+  splitVertex,
   deleteVertices,
   deleteEdges,
   addFillAt,
@@ -787,6 +934,8 @@ export {
   resizeCircle,
   setCircleStyle,
   deleteCircles,
+  deleteFills,
+  setFillColor,
   contrastDotColor,
   addText,
   setTextContent,
@@ -800,5 +949,7 @@ export {
   setLayerVisible,
   reorderLayer,
   moveToLayer,
+  copySelection,
+  pasteClipboard,
   compileVectorSvg
 };

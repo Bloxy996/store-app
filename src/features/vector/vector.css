@@ -313,8 +313,13 @@
   pointer-events: none; /* clicks pass through to whatever tool is active underneath, by default */
 }
 .vector-fill.pickable {
-  pointer-events: auto; /* only the eyedropper tool needs to actually hit-test a fill */
+  pointer-events: auto; /* the eyedropper and select tools are the only ones that need to actually hit-test a fill */
   cursor: copy;
+}
+.vector-fill.selected {
+  stroke: var(--accent);
+  stroke-width: 2px;
+  vector-effect: non-scaling-stroke; /* a constant on-screen outline width regardless of zoom, since CSS can't divide by viewport.zoom the way inline SVG attributes elsewhere do */
 }
 .vector-snap-guide {
   stroke: var(--accent);
@@ -328,10 +333,6 @@
   stroke: var(--accent);
   stroke-width: 1.5;
   pointer-events: none;
-}
-.vector-selection-move-hit {
-  fill: transparent;
-  cursor: move;
 }
 
 .vector-vertex {
@@ -385,6 +386,16 @@
   stroke: var(--accent);
   stroke-width: 1;
   cursor: grab;
+}
+.vector-move-stem {
+  stroke: var(--accent);
+  stroke-width: 1;
+  pointer-events: none;
+}
+.vector-move-handle {
+  fill: var(--accent);
+  stroke: var(--bg-1);
+  stroke-width: 1;
 }
 
 .vector-selection-toolbar {

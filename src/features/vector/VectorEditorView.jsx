@@ -29,10 +29,13 @@ import {
   bindVertexOntoEdge,
   compileVectorSvg,
   contrastDotColor,
+  copySelection,
   deleteCircles,
   deleteEdges,
+  deleteFills,
   deleteTexts,
   deleteVertices,
+  disconnectVertex,
   groupIdForVertex,
   groupVertexIds,
   groupVertices,
@@ -40,6 +43,7 @@ import {
   moveVertices,
   moveToLayer,
   parseVectorContent,
+  pasteClipboard,
   removeLayer,
   renameLayer,
   reorderLayer,
@@ -51,10 +55,12 @@ import {
   setCircleStyle,
   setDescription,
   setEdgeStyle,
+  setFillColor,
   setLayerVisible,
   setTextContent,
   setTextStyle,
   severEdgeEndpoint,
+  splitVertex,
   subdivideEdge,
   ungroupVertices,
   loopsToPathData
@@ -80,6 +86,12 @@ function snapOpts(zoom, grid, axisSnapEnabled, opts = {}) {
     vertexPx: (opts.vertexPx ?? VERTEX_SNAP_PX) / zoom,
     edgePx: opts.allowSubdivide === false ? -1 : EDGE_SNAP_PX / zoom,
     axisPx: axisSnapEnabled && opts.allowAxisSnap !== false ? AXIS_SNAP_PX / zoom : -1,
+    // The "straighten"/"preserve direction" candidate lines share the plain
+    // axis snap's on/off toggle and threshold — they're both "axis
+    // alignment" snapping in spirit, just against a line derived from this
+    // vertex's own topology instead of a generic horizontal/vertical guide.
+    linePx: axisSnapEnabled && opts.allowAxisSnap !== false ? AXIS_SNAP_PX / zoom : -1,
+    lines: opts.lines,
     excludeVertexId: opts.excludeVertexId
   };
 }
@@ -142,6 +154,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   const [selectedVertexIds, setSelectedVertexIds] = useState(() => new Set());
   const [selectedEdgeIds, setSelectedEdgeIds] = useState(() => new Set());
   const [selectedCircleIds, setSelectedCircleIds] = useState(() => new Set());
+  const [selectedFillIds, setSelectedFillIds] = useState(() => new Set());
   const [localEditGroupId, setLocalEditGroupId] = useState(null);
   const [edgeChainFirst, setEdgeChainFirst] = useState(null);
   const [polylineChain, setPolylineChain] = useState([]);
@@ -174,6 +187,14 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
 
   const containerRef = useRef(null);
   const dragRef = useRef(null);
+  // Copy/paste clipboard — deliberately a plain ref, not doc/React state:
+  // it's per-editor-instance scratch data, not part of the document and
+  // not undo-able itself (pasting IS undo-able, as an ordinary commit).
+  // pasteOffsetCountRef increments with each successive paste of the SAME
+  // copy so repeated Ctrl/Cmd+V steps the copies apart instead of stacking
+  // them exactly on top of each other; a fresh copy resets it.
+  const clipboardRef = useRef(null);
+  const pasteOffsetCountRef = useRef(0);
   const rafRef = useRef(null);
   const pendingOverridesRef = useRef(null);
   const pastRef = useRef([]);
@@ -421,6 +442,11 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   };
 
   const deleteSelection = useCallback(() => {
+    if (selectedFillIds.size) {
+      commitState(deleteFills(doc, selectedFillIds));
+      setSelectedFillIds(new Set());
+      return;
+    }
     if (selectedEdgeIds.size) {
       commitState(deleteEdges(doc, selectedEdgeIds));
       setSelectedEdgeIds(new Set());
@@ -435,7 +461,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       commitState(deleteVertices(doc, selectedVertexIds));
       setSelectedVertexIds(new Set());
     }
-  }, [doc, selectedVertexIds, selectedEdgeIds, selectedCircleIds, commitState]);
+  }, [doc, selectedVertexIds, selectedEdgeIds, selectedCircleIds, selectedFillIds, commitState]);
 
   // ---------------------------------------------------------------------
   // Pointer handling
@@ -521,10 +547,33 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       setSelectedVertexIds(nextSelection);
     }
     setSelectedEdgeIds(new Set());
+    setSelectedCircleIds(new Set());
+    setSelectedFillIds(new Set());
 
     const ids = nextSelection.size ? nextSelection : new Set([vertexId]);
     const startPositions = new Map(Array.from(ids).map((id) => [id, vertexById.get(id)]));
-    dragRef.current = { mode: 'move', ids, startPositions, startWorld: world, moved: false, singleId: ids.size === 1 ? vertexId : null };
+    const singleId = ids.size === 1 ? vertexId : null;
+    // "Straighten"/"preserve direction" snap axes — computed once, right
+    // now, from the vertex's PRE-MOVE topology, so they stay fixed
+    // reference lines for the whole drag rather than sliding around as
+    // the vertex itself moves. For A-V-C: the line through A and C
+    // (straightens a bend back out), plus — for every incident edge — the
+    // line through its far endpoint extended in that edge's original
+    // direction (keeps a single dangling edge moving along the way it
+    // already pointed). See vectorTopology.js's snapCandidate `lines`.
+    let candidateLines = null;
+    if (singleId) {
+      const v0 = vertexById.get(singleId);
+      const others = doc.edges
+        .filter((e) => e.v1 === singleId || e.v2 === singleId)
+        .map((e) => vertexById.get(e.v1 === singleId ? e.v2 : e.v1))
+        .filter(Boolean);
+      if (v0 && others.length) {
+        candidateLines = others.map((p) => ({ p1: p, p2: v0 }));
+        if (others.length === 2) candidateLines.push({ p1: others[0], p2: others[1] });
+      }
+    }
+    dragRef.current = { mode: 'move', ids, startPositions, startWorld: world, moved: false, singleId, candidateLines };
   };
 
   const onVertexDoubleClick = (e, vertexId) => {
@@ -591,7 +640,18 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     if (viewMode) return;
     if (tool === 'eyedropper') {
       setActiveStyle((s) => ({ ...s, color: fill.color })); // fills have no thickness — eyedropper on a fill only carries color
+      return;
     }
+    if (tool !== 'select') return;
+    setSelectedFillIds((prev) => {
+      if (!e.shiftKey) return new Set([fill.id]);
+      const next = new Set(prev);
+      next.has(fill.id) ? next.delete(fill.id) : next.add(fill.id);
+      return next;
+    });
+    setSelectedVertexIds(new Set());
+    setSelectedEdgeIds(new Set());
+    setSelectedCircleIds(new Set());
   };
 
   const onCirclePointerDown = (e, circleId) => {
@@ -627,6 +687,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     });
     setSelectedVertexIds(new Set());
     setSelectedEdgeIds(new Set());
+    setSelectedFillIds(new Set());
     dragRef.current = { mode: 'move-circle', circleId, startWorld: world, startCx: circle.cx, startCy: circle.cy, moved: false };
   };
 
@@ -672,6 +733,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       return next;
     });
     setSelectedEdgeIds(new Set());
+    setSelectedFillIds(new Set());
     setSelectedCircleIds(new Set());
   };
 
@@ -685,9 +747,16 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     setEditingTextId(null);
   };
 
-  // Selection bounding-box body: dragging it anywhere (not just by grabbing
-  // an individual vertex dot) moves the whole selection.
-  const onSelectionBoxPointerDown = (e) => {
+  // The selection bounding-box's dedicated MOVE handle (a stem+circle
+  // below the box, mirroring the rotate handle's stem+circle above it —
+  // see the render block). Deliberately NOT "click anywhere in the box
+  // body" (which is what this used to be): a full-bbox hit-rect sits on
+  // top of every edge/fill/circle/text inside it in z-order, which stole
+  // their clicks entirely — there was no way to select/subdivide an edge
+  // or click a fill if it happened to fall inside a multi-vertex
+  // selection's box. A small dedicated handle leaves the whole box
+  // interior free for normal interaction with what's actually in it.
+  const onMoveHandlePointerDown = (e) => {
     e.stopPropagation();
     if (spaceDown) {
       beginPan(e);
@@ -751,6 +820,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     // select tool: start a marquee
     setSelectedVertexIds(new Set());
     setSelectedEdgeIds(new Set());
+    setSelectedFillIds(new Set());
     setSelectedCircleIds(new Set());
     if (localEditGroupId) setLocalEditGroupId(null);
     dragRef.current = { mode: 'marquee', startWorld: world };
@@ -791,7 +861,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
         // edge (bound on drop — see below), or to an axis. Group drags
         // intentionally skip target-snapping and just move by a uniform
         // delta, per "maintaining relative distances".
-        const snap = snapCandidate(verticesForSnap, edgesForSnap, world, snapOpts(viewport.zoom, grid, axisSnapEnabled, { excludeVertexId: drag.singleId }));
+        const snap = snapCandidate(verticesForSnap, edgesForSnap, world, snapOpts(viewport.zoom, grid, axisSnapEnabled, { excludeVertexId: drag.singleId, lines: drag.candidateLines }));
         setSnapPreview(snap);
         scheduleLiveOverrides(new Map([[drag.singleId, snap.point]]));
       } else {
@@ -1055,6 +1125,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     } else if (e.key === 'Escape') {
       setSelectedVertexIds(new Set());
       setSelectedEdgeIds(new Set());
+      setSelectedFillIds(new Set());
       setSelectedCircleIds(new Set());
       clearToolInProgress();
       setLocalEditGroupId(null);
@@ -1069,6 +1140,27 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'y') {
       e.preventDefault();
       redo();
+    } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
+      if (selectedVertexIds.size || selectedCircleIds.size || selectedTextIds.size) {
+        e.preventDefault();
+        clipboardRef.current = copySelection(doc, { vertexIds: selectedVertexIds, circleIds: selectedCircleIds, textIds: selectedTextIds });
+        pasteOffsetCountRef.current = 0;
+      }
+    } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'v') {
+      if (clipboardRef.current) {
+        e.preventDefault();
+        pasteOffsetCountRef.current += 1;
+        const shift = 24 * pasteOffsetCountRef.current; // steps successive pastes apart instead of stacking them exactly on top of each other
+        const { state: next, pastedVertexIds, pastedCircleIds, pastedTextIds } = pasteClipboard(doc, clipboardRef.current, { x: shift, y: shift }, safeActiveLayerId);
+        commitState(next);
+        // Select the pasted copy, same "just-created things get selected"
+        // convention as every other add* mutation in this file.
+        setSelectedVertexIds(new Set(pastedVertexIds));
+        setSelectedCircleIds(new Set(pastedCircleIds));
+        setSelectedEdgeIds(new Set());
+        setSelectedFillIds(new Set());
+        void pastedTextIds; // a text's corners are already covered by pastedVertexIds' selection
+      }
     } else if (!e.metaKey && !e.ctrlKey && e.key.toLowerCase() === 'g' && selectedVertexIds.size > 1) {
       e.preventDefault();
       commitState(e.shiftKey ? ungroupVertices(doc, selectedVertexIds) : groupVertices(doc, selectedVertexIds));
@@ -1107,6 +1199,18 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   // toolbar's text style controls and the layer-move buttons below; a
   // partial-corner vertex selection (e.g. mid-marquee) doesn't count.
   const selectedTextIds = new Set(doc.texts.filter((t) => [t.v1, t.v2, t.v3, t.v4].every((id) => selectedVertexIds.has(id))).map((t) => t.id));
+  // Disconnect/Split (see vectorState.js) only make sense for exactly one
+  // selected vertex, and only for the degrees they're actually defined
+  // for — see each function's own doc comment for why 3+ is excluded.
+  const singleSelectedVertexId = selectedVertexIds.size === 1 ? [...selectedVertexIds][0] : null;
+  const singleSelectedVertexDegree = singleSelectedVertexId ? doc.edges.filter((e) => e.v1 === singleSelectedVertexId || e.v2 === singleSelectedVertexId).length : 0;
+  const canDisconnect = singleSelectedVertexDegree === 1 || singleSelectedVertexDegree === 2;
+  const canSplit = singleSelectedVertexDegree >= 2;
+  // When vertices are selected (directly, via marquee, or as a group),
+  // "set edge color/weight" applies to every edge that runs BETWEEN two
+  // selected vertices — the natural reading of "style the edges of this
+  // selection" when the selection itself is a set of points, not edges.
+  const edgesWithinVertexSelection = selectedVertexIds.size > 1 ? doc.edges.filter((e) => selectedVertexIds.has(e.v1) && selectedVertexIds.has(e.v2)) : [];
   // A text's 4 corners must stay independently draggable (that's what
   // produces the skew/trapezoid effect) — grouping them would make moving
   // one drag the whole group instead, silently breaking that. So Group
@@ -1127,11 +1231,14 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
           setActiveStyle((s) => ({ ...s, color }));
           if (selectedEdgeIds.size) commitState(Array.from(selectedEdgeIds).reduce((d, id) => setEdgeStyle(d, id, { color }), doc));
           if (selectedCircleIds.size) commitState(Array.from(selectedCircleIds).reduce((d, id) => setCircleStyle(d, id, { style: { color } }), doc));
+          if (edgesWithinVertexSelection.length) commitState(edgesWithinVertexSelection.reduce((d, e) => setEdgeStyle(d, e.id, { color }), doc));
+          if (selectedFillIds.size) commitState(Array.from(selectedFillIds).reduce((d, id) => setFillColor(d, id, color), doc));
         }}
         onSetThickness={(thickness) => {
           setActiveStyle((s) => ({ ...s, thickness }));
           if (selectedEdgeIds.size) commitState(Array.from(selectedEdgeIds).reduce((d, id) => setEdgeStyle(d, id, { thickness }), doc));
           if (selectedCircleIds.size) commitState(Array.from(selectedCircleIds).reduce((d, id) => setCircleStyle(d, id, { style: { thickness } }), doc));
+          if (edgesWithinVertexSelection.length) commitState(edgesWithinVertexSelection.reduce((d, e) => setEdgeStyle(d, e.id, { thickness }), doc));
         }}
         activeRadius={activeRadius}
         onSetRadius={(r) => {
@@ -1174,6 +1281,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
           setTool('select');
           setSelectedVertexIds(new Set());
           setSelectedEdgeIds(new Set());
+          setSelectedFillIds(new Set());
           setSelectedCircleIds(new Set());
           clearToolInProgress();
         }}
@@ -1234,7 +1342,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
                         fill={fill.color}
                         stroke="none"
                         fillRule="evenodd"
-                        className={`vector-fill ${tool === 'eyedropper' ? 'pickable' : ''}`}
+                        className={`vector-fill ${tool === 'eyedropper' || tool === 'select' ? 'pickable' : ''} ${selectedFillIds.has(fill.id) ? 'selected' : ''}`}
                         onPointerDown={(ev) => onFillPointerDown(ev, fill)}
                       />
                     ))}
@@ -1393,22 +1501,6 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
               />
             )}
 
-            {/* Selection move hit-area, rendered BEFORE vertices so an
-                individual vertex on top of it still gets pointer priority
-                for its own more-specific click behavior. Vertices/edges
-                are layerless selection targets, so this sits above every
-                layer's content rather than inside the loop above. */}
-            {selectionBox && (
-              <rect
-                className="vector-selection-move-hit"
-                x={selectionBox.minX}
-                y={selectionBox.minY}
-                width={selectionBox.maxX - selectionBox.minX}
-                height={selectionBox.maxY - selectionBox.minY}
-                onPointerDown={onSelectionBoxPointerDown}
-              />
-            )}
-
             {/* Live preview of the segment about to be created */}
             {tool === 'edge' && edgeChainFirst && pointerWorld && vertexById.get(edgeChainFirst) && (
               <line className="vector-preview-line" x1={vertexById.get(edgeChainFirst).x} y1={vertexById.get(edgeChainFirst).y} x2={pointerWorld.x} y2={pointerWorld.y} />
@@ -1441,6 +1533,20 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
             {!viewMode && snapPreview?.axisSnapVertexY != null && vertexById.get(snapPreview.axisSnapVertexY) && (
               <line className="vector-snap-guide" x1={-GUIDE_LINE_SPAN} y1={snapPreview.point.y} x2={GUIDE_LINE_SPAN} y2={snapPreview.point.y} />
             )}
+            {/* Arbitrary-angle "straighten"/"preserve direction" guide —
+                see vectorTopology.js's snapCandidate `lines` option and
+                onVertexPointerDown's candidateLines. Extended well past
+                its own two defining points so it reads as the same kind
+                of full-length guide as the horizontal/vertical ones above. */}
+            {!viewMode &&
+              snapPreview?.lineSnapped &&
+              (() => {
+                const { snapLineP1: p1, snapLineP2: p2 } = snapPreview;
+                const dx = p2.x - p1.x, dy = p2.y - p1.y;
+                const len = Math.hypot(dx, dy) || 1;
+                const ux = (dx / len) * GUIDE_LINE_SPAN, uy = (dy / len) * GUIDE_LINE_SPAN;
+                return <line className="vector-snap-guide" x1={p1.x - ux} y1={p1.y - uy} x2={p2.x + ux} y2={p2.y + uy} />;
+              })()}
             {!viewMode && snapPreview?.snappedVertexId && vertexById.get(snapPreview.snappedVertexId) && (
               <circle className="vector-snap-marker" cx={snapPreview.point.x} cy={snapPreview.point.y} r={9 / viewport.zoom} />
             )}
@@ -1497,6 +1603,25 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
                   r={6 / viewport.zoom}
                   onPointerDown={(e) => beginRotate(e, selectionBox)}
                 />
+                {/* Move handle — a stem+circle below the box, the mirror
+                    image of the rotate handle above it. Dragging this
+                    (not the box body — see onMoveHandlePointerDown)
+                    moves the whole selection as a rigid group. */}
+                <line
+                  className="vector-move-stem"
+                  x1={(selectionBox.minX + selectionBox.maxX) / 2}
+                  y1={selectionBox.maxY}
+                  x2={(selectionBox.minX + selectionBox.maxX) / 2}
+                  y2={selectionBox.maxY + 24 / viewport.zoom}
+                />
+                <circle
+                  className="vector-move-handle"
+                  style={{ cursor: 'move' }}
+                  cx={(selectionBox.minX + selectionBox.maxX) / 2}
+                  cy={selectionBox.maxY + 24 / viewport.zoom}
+                  r={6 / viewport.zoom}
+                  onPointerDown={onMoveHandlePointerDown}
+                />
               </g>
             )}
           </g>
@@ -1542,7 +1667,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
             );
           })()}
 
-        {!viewMode && (selectedVertexIds.size > 0 || selectedEdgeIds.size > 0 || selectedCircleIds.size > 0) && (
+        {!viewMode && (selectedVertexIds.size > 0 || selectedEdgeIds.size > 0 || selectedCircleIds.size > 0 || selectedFillIds.size > 0) && (
           <div className="vector-selection-toolbar">
             {canGroup && (
               <button className="text-action" onClick={() => commitState(groupVertices(doc, selectedVertexIds))} title="Group (G)">
@@ -1552,6 +1677,31 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
             {canUngroup && (
               <button className="text-action" onClick={() => commitState(ungroupVertices(doc, selectedVertexIds))} title="Ungroup (Shift+G)">
                 Ungroup
+              </button>
+            )}
+            {canDisconnect && (
+              <button
+                className="text-action"
+                onClick={() => {
+                  commitState(disconnectVertex(doc, singleSelectedVertexId));
+                  setSelectedVertexIds(new Set([singleSelectedVertexId]));
+                }}
+                title={singleSelectedVertexDegree === 2 ? 'Disconnect — bypass with a direct edge, leaving this point isolated' : 'Disconnect — remove this edge, leaving this point isolated'}
+              >
+                Disconnect
+              </button>
+            )}
+            {canSplit && (
+              <button
+                className="text-action"
+                onClick={() => {
+                  const next = splitVertex(doc, singleSelectedVertexId);
+                  commitState(next);
+                  setSelectedVertexIds(new Set([singleSelectedVertexId, ...(next._newVertexIds || [])]));
+                }}
+                title="Split — turn this shared point into one independent point per edge, coincident until dragged apart"
+              >
+                Split
               </button>
             )}
             {/* Layer reassignment applies to edges/circles/texts — a pure

@@ -165,7 +165,7 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
   if (file.kind === 'vector') {
     return (
       <Suspense fallback={<div className="note-loading-bar" aria-hidden="true" />}>
-        <VectorEditorView file={file} content={content} onChange={(value) => onChange(value)} loading={loadingNote} />
+        <VectorEditorView file={file} content={content} onChange={(value) => onChange(value)} loading={loadingNote} handlers={handlers} linkIndex={linkIndex} />
       </Suspense>
     );
   }
