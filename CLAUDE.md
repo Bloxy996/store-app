@@ -192,18 +192,29 @@ should stop and split past. When a file approaches the ceiling:
 
 **Known exceptions** (honest about limits, not hiding them): `App.jsx` is
 the composition root (auth, pane tree, open buffers, every modal's open
-flag, the `handlers` object) and has grown well past a comfortable size —
-splitting it means extracting custom hooks (`usePaneTreeState`,
-`useModalState`, etc.), a real future refactor deliberately not done
-piecemeal. `lib/markdownRender.jsx` is also oversized by line count but
-low complexity per line; `renderMarkdownBlocks` is the best candidate if
-it's ever split. `components/icons.jsx` was in this bucket too (~60
-near-identical multi-line icon components) until a 2026-09 pass collapsed
-every `IconX = (p) => (\n <Svg>...\n</Svg>\n)` down to one line each
-(JSX between tags with nothing but whitespace/newlines compiles away
-regardless of formatting, so this is a pure formatting change, not a
-behavior change) — 699 lines -> ~200. Keep new icons in that same
-one-liner shape rather than reverting to the multi-line form.
+flag, the `handlers` object) and has grown well past a comfortable size.
+Checked directly (2026-09): it's a single ~1500-line component with no
+top-level pure helper functions to pull out — every line closes over
+component state, so there's no low-risk extraction available here.
+Splitting it for real means extracting custom hooks (`usePaneTreeState`,
+`useModalState`, etc.), each requiring the shared state it touches to be
+threaded through explicitly and tested by hand (no test suite exists
+yet) — worth doing, but one hook at a time with a build+smoke-test after
+each, not as a single pass. `lib/markdownRender.jsx` is also oversized by
+line count but low complexity per line; `renderMarkdownBlocks` is the
+best candidate if it's ever split. `components/icons.jsx` was in this
+bucket too (~60 near-identical multi-line icon components) until a
+2026-09 pass collapsed every `IconX = (p) => (\n <Svg>...\n</Svg>\n)`
+down to one line each (JSX between tags with nothing but whitespace/
+newlines compiles away regardless of formatting, so this is a pure
+formatting change, not a behavior change) — 699 lines -> ~200. Keep new
+icons in that same one-liner shape rather than reverting to the
+multi-line form. `features/vector/VectorEditorView.jsx` had its pure
+geometry helpers (no closure over editor state) pulled into the new
+`vectorGeometry.jsx` (2026-09, 2375 -> ~2216 lines) but is otherwise in
+the same boat as `App.jsx`: the remainder is one stateful pointer-
+handling/rendering component, not boilerplate — same one-hook-at-a-time
+caution applies before cutting it further.
 
 ## 4. Mobile performance & bundle size
 
@@ -336,8 +347,9 @@ src/
     vector/                         — topological (node-centric) vector art editor for .vec files
       vectorState.js                  — Vertex/Edge/fill/group schema, parse/serialize, mutations, SVG export
       vectorTopology.js               — half-edge face tracing, fill-only planarization, spatial grid, snapping
+      vectorGeometry.jsx              — pure geometry/snap helpers + MeasurementLabel, split out of VectorEditorView.jsx (3.7); nothing here closes over editor state
       VectorToolbar.jsx               — tool switcher, style pickers, undo/redo, export
-      VectorEditorView.jsx            — pan/zoom/drag SVG canvas, all tools, transforms (3.6 pattern)
+      VectorEditorView.jsx            — pan/zoom/drag SVG canvas, all tools, transforms (3.6 pattern); still oversized (~2200 lines) — remaining bulk is one stateful component, not pure helpers, see 3.7's known-exceptions note
     graph/
       useForceGraph.js               — force-directed layout simulation (framework-agnostic; tunable forces)
       graphSettings.js                — persisted Filters/Groups/Forces (localStorage)
