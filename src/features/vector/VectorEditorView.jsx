@@ -79,6 +79,81 @@ const MOVE_THRESHOLD = 3; // world px before a pointerdown counts as a drag, not
 // bounds plumbed through every caller.
 const GUIDE_LINE_SPAN = 4000;
 
+// A small floating readout — background pill + centered text lines — used
+// for every measurement overlay below (edge/axis length+rotation, vertex
+// position/angles, circle radius, live transform deltas). Width is
+// estimated from character count rather than actually measured (no DOM
+// access at render time here), which is deliberately generous rather than
+// exact — a slightly-wide pill is harmless, text overflowing it looks broken.
+function MeasurementLabel({ x, y, lines, zoom }) {
+  const fontSize = 11 / zoom;
+  const lineHeight = fontSize * 1.35;
+  const padX = 5 / zoom, padY = 4 / zoom;
+  const maxChars = Math.max(...lines.map((l) => l.length));
+  const width = maxChars * fontSize * 0.62 + padX * 2;
+  const height = lines.length * lineHeight + padY * 2 - (lineHeight - fontSize);
+  return (
+    <g transform={`translate(${x - width / 2} ${y - height / 2})`} className="vector-measurement-label" pointerEvents="none">
+      <rect width={width} height={height} rx={3 / zoom} />
+      {lines.map((line, i) => (
+        <text key={i} x={width / 2} y={padY + fontSize * 0.85 + i * lineHeight} textAnchor="middle" fontSize={fontSize}>
+          {line}
+        </text>
+      ))}
+    </g>
+  );
+}
+
+// Normalizes to [0, 180) — an edge/axis is undirected, so a "rotation" of
+// 190° and 10° describe the same line and should read identically.
+function lineRotationDeg(dx, dy) {
+  const deg = (Math.atan2(dy, dx) * 180) / Math.PI;
+  return ((deg % 180) + 180) % 180;
+}
+
+// The angle(s) formed at a vertex by its incident edges, one per
+// ADJACENT pair going around in angular order (so a degree-3 vertex gets
+// 3 angles, summing to 360°) — except degree exactly 2, which gets just
+// the one non-reflex angle between them (showing both it and its 360-
+// complement at a plain "corner" would be redundant clutter). Each result
+// includes `bisector`, the direction from the vertex that bisects that
+// angle — that's where its label belongs, per the request that these sit
+// "where the center of the angle would be".
+function vertexAngles(others) {
+  if (others.length < 2) return [];
+  const withAngles = others.map((p) => ({ angle: Math.atan2(p.y, p.x) })).sort((a, b) => a.angle - b.angle);
+  const n = withAngles.length;
+  const pairs = n === 2 ? [[0, 1]] : withAngles.map((_, i) => [i, (i + 1) % n]);
+  return pairs.map(([i, j]) => {
+    const a1 = withAngles[i].angle;
+    let diff = withAngles[j].angle - a1;
+    while (diff < 0) diff += 2 * Math.PI;
+    let angleDeg = (diff * 180) / Math.PI;
+    let bisector = a1 + diff / 2;
+    if (n === 2 && angleDeg > 180) {
+      // The sorted pair's CCW gap was the reflex (>180°) side — the angle
+      // a person actually means by "the angle between these two edges" is
+      // the other, non-reflex side.
+      angleDeg = 360 - angleDeg;
+      bisector += Math.PI;
+    }
+    return { angleDeg, bisector };
+  });
+}
+
+// Where two INFINITE lines (not segments — irrelevant whether the
+// intersection falls within either's drawn extent) cross, or null if
+// they're parallel. Used only for showing the angle where two snap axes
+// cross, since axes act as infinite reference lines for snapping.
+function infiniteLineIntersection(a1, a2, b1, b2) {
+  const d1x = a2.x - a1.x, d1y = a2.y - a1.y;
+  const d2x = b2.x - b1.x, d2y = b2.y - b1.y;
+  const denom = d1x * d2y - d1y * d2x;
+  if (Math.abs(denom) < 1e-9) return null;
+  const t = ((b1.x - a1.x) * d2y - (b1.y - a1.y) * d2x) / denom;
+  return { x: a1.x + t * d1x, y: a1.y + t * d1y };
+}
+
 // Snap thresholds are authored in screen px (vectorState.js) but every
 // distance in this editor's geometry is in WORLD units, so every threshold
 // gets divided by the current zoom right before use — otherwise "14px" of
@@ -169,6 +244,10 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   const [snapMenuOpen, setSnapMenuOpen] = useState(false);
   const [selectedAxisIds, setSelectedAxisIds] = useState(() => new Set());
   const [axisDraft, setAxisDraft] = useState(null); // { x1, y1, x2, y2 } — preview while drawing a new snap axis
+  // Live delta readout while moving/scaling/rotating a MULTI-selection via
+  // the move/scale/rotate handles (see the measurement-overlay render
+  // block) — { x, y, lines }, cleared the instant the drag ends.
+  const [transformReadout, setTransformReadout] = useState(null);
   const [selectedVertexIds, setSelectedVertexIds] = useState(() => new Set());
   const [selectedEdgeIds, setSelectedEdgeIds] = useState(() => new Set());
   const [selectedCircleIds, setSelectedCircleIds] = useState(() => new Set());
@@ -956,6 +1035,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
         const map = new Map();
         for (const [id, pos] of drag.startPositions) map.set(id, { x: pos.x + dx, y: pos.y + dy });
         scheduleLiveOverrides(map);
+        if (drag.ids.size > 1) setTransformReadout({ x: world.x, y: world.y, lines: [`\u0394x ${dx.toFixed(1)}`, `\u0394y ${dy.toFixed(1)}`] });
       }
       return;
     }
@@ -1035,8 +1115,9 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     }
 
     if (drag.mode === 'transform') {
-      const next = computeTransform(drag, world);
-      scheduleLiveOverrides(next);
+      const { map, delta } = computeTransform(drag, world);
+      scheduleLiveOverrides(map);
+      if (delta) setTransformReadout({ x: delta.point.x, y: delta.point.y, lines: delta.lines });
     }
   };
 
@@ -1092,6 +1173,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
         commitState(moveVertices(doc, liveOverrides));
       }
       setLiveOverrides(null);
+      setTransformReadout(null);
       return;
     }
 
@@ -1100,6 +1182,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
         commitState(moveVertices(doc, liveOverrides));
       }
       setLiveOverrides(null);
+      setTransformReadout(null);
       return;
     }
 
@@ -1207,6 +1290,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   // ---------------------------------------------------------------------
   function computeTransform(drag, world) {
     const map = new Map();
+    let delta = null;
     if (drag.kind === 'scale') {
       const dx = world.x - drag.anchor.x;
       const dy = world.y - drag.anchor.y;
@@ -1217,6 +1301,11 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       for (const [id, pos] of drag.startPositions) {
         map.set(id, { x: drag.anchor.x + (pos.x - drag.anchor.x) * scaleX, y: drag.anchor.y + (pos.y - drag.anchor.y) * scaleY });
       }
+      // Shown as a ratio (see the request this implements: "as a ratio, so
+      // like if you want to keep a 1:1 ratio") rather than two separate
+      // percentages — reads directly as "still proportional" vs. "this is
+      // stretching" without the person having to compare two numbers.
+      delta = { lines: [`${scaleX.toFixed(2)} : ${scaleY.toFixed(2)}`], point: world };
     } else if (drag.kind === 'rotate') {
       const a0 = Math.atan2(drag.startWorld.y - drag.center.y, drag.startWorld.x - drag.center.x);
       const a1 = Math.atan2(world.y - drag.center.y, world.x - drag.center.x);
@@ -1226,8 +1315,9 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
         const dx = pos.x - drag.center.x, dy = pos.y - drag.center.y;
         map.set(id, { x: drag.center.x + dx * cos - dy * sin, y: drag.center.y + dx * sin + dy * cos });
       }
+      delta = { lines: [`${((da * 180) / Math.PI).toFixed(1)}\u00b0`], point: world };
     }
-    return map;
+    return { map, delta };
   }
 
   const beginScale = (e, handle) => {
@@ -1747,6 +1837,91 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
                   />
                 );
               })}
+
+            {/* Measurement overlays — Edit-mode-only, purely informational
+                (never in the export). Kept selection-gated rather than
+                shown for every edge/vertex/circle at once, which would be
+                unreadable clutter; snap-axis intersection angles are the
+                one exception (always shown, matching axes' own always-
+                visible treatment) since deliberately-placed axes are
+                sparse by nature. */}
+            {!viewMode &&
+              sortedEdges
+                .filter((e) => selectedEdgeIds.has(e.id))
+                .map((e) => {
+                  const a = vertexById.get(e.v1), b = vertexById.get(e.v2);
+                  if (!a || !b) return null;
+                  const length = dist(a, b);
+                  const rotation = lineRotationDeg(b.x - a.x, b.y - a.y);
+                  return <MeasurementLabel key={`edge-${e.id}`} x={(a.x + b.x) / 2} y={(a.y + b.y) / 2} lines={[`${length.toFixed(1)}`, `${rotation.toFixed(1)}\u00b0`]} zoom={viewport.zoom} />;
+                })}
+
+            {!viewMode &&
+              axesForRender
+                .filter((a) => selectedAxisIds.has(a.id))
+                .map((a) => {
+                  const length = dist({ x: a.x1, y: a.y1 }, { x: a.x2, y: a.y2 });
+                  const rotation = lineRotationDeg(a.x2 - a.x1, a.y2 - a.y1);
+                  return <MeasurementLabel key={`axis-${a.id}`} x={(a.x1 + a.x2) / 2} y={(a.y1 + a.y2) / 2} lines={[`${length.toFixed(1)}`, `${rotation.toFixed(1)}\u00b0`]} zoom={viewport.zoom} />;
+                })}
+
+            {!viewMode &&
+              axesForRender.flatMap((a, i) =>
+                axesForRender.slice(i + 1).map((b) => {
+                  const hit = infiniteLineIntersection({ x: a.x1, y: a.y1 }, { x: a.x2, y: a.y2 }, { x: b.x1, y: b.y1 }, { x: b.x2, y: b.y2 });
+                  if (!hit || Math.abs(hit.x) > GUIDE_LINE_SPAN || Math.abs(hit.y) > GUIDE_LINE_SPAN) return null;
+                  const angles = vertexAngles([
+                    { x: a.x2 - a.x1, y: a.y2 - a.y1 },
+                    { x: b.x2 - b.x1, y: b.y2 - b.y1 }
+                  ]);
+                  if (!angles.length) return null;
+                  const { angleDeg, bisector } = angles[0];
+                  const labelDist = 30 / viewport.zoom;
+                  return (
+                    <MeasurementLabel
+                      key={`axisx-${a.id}-${b.id}`}
+                      x={hit.x + Math.cos(bisector) * labelDist}
+                      y={hit.y + Math.sin(bisector) * labelDist}
+                      lines={[`${angleDeg.toFixed(1)}\u00b0`]}
+                      zoom={viewport.zoom}
+                    />
+                  );
+                })
+              )}
+
+            {!viewMode &&
+              singleSelectedVertexId &&
+              vertexById.get(singleSelectedVertexId) &&
+              (() => {
+                const v = vertexById.get(singleSelectedVertexId);
+                const others = doc.edges
+                  .filter((e) => e.v1 === singleSelectedVertexId || e.v2 === singleSelectedVertexId)
+                  .map((e) => vertexById.get(e.v1 === singleSelectedVertexId ? e.v2 : e.v1))
+                  .filter(Boolean);
+                const angles = vertexAngles(others.map((p) => ({ x: p.x - v.x, y: p.y - v.y })));
+                const labelDist = 34 / viewport.zoom;
+                return (
+                  <>
+                    <MeasurementLabel x={v.x} y={v.y - 22 / viewport.zoom} lines={[`${v.x.toFixed(1)}, ${v.y.toFixed(1)}`]} zoom={viewport.zoom} />
+                    {angles.map(({ angleDeg, bisector }, i) => (
+                      <MeasurementLabel key={i} x={v.x + Math.cos(bisector) * labelDist} y={v.y + Math.sin(bisector) * labelDist} lines={[`${angleDeg.toFixed(1)}\u00b0`]} zoom={viewport.zoom} />
+                    ))}
+                  </>
+                );
+              })()}
+
+            {!viewMode &&
+              circlesForRender
+                .filter((c) => selectedCircleIds.has(c.id))
+                .map((c) => <MeasurementLabel key={`circle-${c.id}`} x={c.cx} y={c.cy - c.r - 14 / viewport.zoom} lines={[`r ${c.r.toFixed(1)}`]} zoom={viewport.zoom} />)}
+
+            {/* Live delta readout while actively moving/scaling/rotating a
+                multi-selection — see onMoveHandlePointerDown/beginScale/
+                beginRotate and computeTransform. Offset from the cursor so
+                the label doesn't sit directly under the pointer. */}
+            {!viewMode && transformReadout && (
+              <MeasurementLabel x={transformReadout.x + 40 / viewport.zoom} y={transformReadout.y - 24 / viewport.zoom} lines={transformReadout.lines} zoom={viewport.zoom} />
+            )}
 
             {!viewMode && marquee && (
               <rect

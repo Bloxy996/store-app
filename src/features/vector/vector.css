@@ -372,6 +372,17 @@
   stroke: var(--accent);
   opacity: 1;
 }
+.vector-measurement-label rect {
+  fill: var(--bg-2);
+  stroke: var(--border);
+  stroke-width: 1;
+  opacity: 0.92;
+}
+.vector-measurement-label text {
+  fill: var(--text-normal);
+  font-family: sans-serif;
+  dominant-baseline: middle;
+}
 
 .vector-vertex {
   fill: var(--bg-1);
