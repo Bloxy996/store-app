@@ -208,6 +208,21 @@ function bboxOf(vertices, ids) {
   return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
 }
 
+// Same as bboxOf, but also folding in selected circles' extents (cx±r) —
+// used for the shared selection box so a mixed vertex/edge/circle
+// selection gets one bounding box and one set of transform handles,
+// rather than circles being unable to join a group transform at all.
+function combinedBboxOf(vertices, vertexIds, circles, circleIds) {
+  const pts = vertices.filter((v) => vertexIds.has(v.id)).map((v) => ({ x: v.x, y: v.y }));
+  for (const c of circles) {
+    if (!circleIds.has(c.id)) continue;
+    pts.push({ x: c.cx - c.r, y: c.cy - c.r }, { x: c.cx + c.r, y: c.cy + c.r });
+  }
+  if (!pts.length) return null;
+  const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+  return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+}
+
 // Corner and edge-midpoint transform handles for a selection bounding box.
 // Edge-midpoint handles are axis-locked (top/bottom scale height only,
 // left/right scale width only) — `anchor` is always the OPPOSITE side/
@@ -256,6 +271,12 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   const [edgeChainFirst, setEdgeChainFirst] = useState(null);
   const [polylineChain, setPolylineChain] = useState([]);
   const [liveOverrides, setLiveOverrides] = useState(null);
+  // Circle equivalent of liveOverrides — separate state since a circle's
+  // override shape (cx/cy/r) differs from a vertex's (x/y), populated only
+  // during a move/scale/rotate drag that includes selected circles (see
+  // the Transform section) — a lone circle being dragged/resized by
+  // itself still uses circleDraft instead, unrelated to this.
+  const [circleTransformOverrides, setCircleTransformOverrides] = useState(null);
   const [circleDraft, setCircleDraft] = useState(null); // live preview while drawing/moving/resizing a circle: { id?, cx, cy, r }
   const [marquee, setMarquee] = useState(null);
   const [pointerWorld, setPointerWorld] = useState(null);
@@ -294,6 +315,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   const pasteOffsetCountRef = useRef(0);
   const rafRef = useRef(null);
   const pendingOverridesRef = useRef(null);
+  const pendingCircleOverridesRef = useRef(null);
   const pastRef = useRef([]);
   const futureRef = useRef([]);
   const loadedOnceRef = useRef(!loading);
@@ -386,14 +408,22 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     return doc.fills.map((f) => ({ fill: f, resolved: resolveBoundaryPolygon(verticesForRender, doc.edges, f.boundary) })).filter((x) => x.resolved);
   }, [doc.fills, doc.edges, verticesForRender]);
 
-  // Circles are independent primitives (not part of the vertex/edge graph),
-  // so their live-drag preview is a simple single-circle draft rather than
-  // the batched liveOverrides map above — there's only ever one being
-  // dragged/resized/drawn at a time.
+  // Circles are independent primitives (not part of the vertex/edge graph).
+  // Two separate override sources can apply: circleTransformOverrides (a
+  // batched map, populated when circles are moved/scaled/rotated together
+  // with a mixed selection — see the Transform section) and circleDraft (a
+  // single circle being individually dragged/resized/drawn, unrelated to
+  // any selection).
   const circlesForRender = useMemo(() => {
-    if (!circleDraft || !circleDraft.id) return doc.circles;
-    return doc.circles.map((c) => (c.id === circleDraft.id ? { ...c, ...circleDraft } : c));
-  }, [doc.circles, circleDraft]);
+    let circles = doc.circles;
+    if (circleTransformOverrides && circleTransformOverrides.size) {
+      circles = circles.map((c) => (circleTransformOverrides.has(c.id) ? { ...c, ...circleTransformOverrides.get(c.id) } : c));
+    }
+    if (circleDraft && circleDraft.id) {
+      circles = circles.map((c) => (c.id === circleDraft.id ? { ...c, ...circleDraft } : c));
+    }
+    return circles;
+  }, [doc.circles, circleDraft, circleTransformOverrides]);
 
   const axesForRender = useMemo(() => {
     if (!axisDraft || !axisDraft.id) return doc.snapAxes;
@@ -439,15 +469,31 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     return doc.vertices.filter((v) => sameLayer.has(v.id) || !anyLayer.has(v.id));
   }, [snapCrossLayer, doc.edges, doc.vertices, safeActiveLayerId]);
 
-  const scheduleLiveOverrides = useCallback((map) => {
+  const scheduleLiveOverrides = useCallback((map, circleMap) => {
     pendingOverridesRef.current = map;
+    pendingCircleOverridesRef.current = circleMap || null;
     if (rafRef.current) return;
     rafRef.current = requestAnimationFrame(() => {
       rafRef.current = null;
       setLiveOverrides(pendingOverridesRef.current);
+      setCircleTransformOverrides(pendingCircleOverridesRef.current);
     });
   }, []);
   useEffect(() => () => rafRef.current && cancelAnimationFrame(rafRef.current), []);
+
+  // Folds whatever's currently in liveOverrides/circleTransformOverrides
+  // into ONE commit — used at the end of a move/scale/rotate drag that may
+  // have touched vertices, circles, or (via the shared bounding box — see
+  // the Transform section) both together, so the whole gesture becomes a
+  // single undo step rather than two.
+  const commitCombinedOverrides = () => {
+    let next = doc;
+    if (liveOverrides && liveOverrides.size) next = moveVertices(next, liveOverrides);
+    if (circleTransformOverrides && circleTransformOverrides.size) {
+      next = { ...next, circles: next.circles.map((c) => (circleTransformOverrides.has(c.id) ? { ...c, ...circleTransformOverrides.get(c.id) } : c)) };
+    }
+    if (next !== doc) commitState(next);
+  };
 
   const screenToWorld = useCallback(
     (sx, sy) => {
@@ -554,21 +600,24 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       setSelectedFillIds(new Set());
       return;
     }
-    if (selectedEdgeIds.size) {
-      commitState(deleteEdges(doc, selectedEdgeIds));
+    // Vertices/edges/circles can now be selected together (shift-click
+    // across types — see the Transform section), so all three delete in
+    // ONE combined commit rather than only the first non-empty type.
+    // deleteEdges/deleteCircles first, then deleteVertices last: deleting
+    // vertices already cascades into removing any edge/text that
+    // depended on them, so doing it last avoids deleteEdges redundantly
+    // trying to remove an edge that's already gone.
+    if (selectedEdgeIds.size || selectedCircleIds.size || selectedVertexIds.size) {
+      let next = doc;
+      if (selectedEdgeIds.size) next = deleteEdges(next, selectedEdgeIds);
+      if (selectedCircleIds.size) next = deleteCircles(next, selectedCircleIds);
+      if (selectedVertexIds.size) next = deleteVertices(next, selectedVertexIds);
+      commitState(next);
       setSelectedEdgeIds(new Set());
-      return;
-    }
-    if (selectedCircleIds.size) {
-      commitState(deleteCircles(doc, selectedCircleIds));
       setSelectedCircleIds(new Set());
-      return;
-    }
-    if (selectedVertexIds.size) {
-      commitState(deleteVertices(doc, selectedVertexIds));
       setSelectedVertexIds(new Set());
     }
-  }, [doc, selectedVertexIds, selectedEdgeIds, selectedCircleIds, selectedFillIds, commitState]);
+  }, [doc, selectedVertexIds, selectedEdgeIds, selectedCircleIds, selectedFillIds, selectedAxisIds, commitState]);
 
   // ---------------------------------------------------------------------
   // Pointer handling
@@ -652,14 +701,31 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     } else if (!selectedVertexIds.has(vertexId)) {
       nextSelection = effectiveSelectionForVertex(vertexId);
       setSelectedVertexIds(nextSelection);
+      // A plain (non-shift) click replaces the WHOLE selection, same as
+      // ever — but shift-click is additive ACROSS types now (see the
+      // Transform section): shift-clicking a vertex while edges/circles
+      // are already selected keeps them, building a mixed selection that
+      // shares one bounding box and one set of move/scale/rotate handles.
+      setSelectedEdgeIds(new Set());
+      setSelectedCircleIds(new Set());
     }
-    setSelectedEdgeIds(new Set());
-    setSelectedCircleIds(new Set());
     setSelectedFillIds(new Set());
+    setSelectedAxisIds(new Set());
 
     const ids = nextSelection.size ? nextSelection : new Set([vertexId]);
+    // Circles only ever carry into this drag when they were part of an
+    // EXISTING selection preserved by this click (shift-click, or a plain
+    // click that landed on an already-selected vertex — see above); a
+    // plain click that replaced the selection already cleared them.
+    const circleIds = selectedCircleIds;
+    const circleStartPositions = new Map(
+      Array.from(circleIds)
+        .map((id) => circlesForRender.find((c) => c.id === id))
+        .filter(Boolean)
+        .map((c) => [c.id, { cx: c.cx, cy: c.cy, r: c.r }])
+    );
     const startPositions = new Map(Array.from(ids).map((id) => [id, vertexById.get(id)]));
-    const singleId = ids.size === 1 ? vertexId : null;
+    const singleId = ids.size === 1 && circleIds.size === 0 ? vertexId : null;
     // "Straighten"/"preserve direction" snap axes — computed once, right
     // now, from the vertex's PRE-MOVE topology, so they stay fixed
     // reference lines for the whole drag rather than sliding around as
@@ -697,7 +763,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       }
       if (!candidateLines.length) candidateLines = null;
     }
-    dragRef.current = { mode: 'move', ids, startPositions, startWorld: world, moved: false, singleId, candidateLines };
+    dragRef.current = { mode: 'move', ids, circleIds, startPositions, circleStartPositions, startWorld: world, moved: false, singleId, candidateLines };
   };
 
   const onVertexDoubleClick = (e, vertexId) => {
@@ -750,12 +816,22 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       return;
     }
     if (tool === 'select') {
+      const alreadySelected = selectedEdgeIds.has(edgeId);
       setSelectedEdgeIds((prev) => {
         const next = e.shiftKey ? new Set(prev) : new Set();
         next.has(edgeId) ? next.delete(edgeId) : next.add(edgeId);
         return next;
       });
-      setSelectedVertexIds(new Set());
+      // Shift-click (or a plain click on an edge that's already part of
+      // the selection) is additive ACROSS types — see the Transform
+      // section — so it preserves any vertices/circles already selected
+      // instead of clearing them.
+      if (!e.shiftKey && !alreadySelected) {
+        setSelectedVertexIds(new Set());
+        setSelectedCircleIds(new Set());
+      }
+      setSelectedFillIds(new Set());
+      setSelectedAxisIds(new Set());
     }
   };
 
@@ -803,15 +879,23 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
 
     containerRef.current.setPointerCapture(e.pointerId);
     const world = screenToWorld(e.clientX, e.clientY);
+    const alreadySelected = selectedCircleIds.has(circleId);
     setSelectedCircleIds((prev) => {
       if (!e.shiftKey) return new Set([circleId]);
       const next = new Set(prev);
       next.has(circleId) ? next.delete(circleId) : next.add(circleId);
       return next;
     });
-    setSelectedVertexIds(new Set());
-    setSelectedEdgeIds(new Set());
+    // Shift-click (or a plain click on a circle that's already part of the
+    // selection) is additive ACROSS types — see the Transform section —
+    // so it preserves any vertices/edges already selected instead of
+    // clearing them.
+    if (!e.shiftKey && !alreadySelected) {
+      setSelectedVertexIds(new Set());
+      setSelectedEdgeIds(new Set());
+    }
     setSelectedFillIds(new Set());
+    setSelectedAxisIds(new Set());
     dragRef.current = { mode: 'move-circle', circleId, startWorld: world, startCx: circle.cx, startCy: circle.cy, moved: false };
   };
 
@@ -923,9 +1007,24 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     if (viewMode) return;
     containerRef.current.setPointerCapture(e.pointerId);
     const world = screenToWorld(e.clientX, e.clientY);
-    const ids = selectedVertexIds;
+    const ids = transformVertexIds;
     const startPositions = new Map(Array.from(ids).map((id) => [id, vertexById.get(id)]));
-    dragRef.current = { mode: 'move', ids, startPositions, startWorld: world, moved: false, singleId: ids.size === 1 ? Array.from(ids)[0] : null };
+    const circleStartPositions = new Map(
+      Array.from(selectedCircleIds)
+        .map((id) => circlesForRender.find((c) => c.id === id))
+        .filter(Boolean)
+        .map((c) => [c.id, { cx: c.cx, cy: c.cy, r: c.r }])
+    );
+    dragRef.current = {
+      mode: 'move',
+      ids,
+      circleIds: selectedCircleIds,
+      startPositions,
+      circleStartPositions,
+      startWorld: world,
+      moved: false,
+      singleId: ids.size === 1 && selectedCircleIds.size === 0 ? Array.from(ids)[0] : null
+    };
   };
 
   const onBackgroundPointerDown = (e) => {
@@ -1034,8 +1133,13 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
         const dy = world.y - drag.startWorld.y;
         const map = new Map();
         for (const [id, pos] of drag.startPositions) map.set(id, { x: pos.x + dx, y: pos.y + dy });
-        scheduleLiveOverrides(map);
-        if (drag.ids.size > 1) setTransformReadout({ x: world.x, y: world.y, lines: [`\u0394x ${dx.toFixed(1)}`, `\u0394y ${dy.toFixed(1)}`] });
+        const circleMap = new Map();
+        if (drag.circleStartPositions) {
+          for (const [id, c] of drag.circleStartPositions) circleMap.set(id, { cx: c.cx + dx, cy: c.cy + dy });
+        }
+        scheduleLiveOverrides(map, circleMap);
+        const totalCount = drag.ids.size + (drag.circleIds ? drag.circleIds.size : 0);
+        if (totalCount > 1) setTransformReadout({ x: world.x, y: world.y, lines: [`\u0394x ${dx.toFixed(1)}`, `\u0394y ${dy.toFixed(1)}`] });
       }
       return;
     }
@@ -1115,8 +1219,8 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     }
 
     if (drag.mode === 'transform') {
-      const { map, delta } = computeTransform(drag, world);
-      scheduleLiveOverrides(map);
+      const { map, circleMap, delta } = computeTransform(drag, world);
+      scheduleLiveOverrides(map, circleMap);
       if (delta) setTransformReadout({ x: delta.point.x, y: delta.point.y, lines: delta.lines });
     }
   };
@@ -1169,19 +1273,19 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
         let next = moveVertices(doc, new Map([[drag.singleId, snap.point]]));
         if (snap.snappedEdgeId) next = bindVertexOntoEdge(next, snap.snappedEdgeId, drag.singleId);
         commitState(next);
-      } else if (liveOverrides && liveOverrides.size) {
-        commitState(moveVertices(doc, liveOverrides));
+      } else {
+        commitCombinedOverrides();
       }
       setLiveOverrides(null);
+      setCircleTransformOverrides(null);
       setTransformReadout(null);
       return;
     }
 
     if (drag.mode === 'transform') {
-      if (liveOverrides && liveOverrides.size) {
-        commitState(moveVertices(doc, liveOverrides));
-      }
+      commitCombinedOverrides();
       setLiveOverrides(null);
+      setCircleTransformOverrides(null);
       setTransformReadout(null);
       return;
     }
@@ -1290,6 +1394,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   // ---------------------------------------------------------------------
   function computeTransform(drag, world) {
     const map = new Map();
+    const circleMap = new Map();
     let delta = null;
     if (drag.kind === 'scale') {
       const dx = world.x - drag.anchor.x;
@@ -1300,6 +1405,21 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       if (drag.axisLock === 'y') scaleX = 1; // edge-midpoint handle: vertical-only scaling
       for (const [id, pos] of drag.startPositions) {
         map.set(id, { x: drag.anchor.x + (pos.x - drag.anchor.x) * scaleX, y: drag.anchor.y + (pos.y - drag.anchor.y) * scaleY });
+      }
+      if (drag.circleStartPositions) {
+        // A circle can't become an ellipse (this editor only ever supports
+        // perfect circles), so a non-uniform drag scales its radius by the
+        // geometric mean of scaleX/scaleY — one reasonable number that
+        // still responds to the drag, rather than an oval or ignoring one
+        // axis outright.
+        const rFactor = Math.sqrt(Math.abs(scaleX * scaleY));
+        for (const [id, c] of drag.circleStartPositions) {
+          circleMap.set(id, {
+            cx: drag.anchor.x + (c.cx - drag.anchor.x) * scaleX,
+            cy: drag.anchor.y + (c.cy - drag.anchor.y) * scaleY,
+            r: Math.max(0.5, c.r * rFactor)
+          });
+        }
       }
       // Shown as a ratio (see the request this implements: "as a ratio, so
       // like if you want to keep a 1:1 ratio") rather than two separate
@@ -1315,25 +1435,45 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
         const dx = pos.x - drag.center.x, dy = pos.y - drag.center.y;
         map.set(id, { x: drag.center.x + dx * cos - dy * sin, y: drag.center.y + dx * sin + dy * cos });
       }
+      if (drag.circleStartPositions) {
+        // A circle looks identical at any rotation — only its CENTER needs
+        // to move around the pivot; the radius is untouched.
+        for (const [id, c] of drag.circleStartPositions) {
+          const dx = c.cx - drag.center.x, dy = c.cy - drag.center.y;
+          circleMap.set(id, { cx: drag.center.x + dx * cos - dy * sin, cy: drag.center.y + dx * sin + dy * cos, r: c.r });
+        }
+      }
       delta = { lines: [`${((da * 180) / Math.PI).toFixed(1)}\u00b0`], point: world };
     }
-    return { map, delta };
+    return { map, circleMap, delta };
   }
 
   const beginScale = (e, handle) => {
     e.stopPropagation();
     containerRef.current.setPointerCapture(e.pointerId);
     const world = screenToWorld(e.clientX, e.clientY);
-    const startPositions = new Map(Array.from(selectedVertexIds).map((id) => [id, vertexById.get(id)]));
-    dragRef.current = { mode: 'transform', kind: 'scale', anchor: handle.anchor, axisLock: handle.axisLock, spanX: world.x - handle.anchor.x, spanY: world.y - handle.anchor.y, startPositions };
+    const startPositions = new Map(Array.from(transformVertexIds).map((id) => [id, vertexById.get(id)]));
+    const circleStartPositions = new Map(
+      Array.from(selectedCircleIds)
+        .map((id) => circlesForRender.find((c) => c.id === id))
+        .filter(Boolean)
+        .map((c) => [c.id, { cx: c.cx, cy: c.cy, r: c.r }])
+    );
+    dragRef.current = { mode: 'transform', kind: 'scale', anchor: handle.anchor, axisLock: handle.axisLock, spanX: world.x - handle.anchor.x, spanY: world.y - handle.anchor.y, startPositions, circleStartPositions };
   };
 
   const beginRotate = (e, box) => {
     e.stopPropagation();
     containerRef.current.setPointerCapture(e.pointerId);
     const center = { x: (box.minX + box.maxX) / 2, y: (box.minY + box.maxY) / 2 };
-    const startPositions = new Map(Array.from(selectedVertexIds).map((id) => [id, vertexById.get(id)]));
-    dragRef.current = { mode: 'transform', kind: 'rotate', center, startWorld: screenToWorld(e.clientX, e.clientY), startPositions };
+    const startPositions = new Map(Array.from(transformVertexIds).map((id) => [id, vertexById.get(id)]));
+    const circleStartPositions = new Map(
+      Array.from(selectedCircleIds)
+        .map((id) => circlesForRender.find((c) => c.id === id))
+        .filter(Boolean)
+        .map((c) => [c.id, { cx: c.cx, cy: c.cy, r: c.r }])
+    );
+    dragRef.current = { mode: 'transform', kind: 'rotate', center, startWorld: screenToWorld(e.clientX, e.clientY), startPositions, circleStartPositions };
   };
 
   // ---------------------------------------------------------------------
@@ -1416,7 +1556,22 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     );
   }
 
-  const selectionBox = !viewMode && tool === 'select' && selectedVertexIds.size > 1 ? bboxOf(verticesForRender, selectedVertexIds) : null;
+  // An edge has no position of its own — only its endpoints do — so a
+  // selected edge contributes its two vertices to the shared transform
+  // target even when those vertices aren't independently selected.
+  const transformVertexIds = useMemo(() => {
+    if (!selectedEdgeIds.size) return selectedVertexIds;
+    const ids = new Set(selectedVertexIds);
+    for (const e of doc.edges) {
+      if (selectedEdgeIds.has(e.id)) {
+        ids.add(e.v1);
+        ids.add(e.v2);
+      }
+    }
+    return ids;
+  }, [selectedVertexIds, selectedEdgeIds, doc.edges]);
+  const transformItemCount = transformVertexIds.size + selectedCircleIds.size;
+  const selectionBox = !viewMode && tool === 'select' && transformItemCount > 1 ? combinedBboxOf(verticesForRender, transformVertexIds, circlesForRender, selectedCircleIds) : null;
   // A text counts as "selected" once ALL 4 of its corners are — see
   // onTextPointerDown and the Text section of vectorState.js. Used for the
   // toolbar's text style controls and the layer-move buttons below; a
@@ -1425,7 +1580,10 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   // Disconnect/Split (see vectorState.js) only make sense for exactly one
   // selected vertex, and only for the degrees they're actually defined
   // for — see each function's own doc comment for why 3+ is excluded.
-  const singleSelectedVertexId = selectedVertexIds.size === 1 ? [...selectedVertexIds][0] : null;
+  // Requires a PURE single-vertex selection — disconnect/split (and the
+  // angle/position measurement overlay below) don't have a meaningful
+  // reading once edges/circles are also part of a mixed selection.
+  const singleSelectedVertexId = selectedVertexIds.size === 1 && selectedEdgeIds.size === 0 && selectedCircleIds.size === 0 ? [...selectedVertexIds][0] : null;
   const singleSelectedVertexDegree = singleSelectedVertexId ? doc.edges.filter((e) => e.v1 === singleSelectedVertexId || e.v2 === singleSelectedVertexId).length : 0;
   const canDisconnect = singleSelectedVertexDegree === 1 || singleSelectedVertexDegree === 2;
   const canSplit = singleSelectedVertexDegree >= 2;
@@ -1604,7 +1762,15 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
                             className={`vector-circle ${selected ? 'selected' : ''}`}
                             onPointerDown={viewMode ? undefined : (ev) => onCirclePointerDown(ev, c.id)}
                           />
-                          {selected && !viewMode && (
+                          {/* The individual per-circle radius handle only
+                              applies when this circle is the SOLE thing
+                              selected — once it's part of a bigger mixed
+                              selection (selectionBox showing), the box's
+                              own scale handles take over that job (see the
+                              Transform section's geometric-mean radius
+                              scaling), and showing both would be
+                              confusing/redundant. */}
+                          {selected && !viewMode && !selectionBox && (
                             <rect
                               className="vector-scale-handle"
                               style={{ cursor: 'ew-resize' }}
