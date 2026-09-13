@@ -4,9 +4,6 @@ import { clamp } from '../../lib/mathUtils.js';
 
 
 // ---------------------------------------------------------------------------
-// App — top-level composition and view-transition wiring
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
 // Accent color — user-customizable, persisted to localStorage, applied as
 // CSS custom properties on the document root. Every accent-derived color in
 // App.css (--accent-hover, --accent-soft, --link-color, --tag-bg,

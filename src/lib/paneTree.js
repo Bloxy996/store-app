@@ -1,3 +1,7 @@
+// ---------------------------------------------------------------------------
+// Split-pane tree math: the recursive layout/tab data structure behind
+// PaneNode.jsx's split/close/resize behavior (pure logic, no React).
+// ---------------------------------------------------------------------------
 import { history } from '@codemirror/commands';
 
 let uidCounter = 0;

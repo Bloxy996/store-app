@@ -4,3 +4,4 @@ changes.patch
 dist/
 reader/context.txt
 reader/aggregated.txt
+node_modules
