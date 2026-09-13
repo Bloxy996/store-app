@@ -195,10 +195,15 @@ the composition root (auth, pane tree, open buffers, every modal's open
 flag, the `handlers` object) and has grown well past a comfortable size —
 splitting it means extracting custom hooks (`usePaneTreeState`,
 `useModalState`, etc.), a real future refactor deliberately not done
-piecemeal. `lib/markdownRender.jsx` and `components/icons.jsx` are also
-oversized by line count but low complexity per line (icons.jsx is ~60
-near-identical one-line icon components); `markdownRender.jsx`'s
-`renderMarkdownBlocks` is the best candidate if it's ever split.
+piecemeal. `lib/markdownRender.jsx` is also oversized by line count but
+low complexity per line; `renderMarkdownBlocks` is the best candidate if
+it's ever split. `components/icons.jsx` was in this bucket too (~60
+near-identical multi-line icon components) until a 2026-09 pass collapsed
+every `IconX = (p) => (\n <Svg>...\n</Svg>\n)` down to one line each
+(JSX between tags with nothing but whitespace/newlines compiles away
+regardless of formatting, so this is a pure formatting change, not a
+behavior change) — 699 lines -> ~200. Keep new icons in that same
+one-liner shape rather than reverting to the multi-line form.
 
 ## 4. Mobile performance & bundle size
 
@@ -387,3 +392,13 @@ of work, not as a deferred follow-up.
   portal (`DbPopover`) when the trigger's scroll position is genuinely
   unpredictable (section 3.5).
 - See `TODO.md` for open/requested work and its current status.
+- Token-budget passes (trimming file size to shrink what `compile/`
+  sends an LLM, not just for humans): prefer mechanical, provably
+  behavior-preserving cuts (dead code, formatting, de-duplicated
+  constants) over rewrites, and verify with `npm run build` before
+  calling a cut done. `components/icons.jsx` is done (see 3.7). The next
+  highest-line-count candidates, largest first, none yet attempted:
+  `features/vector/VectorEditorView.jsx` (~2375), `App.jsx` (~1538, see
+  3.7's known-exception note before touching it), `features/vector/vectorState.js`
+  (~1013), `lib/markdownRender.jsx` (~768), `features/vector/vectorTopology.js`
+  (~689).
