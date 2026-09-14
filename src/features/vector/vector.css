@@ -432,21 +432,29 @@
   stroke-width: 1;
   stroke-dasharray: 3 4;
   opacity: 0.6;
-  cursor: pointer;
+  pointer-events: none; /* the wider .vector-snap-axis-hit line beside it owns pointer capture (see VectorEditorView.jsx) */
 }
 .vector-snap-axis.selected {
   stroke: var(--accent);
   opacity: 1;
 }
+.vector-snap-axis-hit {
+  fill: none;
+  stroke: transparent;
+  pointer-events: stroke;
+  cursor: pointer;
+}
 .vector-measurement-label rect {
-  fill: var(--bg-2);
-  stroke: var(--border);
+  fill: var(--bg-1);
+  fill-opacity: 0.35;
+  stroke: var(--accent);
   stroke-width: 1;
-  opacity: 0.92;
+  opacity: 1;
 }
 .vector-measurement-label text {
-  fill: var(--text-normal);
-  font-family: sans-serif;
+  fill: var(--accent);
+  font-family: var(--font-mono, monospace);
+  font-weight: 600;
   dominant-baseline: middle;
 }
 

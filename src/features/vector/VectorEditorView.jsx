@@ -438,6 +438,33 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     return doc.vertices.filter((v) => sameLayer.has(v.id) || !anyLayer.has(v.id));
   }, [snapCrossLayer, doc.edges, doc.vertices, safeActiveLayerId]);
 
+  // User-drawn snap axes as candidate lines, shared by every snap call
+  // site below (vertex/edge/polyline placement, single-vertex move, and
+  // circle placement/move) — previously only single-vertex drags folded
+  // these into their candidateLines, so a custom axis snapped a point
+  // already being dragged but not one being newly placed with the
+  // vertex/edge/polyline tools, or a circle's center. Null (not just
+  // empty) when the toggle is off, matching snapOpts/snapCandidate's
+  // "no lines to consider" convention.
+  const customAxisLines = useMemo(
+    () => (customAxisSnapEnabled && doc.snapAxes.length ? doc.snapAxes.map((a) => ({ p1: { x: a.x1, y: a.y1 }, p2: { x: a.x2, y: a.y2 } })) : null),
+    [customAxisSnapEnabled, doc.snapAxes]
+  );
+
+  // Snaps a bare point (a circle's center — circles aren't part of the
+  // vertex/edge graph, so vertex/edge snapping doesn't apply to them, but
+  // a custom axis is still a meaningful reference line for one) onto the
+  // nearest custom axis line, if any is within threshold. Returns the
+  // point unchanged when there's nothing to snap to.
+  const snapPointToAxes = useCallback(
+    (point) => {
+      if (!customAxisLines) return point;
+      const snap = snapCandidate([], [], point, { grid: null, vertexPx: -1, edgePx: -1, axisPx: -1, linePx: AXIS_SNAP_PX / viewport.zoom, lines: customAxisLines });
+      return snap.lineSnapped ? snap.point : point;
+    },
+    [customAxisLines, viewport.zoom]
+  );
+
   const scheduleLiveOverrides = useCallback((map, circleMap) => {
     pendingOverridesRef.current = map;
     pendingCircleOverridesRef.current = circleMap || null;
@@ -684,12 +711,22 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     setSelectedFillIds(new Set());
     setSelectedAxisIds(new Set());
 
-    const ids = nextSelection.size ? nextSelection : new Set([vertexId]);
+    // A plain click/drag that landed on a vertex ALREADY part of a bigger
+    // selection (more than just this one point) acts on this point alone
+    // rather than dragging the whole group — the group has its own
+    // dedicated move handle for that (onMoveHandlePointerDown, the
+    // stem+circle below the selection box), so clicking into the middle
+    // of a multi-selection to nudge one point no longer drags everything.
+    // Selection itself is left as-is (still the full group, still
+    // visually selected) — only what THIS drag moves is narrowed.
+    const isGroupClick = !e.shiftKey && selectedVertexIds.has(vertexId) && (nextSelection.size > 1 || selectedCircleIds.size > 0);
+    const ids = isGroupClick ? new Set([vertexId]) : nextSelection.size ? nextSelection : new Set([vertexId]);
     // Circles only ever carry into this drag when they were part of an
     // EXISTING selection preserved by this click (shift-click, or a plain
     // click that landed on an already-selected vertex — see above); a
-    // plain click that replaced the selection already cleared them.
-    const circleIds = selectedCircleIds;
+    // plain click that replaced the selection already cleared them, and a
+    // group click that's been narrowed to just this vertex excludes them too.
+    const circleIds = isGroupClick ? new Set() : selectedCircleIds;
     const circleStartPositions = new Map(
       Array.from(circleIds)
         .map((id) => circlesForRender.find((c) => c.id === id))
@@ -719,9 +756,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       // Custom user-drawn snap axes are always-available candidate lines,
       // independent of this vertex's own topology — see the Snap axes
       // section of vectorState.js.
-      if (customAxisSnapEnabled) {
-        candidateLines.push(...doc.snapAxes.map((a) => ({ p1: { x: a.x1, y: a.y1 }, p2: { x: a.x2, y: a.y2 } })));
-      }
+      if (customAxisLines) candidateLines.push(...customAxisLines);
       // Perpendicular/parallel snap: only meaningful for a degree-1 vertex
       // (a single dangling edge V-P) — anchor the candidate lines at the
       // FIXED far endpoint P, matching every OTHER edge in the document
@@ -990,7 +1025,15 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     e.stopPropagation();
     if (viewMode) return;
     containerRef.current.setPointerCapture(e.pointerId);
-    dragRef.current = { mode: 'resize-axis', axisId, which };
+    // Both endpoints' CURRENT coordinates have to be captured up front —
+    // pointer-move's 'resize-axis' branch reads drag.x1/y1/x2/y2 to know
+    // where the FIXED (non-dragged) endpoint sits. Without this, that
+    // endpoint was undefined mid-drag, so the axis line/other point
+    // vanished (NaN coordinates) until the drag ended and the real doc
+    // value took over again.
+    const axis = doc.snapAxes.find((a) => a.id === axisId);
+    if (!axis) return;
+    dragRef.current = { mode: 'resize-axis', axisId, which, x1: axis.x1, y1: axis.y1, x2: axis.x2, y2: axis.y2 };
   };
 
   // The selection bounding-box's dedicated MOVE handle (a stem+circle
@@ -1051,7 +1094,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       return;
     }
     if (tool === 'polyline') {
-      const { nextDoc, vertexId } = resolvePlacement(doc, grid, world, viewport.zoom, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, {}, verticesForSnap, edgesForSnap);
+      const { nextDoc, vertexId } = resolvePlacement(doc, grid, world, viewport.zoom, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, { lines: customAxisLines }, verticesForSnap, edgesForSnap);
       if (nextDoc !== doc) commitState(nextDoc);
       if (polylineChain.length) {
         const last = polylineChain[polylineChain.length - 1];
@@ -1062,8 +1105,9 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       return;
     }
     if (tool === 'circle') {
-      dragRef.current = { mode: 'draw-circle', startWorld: world };
-      setCircleDraft({ cx: world.x, cy: world.y, r: 0 });
+      const center = snapPointToAxes(world);
+      dragRef.current = { mode: 'draw-circle', startWorld: center };
+      setCircleDraft({ cx: center.x, cy: center.y, r: 0 });
       return;
     }
     if (tool === 'text') {
@@ -1116,7 +1160,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
 
     if (drag.mode === 'place-vertex') {
       if (dist(drag.startWorld, world) > MOVE_THRESHOLD / viewport.zoom) drag.moved = true;
-      const snap = snapCandidate(verticesForSnap, edgesForSnap, world, snapOpts(viewport.zoom, grid, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }));
+      const snap = snapCandidate(verticesForSnap, edgesForSnap, world, snapOpts(viewport.zoom, grid, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, { lines: customAxisLines }));
       setSnapPreview(snap);
       return;
     }
@@ -1151,7 +1195,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
 
     if (drag.mode === 'spawn-connected') {
       if (dist(drag.startWorld, world) > MOVE_THRESHOLD / viewport.zoom) drag.moved = true;
-      const snap = snapCandidate(verticesForSnap, edgesForSnap, world, snapOpts(viewport.zoom, grid, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, { excludeVertexId: drag.fromVertexId }));
+      const snap = snapCandidate(verticesForSnap, edgesForSnap, world, snapOpts(viewport.zoom, grid, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, { excludeVertexId: drag.fromVertexId, lines: customAxisLines }));
       setSnapPreview(snap);
       return; // preview line follows pointerWorld automatically; the actual vertex/edge is created on pointerup
     }
@@ -1165,7 +1209,8 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       if (dist(drag.startWorld, world) > MOVE_THRESHOLD / viewport.zoom) drag.moved = true;
       const dx = world.x - drag.startWorld.x;
       const dy = world.y - drag.startWorld.y;
-      setCircleDraft({ id: drag.circleId, cx: drag.startCx + dx, cy: drag.startCy + dy });
+      const center = snapPointToAxes({ x: drag.startCx + dx, y: drag.startCy + dy });
+      setCircleDraft({ id: drag.circleId, cx: center.x, cy: center.y });
       return;
     }
 
@@ -1263,7 +1308,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
 
     if (drag.mode === 'place-vertex') {
       if (!drag.moved && pointerWorld) {
-        const { nextDoc } = resolvePlacement(doc, grid, pointerWorld, viewport.zoom, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, {}, verticesForSnap, edgesForSnap);
+        const { nextDoc } = resolvePlacement(doc, grid, pointerWorld, viewport.zoom, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, { lines: customAxisLines }, verticesForSnap, edgesForSnap);
         if (nextDoc !== doc) commitState(nextDoc);
       }
       return;
@@ -1273,7 +1318,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       if (pointerWorld) {
         const dropDist = dist(drag.startWorld, pointerWorld);
         if (dropDist > MOVE_THRESHOLD / viewport.zoom) {
-          const { nextDoc, vertexId } = resolvePlacement(doc, grid, pointerWorld, viewport.zoom, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, { excludeVertexId: drag.fromVertexId }, verticesForSnap, edgesForSnap);
+          const { nextDoc, vertexId } = resolvePlacement(doc, grid, pointerWorld, viewport.zoom, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, { excludeVertexId: drag.fromVertexId, lines: customAxisLines }, verticesForSnap, edgesForSnap);
           const { state: withEdge, ok } = addEdge(nextDoc, drag.fromVertexId, vertexId, activeStyle, safeActiveLayerId);
           commitState(ok ? withEdge : nextDoc);
         }
@@ -1287,7 +1332,11 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
         // an edge the vertex isn't already part of, Edge Mid-Point
         // Insertion binds it into that edge's topology instead of just
         // leaving it sitting on top.
-        const snap = snapCandidate(verticesForSnap, edgesForSnap, pointerWorld, snapOpts(viewport.zoom, grid, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, { excludeVertexId: drag.singleId }));
+        // Re-resolve with the SAME candidateLines the live drag used
+        // (straighten/perpendicular/custom-axis lines) — otherwise the
+        // final drop point could differ from what was just previewed,
+        // e.g. losing a custom-axis snap in the last pixel of the drag.
+        const snap = snapCandidate(verticesForSnap, edgesForSnap, pointerWorld, snapOpts(viewport.zoom, grid, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, { excludeVertexId: drag.singleId, lines: drag.candidateLines }));
         let next = moveVertices(doc, new Map([[drag.singleId, snap.point]]));
         if (snap.snappedEdgeId) next = bindVertexOntoEdge(next, snap.snappedEdgeId, drag.singleId);
         if (mergeCoincidentEnabled) next = mergeCoincidentVertices(next, [drag.singleId]);
@@ -1330,7 +1379,8 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       if (drag.moved && pointerWorld) {
         const dx = pointerWorld.x - drag.startWorld.x;
         const dy = pointerWorld.y - drag.startWorld.y;
-        commitState(moveCircles(doc, new Map([[drag.circleId, { cx: drag.startCx + dx, cy: drag.startCy + dy }]])));
+        const center = snapPointToAxes({ x: drag.startCx + dx, y: drag.startCy + dy });
+        commitState(moveCircles(doc, new Map([[drag.circleId, center]])));
       }
       return;
     }
@@ -1989,27 +2039,71 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
               />
             )}
 
-            {/* Live preview of the segment about to be created */}
+            {/* Live preview of the segment about to be created — each gets
+                the same length+rotation readout a selected edge does, so
+                the stat is available while DRAWING, not just afterward. */}
             {tool === 'edge' && edgeChainFirst && pointerWorld && vertexById.get(edgeChainFirst) && (
-              <line className="vector-preview-line" x1={vertexById.get(edgeChainFirst).x} y1={vertexById.get(edgeChainFirst).y} x2={pointerWorld.x} y2={pointerWorld.y} />
+              <>
+                <line className="vector-preview-line" x1={vertexById.get(edgeChainFirst).x} y1={vertexById.get(edgeChainFirst).y} x2={pointerWorld.x} y2={pointerWorld.y} />
+                <MeasurementLabel
+                  x={(vertexById.get(edgeChainFirst).x + pointerWorld.x) / 2}
+                  y={(vertexById.get(edgeChainFirst).y + pointerWorld.y) / 2}
+                  lines={[
+                    `${dist(vertexById.get(edgeChainFirst), pointerWorld).toFixed(1)}`,
+                    `${lineRotationDeg(pointerWorld.x - vertexById.get(edgeChainFirst).x, pointerWorld.y - vertexById.get(edgeChainFirst).y).toFixed(1)}\u00b0`
+                  ]}
+                  zoom={viewport.zoom}
+                />
+              </>
             )}
             {tool === 'polyline' && polylineChain.length > 0 && pointerWorld && vertexById.get(polylineChain[polylineChain.length - 1]) && (
-              <line
-                className="vector-preview-line"
-                x1={vertexById.get(polylineChain[polylineChain.length - 1]).x}
-                y1={vertexById.get(polylineChain[polylineChain.length - 1]).y}
-                x2={pointerWorld.x}
-                y2={pointerWorld.y}
-              />
+              <>
+                <line
+                  className="vector-preview-line"
+                  x1={vertexById.get(polylineChain[polylineChain.length - 1]).x}
+                  y1={vertexById.get(polylineChain[polylineChain.length - 1]).y}
+                  x2={pointerWorld.x}
+                  y2={pointerWorld.y}
+                />
+                <MeasurementLabel
+                  x={(vertexById.get(polylineChain[polylineChain.length - 1]).x + pointerWorld.x) / 2}
+                  y={(vertexById.get(polylineChain[polylineChain.length - 1]).y + pointerWorld.y) / 2}
+                  lines={[
+                    `${dist(vertexById.get(polylineChain[polylineChain.length - 1]), pointerWorld).toFixed(1)}`,
+                    `${lineRotationDeg(pointerWorld.x - vertexById.get(polylineChain[polylineChain.length - 1]).x, pointerWorld.y - vertexById.get(polylineChain[polylineChain.length - 1]).y).toFixed(1)}\u00b0`
+                  ]}
+                  zoom={viewport.zoom}
+                />
+              </>
             )}
             {dragRef.current?.mode === 'spawn-connected' && pointerWorld && vertexById.get(dragRef.current.fromVertexId) && (
-              <line
-                className="vector-preview-line"
-                x1={vertexById.get(dragRef.current.fromVertexId).x}
-                y1={vertexById.get(dragRef.current.fromVertexId).y}
-                x2={pointerWorld.x}
-                y2={pointerWorld.y}
-              />
+              <>
+                <line
+                  className="vector-preview-line"
+                  x1={vertexById.get(dragRef.current.fromVertexId).x}
+                  y1={vertexById.get(dragRef.current.fromVertexId).y}
+                  x2={pointerWorld.x}
+                  y2={pointerWorld.y}
+                />
+                <MeasurementLabel
+                  x={(vertexById.get(dragRef.current.fromVertexId).x + pointerWorld.x) / 2}
+                  y={(vertexById.get(dragRef.current.fromVertexId).y + pointerWorld.y) / 2}
+                  lines={[
+                    `${dist(vertexById.get(dragRef.current.fromVertexId), pointerWorld).toFixed(1)}`,
+                    `${lineRotationDeg(pointerWorld.x - vertexById.get(dragRef.current.fromVertexId).x, pointerWorld.y - vertexById.get(dragRef.current.fromVertexId).y).toFixed(1)}\u00b0`
+                  ]}
+                  zoom={viewport.zoom}
+                />
+              </>
+            )}
+
+
+            {/* Coordinate readout while about to place a plain vertex —
+                the vertex tool's "creation" is a single click with no real
+                draw phase, so this is the only chance to show its stat
+                before it exists. */}
+            {!viewMode && tool === 'vertex' && pointerWorld && !dragRef.current && (
+              <MeasurementLabel x={pointerWorld.x} y={pointerWorld.y - 20 / viewport.zoom} lines={[`${pointerWorld.x.toFixed(1)}, ${pointerWorld.y.toFixed(1)}`]} zoom={viewport.zoom} />
             )}
 
             {/* Snapping guidelines: full-length dashed lines through whichever
@@ -2054,13 +2148,27 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
                 return (
                   <g key={a.id}>
                     {selected && <line className="vector-selection-halo" x1={a.x1 - ux} y1={a.y1 - uy} x2={a.x2 + ux} y2={a.y2 + uy} strokeWidth={3 / viewport.zoom} />}
+                    {/* Invisible wide-stroke hit target, stacked on top of the
+                        thin visible line below — a 1px dotted stroke is a
+                        painfully small click target, especially zoomed out,
+                        so pointer capture uses this much fatter (but
+                        unpainted) duplicate instead of trying to widen the
+                        line the person actually sees. */}
+                    <line
+                      className="vector-snap-axis-hit"
+                      x1={a.x1 - ux}
+                      y1={a.y1 - uy}
+                      x2={a.x2 + ux}
+                      y2={a.y2 + uy}
+                      strokeWidth={14 / viewport.zoom}
+                      onPointerDown={(e) => onAxisPointerDown(e, a)}
+                    />
                     <line
                       className={`vector-snap-axis ${selected ? 'selected' : ''}`}
                       x1={a.x1 - ux}
                       y1={a.y1 - uy}
                       x2={a.x2 + ux}
                       y2={a.y2 + uy}
-                      onPointerDown={(e) => onAxisPointerDown(e, a)}
                     />
                     {selected && (
                       <>
@@ -2072,7 +2180,18 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
                 );
               })}
             {/* In-progress axis draw preview — not yet a real axis. */}
-            {axisDraft && !axisDraft.id && <line className="vector-snap-axis" x1={axisDraft.x1} y1={axisDraft.y1} x2={axisDraft.x2} y2={axisDraft.y2} />}
+            {axisDraft && !axisDraft.id && (
+              <>
+                <line className="vector-snap-axis" x1={axisDraft.x1} y1={axisDraft.y1} x2={axisDraft.x2} y2={axisDraft.y2} />
+                <MeasurementLabel
+                  x={(axisDraft.x1 + axisDraft.x2) / 2}
+                  y={(axisDraft.y1 + axisDraft.y2) / 2}
+                  lines={[`${dist({ x: axisDraft.x1, y: axisDraft.y1 }, { x: axisDraft.x2, y: axisDraft.y2 }).toFixed(1)}`, `${lineRotationDeg(axisDraft.x2 - axisDraft.x1, axisDraft.y2 - axisDraft.y1).toFixed(1)}\u00b0`]}
+                  zoom={viewport.zoom}
+                />
+              </>
+            )}
+
 
             {/* Vertex dots are an editing aid, not artwork — hidden in View mode,
                 and hidden per-vertex when every edge/text it belongs to is on a
@@ -2147,31 +2266,57 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
                 })
               )}
 
+            {/* Position + incident-angle readouts for EVERY selected vertex
+                at once (not just a single "focused" one) — a mixed or
+                multi-vertex selection now gets one label set per vertex,
+                same as edges/axes already did above. */}
             {!viewMode &&
-              singleSelectedVertexId &&
-              vertexById.get(singleSelectedVertexId) &&
-              (() => {
-                const v = vertexById.get(singleSelectedVertexId);
+              selectedEdgeIds.size === 0 &&
+              selectedCircleIds.size === 0 &&
+              Array.from(selectedVertexIds).map((vertexId) => {
+                const v = vertexById.get(vertexId);
+                if (!v) return null;
                 const others = doc.edges
-                  .filter((e) => e.v1 === singleSelectedVertexId || e.v2 === singleSelectedVertexId)
-                  .map((e) => vertexById.get(e.v1 === singleSelectedVertexId ? e.v2 : e.v1))
+                  .filter((e) => e.v1 === vertexId || e.v2 === vertexId)
+                  .map((e) => vertexById.get(e.v1 === vertexId ? e.v2 : e.v1))
                   .filter(Boolean);
                 const angles = vertexAngles(others.map((p) => ({ x: p.x - v.x, y: p.y - v.y })));
                 const labelDist = 34 / viewport.zoom;
                 return (
-                  <>
+                  <g key={`vpos-${vertexId}`}>
                     <MeasurementLabel x={v.x} y={v.y - 22 / viewport.zoom} lines={[`${v.x.toFixed(1)}, ${v.y.toFixed(1)}`]} zoom={viewport.zoom} />
                     {angles.map(({ angleDeg, bisector }, i) => (
                       <MeasurementLabel key={i} x={v.x + Math.cos(bisector) * labelDist} y={v.y + Math.sin(bisector) * labelDist} lines={[`${angleDeg.toFixed(1)}\u00b0`]} zoom={viewport.zoom} />
                     ))}
-                  </>
+                  </g>
                 );
-              })()}
+              })}
 
+            {/* Position (+ radius, for a real one) readout for every circle
+                of concern: every selected circle, AND — so the stat shows
+                up live while creating/moving/resizing one too, not only
+                once it's selected afterward — the in-progress circleDraft. */}
             {!viewMode &&
               circlesForRender
                 .filter((c) => selectedCircleIds.has(c.id))
-                .map((c) => <MeasurementLabel key={`circle-${c.id}`} x={c.cx} y={c.cy - c.r - 14 / viewport.zoom} lines={[`r ${c.r.toFixed(1)}`]} zoom={viewport.zoom} />)}
+                .map((c) => (
+                  <MeasurementLabel
+                    key={`circle-${c.id}`}
+                    x={c.cx}
+                    y={c.cy - c.r - 18 / viewport.zoom}
+                    lines={[`${c.cx.toFixed(1)}, ${c.cy.toFixed(1)}`, `r ${c.r.toFixed(1)}`]}
+                    zoom={viewport.zoom}
+                  />
+                ))}
+            {!viewMode && circleDraft && !circleDraft.id && (
+              <MeasurementLabel
+                x={circleDraft.cx}
+                y={circleDraft.cy - circleDraft.r - 18 / viewport.zoom}
+                lines={[`${circleDraft.cx.toFixed(1)}, ${circleDraft.cy.toFixed(1)}`, `r ${circleDraft.r.toFixed(1)}`]}
+                zoom={viewport.zoom}
+              />
+            )}
+
 
             {/* Live delta readout while actively moving/scaling/rotating a
                 multi-selection — see onMoveHandlePointerDown/beginScale/
