@@ -3,7 +3,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { IconEye, IconLoader, IconPlus, IconTrash, IconType, IconX } from '../../components/icons.jsx';
 import { MiniMarkdownEditor } from '../../components/MiniMarkdownEditor.jsx';
 import { PropertiesPanel } from '../../components/PropertiesPanel.jsx';
+import { useDriveImageUrl } from '../../hooks/useDriveImageUrl.js';
 import { parseFrontmatter } from '../../lib/markdownParse.js';
+import { CanvasFilePickerModal } from '../canvas/CanvasFilePickerModal.jsx';
 import { VectorToolbar } from './VectorToolbar.jsx';
 import {
   AXIS_SNAP_PX,
@@ -14,8 +16,10 @@ import {
   DEFAULT_TEXT_COLOR,
   DEFAULT_TEXT_FONT_SIZE,
   DEFAULT_TEXT_HEIGHT,
+  DEFAULT_TEXT_VALIGN,
   DEFAULT_TEXT_WIDTH,
   EDGE_SNAP_PX,
+  REFERENCE_IMAGE_OPACITY,
   SEVER_THRESHOLD_PX,
   VECTOR_ZOOM_MAX,
   VECTOR_ZOOM_MIN,
@@ -24,6 +28,7 @@ import {
   addEdge,
   addFillAt,
   addLayer,
+  addReferenceImage,
   addSnapAxis,
   addText,
   bindVertexOntoEdge,
@@ -33,6 +38,7 @@ import {
   deleteCircles,
   deleteEdges,
   deleteFills,
+  deleteReferenceImage,
   deleteSnapAxes,
   deleteTexts,
   deleteVertices,
@@ -40,7 +46,9 @@ import {
   groupIdForVertex,
   groupVertexIds,
   groupVertices,
+  mergeCoincidentVertices,
   moveCircles,
+  moveReferenceImage,
   moveSnapAxis,
   moveVertices,
   moveToLayer,
@@ -50,6 +58,7 @@ import {
   renameLayer,
   reorderLayer,
   resizeCircle,
+  resizeReferenceImage,
   resolveTextQuad,
   selectionIsExactlyOneGroup,
   serializeVectorState,
@@ -84,7 +93,61 @@ import {
   handleConfigsFor
 } from './vectorGeometry.jsx';
 
-function VectorEditorView({ file, content, onChange, loading, handlers, linkIndex }) {
+// A faded, non-interactive-until-selected tracing guide (see the toolbar's
+// vault-image button). Its own component, not inlined into the render
+// loop below, purely so useDriveImageUrl (a hook) can be called once per
+// image rather than inside a .map — the same reason ImageEmbed in
+// LinkEmbeds.jsx exists as its own component.
+function ReferenceImageNode({ image, token, selected, onPointerDownImage, onPointerDownResize }) {
+  const { url, loading: imgLoading } = useDriveImageUrl(token, image.fileId);
+  return (
+    <g className={`vector-reference-image ${selected ? 'selected' : ''}`}>
+      {url ? (
+        <image
+          href={url}
+          x={image.x}
+          y={image.y}
+          width={image.width}
+          height={image.height}
+          opacity={REFERENCE_IMAGE_OPACITY}
+          preserveAspectRatio="none"
+          onPointerDown={onPointerDownImage}
+        />
+      ) : (
+        <rect
+          x={image.x}
+          y={image.y}
+          width={image.width}
+          height={image.height}
+          fill="none"
+          stroke="var(--vector-dot-color, #888)"
+          strokeDasharray="6 6"
+          opacity={REFERENCE_IMAGE_OPACITY}
+          onPointerDown={onPointerDownImage}
+        />
+      )}
+      {imgLoading && (
+        <text x={image.x + image.width / 2} y={image.y + image.height / 2} textAnchor="middle" fill="var(--vector-dot-color, #888)" fontSize="12">
+          Loading…
+        </text>
+      )}
+      {selected && (
+        <>
+          <rect className="vector-reference-image-outline" x={image.x} y={image.y} width={image.width} height={image.height} fill="none" />
+          <circle
+            className="vector-reference-image-handle"
+            cx={image.x + image.width}
+            cy={image.y + image.height}
+            r={7}
+            onPointerDown={onPointerDownResize}
+          />
+        </>
+      )}
+    </g>
+  );
+}
+
+function VectorEditorView({ file, content, onChange, loading, handlers, linkIndex, allFiles }) {
   const [doc, setDoc] = useState(() => parseVectorContent(content));
   const [viewport, setViewport] = useState({ x: 0, y: 0, zoom: 1 });
   const [tool, setTool] = useState('select');
@@ -135,7 +198,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   const [snapCrossLayer, setSnapCrossLayer] = useState(true);
   const [layersPanelOpen, setLayersPanelOpen] = useState(false);
   const [descriptionPanelOpen, setDescriptionPanelOpen] = useState(false);
-  const [activeTextStyle, setActiveTextStyle] = useState({ color: DEFAULT_TEXT_COLOR, fontSize: DEFAULT_TEXT_FONT_SIZE, align: DEFAULT_TEXT_ALIGN });
+  const [activeTextStyle, setActiveTextStyle] = useState({ color: DEFAULT_TEXT_COLOR, fontSize: DEFAULT_TEXT_FONT_SIZE, align: DEFAULT_TEXT_ALIGN, valign: DEFAULT_TEXT_VALIGN });
   const [textDraft, setTextDraft] = useState(null); // { x0, y0, x1, y1 } — rectangle preview while drawing a new text box
   // The id of the text currently being typed into, plus a local editing
   // buffer separate from doc.texts — content only commits on blur/Escape
@@ -143,6 +206,19 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   // keystroke" convention as MiniMarkdownEditor.
   const [editingTextId, setEditingTextId] = useState(null);
   const [editingTextBuffer, setEditingTextBuffer] = useState('');
+  // Corner-handle scaling keeps the selection's aspect ratio locked while
+  // this is on (see computeTransform's scale branch) — off by default so
+  // existing documents keep behaving exactly as before until switched on.
+  const [proportionalScaling, setProportionalScaling] = useState(false);
+  // Whether two points landing on the exact same spot after a drag get
+  // folded into one automatically (see mergeCoincidentVertices) — on by
+  // default per the toolbar's "Merge overlapping points" setting.
+  const [mergeCoincidentEnabled, setMergeCoincidentEnabled] = useState(true);
+  const [imagePickerOpen, setImagePickerOpen] = useState(false);
+  const [selectedImageId, setSelectedImageId] = useState(null);
+  // Live preview while dragging/resizing a reference image — same
+  // "draft state, commit on pointer-up" convention as circleDraft.
+  const [imageDraft, setImageDraft] = useState(null); // { id, x, y, width, height }
 
   const containerRef = useRef(null);
   const dragRef = useRef(null);
@@ -213,6 +289,58 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   }, [doc.vertices, liveOverrides]);
 
   const vertexById = useMemo(() => new Map(verticesForRender.map((v) => [v.id, v])), [verticesForRender]);
+
+  // A vertex whose every edge/text lives on a hidden layer is itself part
+  // of that hidden layer, so its dot shouldn't draw either — a vertex with
+  // no edges/texts at all, or with at least one on a still-visible layer,
+  // stays visible. Feeds the vertex-dot render loop below.
+  const hiddenVertexIds = useMemo(() => {
+    const hiddenLayerIds = new Set(doc.layers.filter((l) => l.visible === false).map((l) => l.id));
+    if (!hiddenLayerIds.size) return new Set();
+    const owningLayers = new Map(); // vertexId -> Set(layerId)
+    const addOwner = (vertexId, layerId) => {
+      if (!owningLayers.has(vertexId)) owningLayers.set(vertexId, new Set());
+      owningLayers.get(vertexId).add(layerId);
+    };
+    for (const e of doc.edges) {
+      addOwner(e.v1, e.layerId);
+      addOwner(e.v2, e.layerId);
+    }
+    for (const t of doc.texts) {
+      addOwner(t.v1, t.layerId);
+      addOwner(t.v2, t.layerId);
+      addOwner(t.v3, t.layerId);
+      addOwner(t.v4, t.layerId);
+    }
+    const hidden = new Set();
+    for (const [vertexId, layerIds] of owningLayers) {
+      if (Array.from(layerIds).every((id) => hiddenLayerIds.has(id))) hidden.add(vertexId);
+    }
+    return hidden;
+  }, [doc.layers, doc.edges, doc.texts]);
+
+  // Vault files eligible for the reference-image picker.
+  const imageFiles = useMemo(() => (allFiles || []).filter((f) => f.kind === 'image'), [allFiles]);
+
+  const handlePickImage = useCallback(
+    (f) => {
+      const width = Math.round(doc.canvas.width * 0.5);
+      const height = Math.round(doc.canvas.height * 0.5);
+      const x = Math.round((doc.canvas.width - width) / 2);
+      const y = Math.round((doc.canvas.height - height) / 2);
+      const next = addReferenceImage(doc, f.id, f.name, x, y, width, height);
+      commitState(next);
+      setSelectedImageId(next._newReferenceImageId);
+      setImagePickerOpen(false);
+    },
+    [doc, commitState]
+  );
+
+  const deleteSelectedImage = useCallback(() => {
+    if (!selectedImageId) return;
+    commitState(deleteReferenceImage(doc, selectedImageId));
+    setSelectedImageId(null);
+  }, [doc, commitState, selectedImageId]);
 
   // Edges sorted so heavier strokes draw last (on top) — Dynamic Z-Index.
   const sortedEdges = useMemo(() => [...doc.edges].sort((a, b) => a.style.thickness - b.style.thickness), [doc.edges]);
@@ -329,7 +457,10 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   // single undo step rather than two.
   const commitCombinedOverrides = () => {
     let next = doc;
-    if (liveOverrides && liveOverrides.size) next = moveVertices(next, liveOverrides);
+    if (liveOverrides && liveOverrides.size) {
+      next = moveVertices(next, liveOverrides);
+      if (mergeCoincidentEnabled) next = mergeCoincidentVertices(next, Array.from(liveOverrides.keys()));
+    }
     if (circleTransformOverrides && circleTransformOverrides.size) {
       next = { ...next, circles: next.circles.map((c) => (circleTransformOverrides.has(c.id) ? { ...c, ...circleTransformOverrides.get(c.id) } : c)) };
     }
@@ -753,6 +884,38 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     dragRef.current = { mode: 'resize-circle', circleId, cx: circle.cx, cy: circle.cy };
   };
 
+  // Reference images (see the toolbar's vault-image button) are a much
+  // simpler interactive object than everything else in this file — just a
+  // position and a size, no topology, no style — so they get their own
+  // small move/resize pair here rather than routing through the
+  // vertex/circle selection machinery above.
+  const onReferenceImagePointerDown = (e, image) => {
+    e.stopPropagation();
+    if (spaceDown) {
+      beginPan(e);
+      return;
+    }
+    if (viewMode || tool !== 'select') return;
+    containerRef.current.focus();
+    containerRef.current.setPointerCapture(e.pointerId);
+    const world = screenToWorld(e.clientX, e.clientY);
+    setSelectedImageId(image.id);
+    setSelectedVertexIds(new Set());
+    setSelectedEdgeIds(new Set());
+    setSelectedFillIds(new Set());
+    setSelectedCircleIds(new Set());
+    setSelectedAxisIds(new Set());
+    dragRef.current = { mode: 'move-image', imageId: image.id, startWorld: world, startX: image.x, startY: image.y };
+  };
+
+  const onReferenceImageResizePointerDown = (e, image) => {
+    e.stopPropagation();
+    if (viewMode) return;
+    containerRef.current.setPointerCapture(e.pointerId);
+    setSelectedImageId(image.id);
+    dragRef.current = { mode: 'resize-image', imageId: image.id, x: image.x, y: image.y };
+  };
+
   // Clicking a text's rendered body (not one of its 4 corner dots)
   // selects all 4 corners at once — the existing multi-vertex selection
   // system then gives the bounding-box scale/rotate handles "for free"
@@ -768,7 +931,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     if (viewMode) return;
 
     if (tool === 'eyedropper') {
-      setActiveTextStyle({ color: text.color, fontSize: text.fontSize, align: text.align });
+      setActiveTextStyle({ color: text.color, fontSize: text.fontSize, align: text.align, valign: text.valign });
       return;
     }
     if (tool !== 'select') return;
@@ -926,6 +1089,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     setSelectedFillIds(new Set());
     setSelectedCircleIds(new Set());
     setSelectedAxisIds(new Set());
+    setSelectedImageId(null);
     if (localEditGroupId) setLocalEditGroupId(null);
     dragRef.current = { mode: 'marquee', startWorld: world };
     setMarquee({ x0: world.x, y0: world.y, x1: world.x, y1: world.y });
@@ -1007,6 +1171,19 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
 
     if (drag.mode === 'resize-circle') {
       setCircleDraft({ id: drag.circleId, cx: drag.cx, cy: drag.cy, r: dist({ x: drag.cx, y: drag.cy }, world) });
+      return;
+    }
+
+    if (drag.mode === 'move-image') {
+      const dx = world.x - drag.startWorld.x;
+      const dy = world.y - drag.startWorld.y;
+      setImageDraft({ id: drag.imageId, x: drag.startX + dx, y: drag.startY + dy });
+      return;
+    }
+
+    if (drag.mode === 'resize-image') {
+      const image = doc.referenceImages.find((r) => r.id === drag.imageId);
+      if (image) setImageDraft({ id: drag.imageId, width: Math.max(8, world.x - drag.x), height: Math.max(8, world.y - drag.y) });
       return;
     }
 
@@ -1113,6 +1290,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
         const snap = snapCandidate(verticesForSnap, edgesForSnap, pointerWorld, snapOpts(viewport.zoom, grid, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, { excludeVertexId: drag.singleId }));
         let next = moveVertices(doc, new Map([[drag.singleId, snap.point]]));
         if (snap.snappedEdgeId) next = bindVertexOntoEdge(next, snap.snappedEdgeId, drag.singleId);
+        if (mergeCoincidentEnabled) next = mergeCoincidentVertices(next, [drag.singleId]);
         commitState(next);
       } else {
         commitCombinedOverrides();
@@ -1163,6 +1341,24 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
         const r = dist({ x: drag.cx, y: drag.cy }, pointerWorld);
         commitState(resizeCircle(doc, drag.circleId, r));
         setActiveRadius(Math.round(r));
+      }
+      return;
+    }
+
+    if (drag.mode === 'move-image') {
+      setImageDraft(null);
+      if (pointerWorld) {
+        const dx = pointerWorld.x - drag.startWorld.x;
+        const dy = pointerWorld.y - drag.startWorld.y;
+        commitState(moveReferenceImage(doc, drag.imageId, drag.startX + dx, drag.startY + dy));
+      }
+      return;
+    }
+
+    if (drag.mode === 'resize-image') {
+      setImageDraft(null);
+      if (pointerWorld) {
+        commitState(resizeReferenceImage(doc, drag.imageId, Math.max(8, pointerWorld.x - drag.x), Math.max(8, pointerWorld.y - drag.y)));
       }
       return;
     }
@@ -1244,6 +1440,15 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       let scaleY = drag.spanY === 0 ? 1 : dy / drag.spanY;
       if (drag.axisLock === 'x') scaleY = 1; // edge-midpoint handle: horizontal-only scaling
       if (drag.axisLock === 'y') scaleX = 1; // edge-midpoint handle: vertical-only scaling
+      // Proportional scaling (toolbar toggle) only applies to a corner
+      // handle (axisLock is null there) — an edge-midpoint handle is
+      // single-axis by design, and locking it too would make it
+      // indistinguishable from a corner handle.
+      if (proportionalScaling && !drag.axisLock) {
+        const magnitude = (Math.abs(scaleX) + Math.abs(scaleY)) / 2;
+        scaleX = magnitude * (scaleX < 0 ? -1 : 1);
+        scaleY = magnitude * (scaleY < 0 ? -1 : 1);
+      }
       for (const [id, pos] of drag.startPositions) {
         map.set(id, { x: drag.anchor.x + (pos.x - drag.anchor.x) * scaleX, y: drag.anchor.y + (pos.y - drag.anchor.y) * scaleY });
       }
@@ -1324,13 +1529,15 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     if (viewMode) return; // View mode is look-only — undo/redo/shortcuts don't apply since nothing can be selected or edited
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
-      deleteSelection();
+      if (selectedImageId) deleteSelectedImage();
+      else deleteSelection();
     } else if (e.key === 'Escape') {
       setSelectedVertexIds(new Set());
       setSelectedEdgeIds(new Set());
       setSelectedFillIds(new Set());
       setSelectedCircleIds(new Set());
       setSelectedAxisIds(new Set());
+      setSelectedImageId(null);
       clearToolInProgress();
       setLocalEditGroupId(null);
     } else if (e.key === 'Enter' && polylineChain.length) {
@@ -1485,6 +1692,10 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
           setActiveTextStyle((s) => ({ ...s, align }));
           if (selectedTextIds.size) commitState(Array.from(selectedTextIds).reduce((d, id) => setTextStyle(d, id, { align }), doc));
         }}
+        onSetTextValign={(valign) => {
+          setActiveTextStyle((s) => ({ ...s, valign }));
+          if (selectedTextIds.size) commitState(Array.from(selectedTextIds).reduce((d, id) => setTextStyle(d, id, { valign }), doc));
+        }}
         canvasBackground={doc.canvas.background}
         onSetCanvasBackground={(color) => commitState(setCanvasBackground(doc, color))}
         axisSnapEnabled={axisSnapEnabled}
@@ -1497,6 +1708,11 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
         onToggleCustomAxisSnap={() => setCustomAxisSnapEnabled((v) => !v)}
         perpParallelSnapEnabled={perpParallelSnapEnabled}
         onTogglePerpParallelSnap={() => setPerpParallelSnapEnabled((v) => !v)}
+        mergeCoincidentEnabled={mergeCoincidentEnabled}
+        onToggleMergeCoincident={() => setMergeCoincidentEnabled((v) => !v)}
+        proportionalScaling={proportionalScaling}
+        onToggleProportionalScaling={() => setProportionalScaling((v) => !v)}
+        onOpenImagePicker={() => setImagePickerOpen(true)}
         snapMenuOpen={snapMenuOpen}
         onToggleSnapMenu={() => setSnapMenuOpen((v) => !v)}
         layersPanelOpen={layersPanelOpen}
@@ -1516,6 +1732,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
           setSelectedFillIds(new Set());
           setSelectedCircleIds(new Set());
           setSelectedAxisIds(new Set());
+          setSelectedImageId(null);
           clearToolInProgress();
         }}
         onUndo={undo}
@@ -1529,9 +1746,22 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
         onFitToContent={fitToContent}
         onExportSvg={exportSvg}
       />
+      {imagePickerOpen && <CanvasFilePickerModal files={imageFiles} onPick={handlePickImage} onClose={() => setImagePickerOpen(false)} />}
+      {selectedImageId && (
+        <div className="vector-selection-toolbar vector-reference-image-toolbar">
+          <button className="icon-btn" onClick={deleteSelectedImage} title="Delete image">
+            <IconTrash size={14} />
+          </button>
+        </div>
+      )}
       {/* historyTick isn't read directly — it exists purely to force this toolbar to
           re-render after undo/redo mutate the ref-backed history stacks below. */}
       <div style={{ display: 'none' }}>{historyTick}</div>
+      {/* vector-body: canvas + optional docked sidebars, side by side (flex
+          row) rather than the sidebars overlaying the canvas — so Layers
+          and Description can both be open and visible at once instead of
+          stacking on top of each other. */}
+      <div className="vector-body">
       <div
         className={`vector-surface ${isPanning || spaceDown ? 'panning' : ''}`}
         ref={containerRef}
@@ -1556,6 +1786,20 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
         <svg className="vector-svg" width="100%" height="100%">
           <rect className="vector-bg-hit" x="0" y="0" width="100%" height="100%" fill="transparent" />
           <g transform={`translate(${viewport.x} ${viewport.y}) scale(${viewport.zoom})`}>
+            {/* Reference/tracing images loaded from the vault — always painted
+                first (behind every layer), faded, and non-interactive except
+                through the select tool (see onReferenceImagePointerDown
+                below). Never part of the exported SVG (compileVectorSvg). */}
+            {doc.referenceImages.map((img) => (
+              <ReferenceImageNode
+                key={img.id}
+                image={imageDraft && imageDraft.id === img.id ? { ...img, ...imageDraft } : img}
+                token={handlers?.token}
+                selected={!viewMode && tool === 'select' && selectedImageId === img.id}
+                onPointerDownImage={(e) => onReferenceImagePointerDown(e, img)}
+                onPointerDownResize={(e) => onReferenceImageResizePointerDown(e, img)}
+              />
+            ))}
             {/* Layers are a strict z-partition (see vectorState.js) —
                 everything on a lower layer renders fully behind everything
                 on a higher one, so the whole fills → circles → edges →
@@ -1648,7 +1892,10 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
                                 height: DEFAULT_TEXT_HEIGHT,
                                 color: isEmpty ? undefined : t.color,
                                 fontSize: t.fontSize,
-                                textAlign: t.align
+                                textAlign: t.align,
+                                display: 'flex',
+                                flexDirection: 'column',
+                                justifyContent: { top: 'flex-start', middle: 'center', bottom: 'flex-end' }[t.valign] || 'flex-start'
                               }}
                               onPointerDown={(ev) => onTextPointerDown(ev, t)}
                               onDoubleClick={(ev) => {
@@ -1827,9 +2074,13 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
             {/* In-progress axis draw preview — not yet a real axis. */}
             {axisDraft && !axisDraft.id && <line className="vector-snap-axis" x1={axisDraft.x1} y1={axisDraft.y1} x2={axisDraft.x2} y2={axisDraft.y2} />}
 
-            {/* Vertex dots are an editing aid, not artwork — hidden in View mode. */}
+            {/* Vertex dots are an editing aid, not artwork — hidden in View mode,
+                and hidden per-vertex when every edge/text it belongs to is on a
+                hidden layer (see hiddenVertexIds). */}
             {!viewMode &&
-              verticesForRender.map((v) => {
+              verticesForRender
+                .filter((v) => !hiddenVertexIds.has(v.id))
+                .map((v) => {
                 const selected = selectedVertexIds.has(v.id);
                 const gid = groupIdForVertex(doc, v.id);
                 return (
@@ -2209,6 +2460,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }

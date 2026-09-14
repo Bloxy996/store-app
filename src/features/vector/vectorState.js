@@ -60,8 +60,14 @@ const DEFAULT_CIRCLE_RADIUS = 30;
 export const DEFAULT_TEXT_COLOR = '#ffffff';
 export const DEFAULT_TEXT_FONT_SIZE = 24;
 export const DEFAULT_TEXT_ALIGN = 'left';
+export const DEFAULT_TEXT_VALIGN = 'top';
 export const DEFAULT_TEXT_WIDTH = 160;
 export const DEFAULT_TEXT_HEIGHT = 60;
+
+// Faded, non-interactive tracing guides loaded from the vault (see the
+// "Reference images" section below) — always painted first (bottom of the
+// whole document, behind every layer) and always at this fixed opacity.
+export const REFERENCE_IMAGE_OPACITY = 0.35;
 
 const VECTOR_ZOOM_MIN = 0.1;
 const VECTOR_ZOOM_MAX = 6;
@@ -93,7 +99,8 @@ function makeDefaultVectorState(title) {
     texts: [],
     groups: [],
     layers: [{ id: 'layer-1', name: 'Layer 1', visible: true }],
-    snapAxes: []
+    snapAxes: [],
+    referenceImages: []
   };
 }
 
@@ -197,6 +204,7 @@ function parseVectorContent(content) {
             color: typeof t.color === 'string' ? t.color : DEFAULT_TEXT_COLOR,
             fontSize: Number(t.fontSize) > 0 ? Number(t.fontSize) : DEFAULT_TEXT_FONT_SIZE,
             align: ['left', 'center', 'right'].includes(t.align) ? t.align : DEFAULT_TEXT_ALIGN,
+            valign: ['top', 'middle', 'bottom'].includes(t.valign) ? t.valign : DEFAULT_TEXT_VALIGN,
             layerId: layerIds.has(t.layerId) ? t.layerId : defaultLayerId
           }))
       : [];
@@ -212,6 +220,24 @@ function parseVectorContent(content) {
           .filter((a) => a && a.id && [a.x1, a.y1, a.x2, a.y2].every((n) => Number.isFinite(Number(n))))
           .map((a) => ({ id: a.id, x1: Number(a.x1), y1: Number(a.y1), x2: Number(a.x2), y2: Number(a.y2) }))
       : [];
+    // Reference/tracing images pulled in from the vault (see the
+    // "Reference images" section below) — a plain Drive fileId, never the
+    // image bytes themselves (those stay in useDriveImageUrl's in-memory
+    // blob-URL cache per CLAUDE.md 3.1 — this document only ever stores
+    // the id/name/placement).
+    const referenceImages = Array.isArray(p?.referenceImages)
+      ? p.referenceImages
+          .filter((r) => r && r.id && r.fileId)
+          .map((r) => ({
+            id: r.id,
+            fileId: r.fileId,
+            name: typeof r.name === 'string' ? r.name : 'Image',
+            x: Number(r.x) || 0,
+            y: Number(r.y) || 0,
+            width: Math.max(1, Number(r.width) || 400),
+            height: Math.max(1, Number(r.height) || 300)
+          }))
+      : [];
     return {
       title: typeof p?.title === 'string' ? p.title : 'Untitled',
       description: typeof p?.description === 'string' ? p.description : '',
@@ -223,7 +249,8 @@ function parseVectorContent(content) {
       texts,
       groups,
       layers,
-      snapAxes
+      snapAxes,
+      referenceImages
     };
   } catch {
     return makeDefaultVectorState();
@@ -244,7 +271,8 @@ function serializeVectorState(state) {
       texts: state.texts,
       groups: state.groups,
       layers: state.layers,
-      snapAxes: state.snapAxes
+      snapAxes: state.snapAxes,
+      referenceImages: state.referenceImages
     },
     null,
     2
@@ -401,6 +429,80 @@ function splitVertex(state, vertexId) {
     edges = edges.map((e) => (e.id === edgeId ? { ...e, v1: e.v1 === vertexId ? newVertex.id : e.v1, v2: e.v2 === vertexId ? newVertex.id : e.v2 } : e));
   }
   return { ...state, vertices: [...state.vertices, ...newVertices], edges, _newVertexIds: newVertices.map((nv) => nv.id) };
+}
+
+// Point Merging (the inverse of Split, above): folds `removeId` into
+// `keepId` — every edge/text corner/group entry that pointed at `removeId`
+// is repointed at `keepId` instead, `removeId` itself is dropped, any edge
+// that's now a self-loop (both ends repointed onto the same vertex) is
+// dropped, and any resulting duplicate edge (two formerly-distinct edges
+// that now connect the same pair) collapses to just the first one — same
+// "no multi-edges, no self-loops" invariant addEdge already enforces.
+// Fills are pruned afterward (pruneFills) rather than remapped, matching
+// every other structural edit in this file.
+function mergeVertexInto(state, keepId, removeId) {
+  if (keepId === removeId) return state;
+  const remap = (id) => (id === removeId ? keepId : id);
+  const seenPairs = new Set();
+  const edges = state.edges
+    .map((e) => ({ ...e, v1: remap(e.v1), v2: remap(e.v2) }))
+    .filter((e) => e.v1 !== e.v2)
+    .filter((e) => {
+      const key = e.v1 < e.v2 ? `${e.v1}\u0000${e.v2}` : `${e.v2}\u0000${e.v1}`;
+      if (seenPairs.has(key)) return false;
+      seenPairs.add(key);
+      return true;
+    });
+  const vertices = state.vertices.filter((v) => v.id !== removeId);
+  const texts = state.texts.map((t) => ({ ...t, v1: remap(t.v1), v2: remap(t.v2), v3: remap(t.v3), v4: remap(t.v4) }));
+  const groups = state.groups
+    .map((g) => ({ ...g, vertexIds: Array.from(new Set(g.vertexIds.map(remap))) }))
+    .filter((g) => g.vertexIds.length > 1);
+  return pruneFills({ ...state, vertices, edges, texts, groups });
+}
+
+// Scans `candidateIds` (the vertices that just finished moving — see
+// VectorEditorView's drag-commit paths) for any that now sit exactly on
+// top of another vertex, and merges each such pair into one point. This is
+// the "optional, on by default" behavior the toolbar's merge toggle
+// controls — callers only invoke this when that toggle is on. Each
+// candidate is re-looked-up by id on every iteration (rather than using a
+// stale snapshot) since an earlier merge in the same call can remove one.
+function mergeCoincidentVertices(state, candidateIds) {
+  let next = state;
+  for (const id of candidateIds) {
+    const v = next.vertices.find((vv) => vv.id === id);
+    if (!v) continue; // already folded into an earlier merge this pass
+    const dupe = next.vertices.find((vv) => vv.id !== id && Math.abs(vv.x - v.x) < 0.01 && Math.abs(vv.y - v.y) < 0.01);
+    if (dupe) next = mergeVertexInto(next, dupe.id, id);
+  }
+  return next;
+}
+
+// ---------------------------------------------------------------------------
+// Reference images — faded tracing guides pulled in from the vault by Drive
+// file id (see VectorEditorView's image picker). Always rendered first,
+// behind every real layer, at a fixed low opacity, and never part of the
+// exported SVG (compileVectorSvg) — purely an editing aid, same status as a
+// snap axis or the vertex dots. Only the Drive fileId/name/placement is
+// ever stored here; the image bytes themselves stay in useDriveImageUrl's
+// in-memory cache (CLAUDE.md 3.1) and are never written into this document.
+// ---------------------------------------------------------------------------
+function addReferenceImage(state, fileId, name, x, y, width, height) {
+  const image = { id: `img-${cryptoRandomId()}`, fileId, name, x, y, width: Math.max(1, width), height: Math.max(1, height) };
+  return { ...state, referenceImages: [...state.referenceImages, image], _newReferenceImageId: image.id };
+}
+
+function moveReferenceImage(state, imageId, x, y) {
+  return { ...state, referenceImages: state.referenceImages.map((r) => (r.id === imageId ? { ...r, x, y } : r)) };
+}
+
+function resizeReferenceImage(state, imageId, width, height) {
+  return { ...state, referenceImages: state.referenceImages.map((r) => (r.id === imageId ? { ...r, width: Math.max(1, width), height: Math.max(1, height) } : r)) };
+}
+
+function deleteReferenceImage(state, imageId) {
+  return { ...state, referenceImages: state.referenceImages.filter((r) => r.id !== imageId) };
 }
 
 // Drops any fill whose boundary depends on a vertex/edge id no longer
@@ -633,6 +735,7 @@ function addText(state, corners, content, style, layerId) {
     color: style?.color ?? DEFAULT_TEXT_COLOR,
     fontSize: style?.fontSize ?? DEFAULT_TEXT_FONT_SIZE,
     align: style?.align ?? DEFAULT_TEXT_ALIGN,
+    valign: style?.valign ?? DEFAULT_TEXT_VALIGN,
     layerId: layerId || state.layers[0].id
   };
   return { ...state, vertices: [...state.vertices, v1, v2, v3, v4], texts: [...state.texts, text], _newTextId: text.id, _newTextCornerIds: [v1.id, v2.id, v3.id, v4.id] };
@@ -794,6 +897,7 @@ function pasteClipboard(state, clipboard, offset, layerId) {
     color: t.color,
     fontSize: t.fontSize,
     align: t.align,
+    valign: t.valign,
     layerId
   }));
   const groups = clipboard.groups.map((g) => ({ id: `g-${cryptoRandomId()}`, vertexIds: g.vertexIds.map((id) => vertexIdMap.get(id)) }));
@@ -905,7 +1009,8 @@ function compileVectorSvg(state) {
           const quad = resolveTextQuad(state.vertices, t);
           if (!quad) return '';
           const matrix = computeQuadWarpMatrix3d(quad, DEFAULT_TEXT_WIDTH, DEFAULT_TEXT_HEIGHT);
-          const style = `width:${DEFAULT_TEXT_WIDTH}px;height:${DEFAULT_TEXT_HEIGHT}px;transform:${matrix};transform-origin:0 0;color:${t.color};font-size:${t.fontSize}px;text-align:${t.align};white-space:pre-wrap;word-wrap:break-word;font-family:sans-serif;line-height:1.25;`;
+          const justifyContent = { top: 'flex-start', middle: 'center', bottom: 'flex-end' }[t.valign] || 'flex-start';
+          const style = `width:${DEFAULT_TEXT_WIDTH}px;height:${DEFAULT_TEXT_HEIGHT}px;transform:${matrix};transform-origin:0 0;color:${t.color};font-size:${t.fontSize}px;text-align:${t.align};display:flex;flex-direction:column;justify-content:${justifyContent};white-space:pre-wrap;word-wrap:break-word;font-family:sans-serif;line-height:1.25;`;
           // The foreignObject's own box only needs to be big enough not to
           // clip the warped div inside it (the div's CSS transform is what
           // actually positions/shapes it, via transform-origin:0 0) — the
@@ -972,6 +1077,8 @@ export {
   severEdgeEndpoint,
   disconnectVertex,
   splitVertex,
+  mergeVertexInto,
+  mergeCoincidentVertices,
   deleteVertices,
   deleteEdges,
   addFillAt,
@@ -1009,5 +1116,9 @@ export {
   moveToLayer,
   copySelection,
   pasteClipboard,
+  addReferenceImage,
+  moveReferenceImage,
+  resizeReferenceImage,
+  deleteReferenceImage,
   compileVectorSvg
 };

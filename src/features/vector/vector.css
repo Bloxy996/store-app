@@ -71,6 +71,40 @@
   background: repeating-linear-gradient(45deg, var(--bg-3) 0 3px, transparent 3px 6px);
   background-color: var(--bg-2);
 }
+
+/* Slider + editable-number combo for the toolbar's numeric setters (edge
+   weight, circle radius, text size) — see VectorToolbar's SliderNumber. */
+.vector-slider-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.vector-slider {
+  width: 64px;
+  accent-color: var(--accent);
+}
+.vector-slider-number {
+  background: var(--bg-2);
+  color: var(--text-normal);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+/* Custom color + alpha field (edge/outline, circle fill, text color) — see
+   VectorToolbar's ColorAlphaField. Replaces the old fixed swatch row: a
+   round color well plus a narrow opacity slider so any color, including a
+   fully transparent one, is reachable without a preset list. */
+.vector-color-alpha-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.vector-alpha-slider {
+  width: 40px;
+  accent-color: var(--accent);
+}
 /* display:contents keeps the fieldset itself out of the toolbar's flex
    layout — its children lay out exactly as if the fieldset weren't there —
    while still getting the free "disable everything inside" behavior when
@@ -82,20 +116,33 @@
   opacity: 0.4;
   pointer-events: none;
 }
-.vector-layers-panel {
-  position: absolute;
-  top: 48px;
-  right: 12px;
-  width: 220px;
-  max-height: min(60vh, 420px);
+
+/* Canvas + docked sidebars, side by side — replaces the old "panels float
+   on top of the canvas" layout so Layers and Description can both be open
+   and visible at the same time instead of stacking on top of each other. */
+.vector-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  overflow: hidden;
+}
+
+.vector-layers-panel,
+.vector-description-panel {
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-  z-index: 5;
+  border-left: 1px solid var(--border);
   overflow: hidden;
+}
+.vector-layers-panel {
+  width: 220px;
+}
+.vector-description-panel {
+  width: 320px;
 }
 .vector-layers-panel-header {
   display: flex;
@@ -142,21 +189,6 @@
   font-size: 12px;
   border-top: 1px solid var(--border);
   cursor: pointer;
-}
-.vector-description-panel {
-  position: absolute;
-  top: 48px;
-  right: 12px;
-  width: 320px;
-  max-height: min(70vh, 560px);
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-  z-index: 5;
-  overflow: hidden;
 }
 .vector-description-panel-header {
   display: flex;
@@ -291,6 +323,40 @@
 .vector-svg {
   display: block;
   user-select: none;
+}
+
+/* Reference/tracing images loaded from the vault (see the toolbar's image
+   button) — always faded (opacity set inline per REFERENCE_IMAGE_OPACITY)
+   and behind every layer. Only interactive via the select tool. */
+.vector-reference-image image,
+.vector-reference-image rect {
+  cursor: move;
+}
+.vector-reference-image-outline {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  pointer-events: none;
+}
+.vector-reference-image-handle {
+  fill: var(--accent);
+  stroke: var(--bg-0);
+  stroke-width: 1.5;
+  cursor: nwse-resize;
+}
+.vector-reference-image-toolbar {
+  position: absolute;
+  top: 52px;
+  left: 12px;
+  z-index: 6;
+}
+/* Two classes for higher specificity than .vector-selection-toolbar's own
+   top/right, since this one sits directly in .vector-view (not inside
+   .vector-surface) and needs a different anchor corner. */
+.vector-selection-toolbar.vector-reference-image-toolbar {
+  top: 52px;
+  left: 12px;
+  right: auto;
 }
 
 .vector-edge {

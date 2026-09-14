@@ -134,6 +134,37 @@ function resolvePlacement(doc, grid, rawPoint, zoom, snapToggles, opts = {}, sna
   return { nextDoc, vertexId: nextDoc._newVertexId, snap };
 }
 
+// ---------------------------------------------------------------------------
+// Color-with-alpha helpers for the toolbar's custom color fields (edge/
+// outline, circle fill, text). Colors are stored as plain strings —
+// '#rrggbb', '#rrggbbaa' (SVG/CSS both accept an 8-digit hex with an alpha
+// channel), or the literal 'transparent' — so these just move between that
+// stored string and the {hex6, alphaPct} shape a <input type="color"> plus
+// an alpha slider need. Pure, no editor-state closure, so they live here
+// alongside the rest of this file's UI-facing pure helpers.
+// ---------------------------------------------------------------------------
+function colorAlphaParts(color) {
+  if (!color || color === 'transparent') return { hex6: '#000000', alphaPct: 0 };
+  const raw = color.replace('#', '');
+  if (raw.length === 8) return { hex6: `#${raw.slice(0, 6)}`, alphaPct: Math.round((parseInt(raw.slice(6, 8), 16) / 255) * 100) };
+  if (raw.length === 6) return { hex6: `#${raw}`, alphaPct: 100 };
+  return { hex6: '#000000', alphaPct: 100 };
+}
+
+function withAlpha(hex6, alphaPct) {
+  const pct = clampPct(alphaPct);
+  if (pct <= 0) return 'transparent';
+  if (pct >= 100) return hex6;
+  const a = Math.round((pct / 100) * 255)
+    .toString(16)
+    .padStart(2, '0');
+  return `${hex6}${a}`;
+}
+
+function clampPct(n) {
+  return Math.max(0, Math.min(100, Number.isFinite(n) ? n : 100));
+}
+
 function bboxOf(vertices, ids) {
   const pts = vertices.filter((v) => ids.has(v.id));
   if (!pts.length) return null;
@@ -187,5 +218,7 @@ export {
   resolvePlacement,
   bboxOf,
   combinedBboxOf,
-  handleConfigsFor
+  handleConfigsFor,
+  colorAlphaParts,
+  withAlpha
 };
