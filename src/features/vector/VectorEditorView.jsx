@@ -8,7 +8,6 @@ import { parseFrontmatter } from '../../lib/markdownParse.js';
 import { CanvasFilePickerModal } from '../canvas/CanvasFilePickerModal.jsx';
 import { VectorToolbar } from './VectorToolbar.jsx';
 import {
-  AXIS_SNAP_PX,
   DEFAULT_CIRCLE_FILL,
   DEFAULT_CIRCLE_RADIUS,
   DEFAULT_STYLE,
@@ -451,18 +450,17 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     [customAxisSnapEnabled, doc.snapAxes]
   );
 
-  // Snaps a bare point (a circle's center — circles aren't part of the
-  // vertex/edge graph, so vertex/edge snapping doesn't apply to them, but
-  // a custom axis is still a meaningful reference line for one) onto the
-  // nearest custom axis line, if any is within threshold. Returns the
-  // point unchanged when there's nothing to snap to.
-  const snapPointToAxes = useCallback(
-    (point) => {
-      if (!customAxisLines) return point;
-      const snap = snapCandidate([], [], point, { grid: null, vertexPx: -1, edgePx: -1, axisPx: -1, linePx: AXIS_SNAP_PX / viewport.zoom, lines: customAxisLines });
-      return snap.lineSnapped ? snap.point : point;
-    },
-    [customAxisLines, viewport.zoom]
+  // Snaps a bare point (a circle's center) using the SAME priority a
+  // vertex drag gets — existing vertex, then a point on an existing edge,
+  // then a custom axis/alignment line — even though a circle isn't part
+  // of the vertex/edge graph itself (so, unlike a vertex landing on an
+  // edge, this never subdivides anything; it's a position snap only).
+  // Returns the full snap result (not just the point) so callers can also
+  // feed it to setSnapPreview and get the same guide-line/marker feedback
+  // a vertex drag shows.
+  const snapCirclePoint = useCallback(
+    (point) => snapCandidate(verticesForSnap, edgesForSnap, point, snapOpts(viewport.zoom, grid, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, { lines: customAxisLines })),
+    [verticesForSnap, edgesForSnap, viewport.zoom, grid, vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled, customAxisLines]
   );
 
   const scheduleLiveOverrides = useCallback((map, circleMap) => {
@@ -1105,7 +1103,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       return;
     }
     if (tool === 'circle') {
-      const center = snapPointToAxes(world);
+      const center = snapCirclePoint(world).point;
       dragRef.current = { mode: 'draw-circle', startWorld: center };
       setCircleDraft({ cx: center.x, cy: center.y, r: 0 });
       return;
@@ -1209,8 +1207,9 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       if (dist(drag.startWorld, world) > MOVE_THRESHOLD / viewport.zoom) drag.moved = true;
       const dx = world.x - drag.startWorld.x;
       const dy = world.y - drag.startWorld.y;
-      const center = snapPointToAxes({ x: drag.startCx + dx, y: drag.startCy + dy });
-      setCircleDraft({ id: drag.circleId, cx: center.x, cy: center.y });
+      const snap = snapCirclePoint({ x: drag.startCx + dx, y: drag.startCy + dy });
+      setSnapPreview(snap);
+      setCircleDraft({ id: drag.circleId, cx: snap.point.x, cy: snap.point.y });
       return;
     }
 
@@ -1379,7 +1378,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
       if (drag.moved && pointerWorld) {
         const dx = pointerWorld.x - drag.startWorld.x;
         const dy = pointerWorld.y - drag.startWorld.y;
-        const center = snapPointToAxes({ x: drag.startCx + dx, y: drag.startCy + dy });
+        const center = snapCirclePoint({ x: drag.startCx + dx, y: drag.startCy + dy }).point;
         commitState(moveCircles(doc, new Map([[drag.circleId, center]])));
       }
       return;
