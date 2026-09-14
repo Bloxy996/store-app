@@ -3,6 +3,7 @@ import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { InlineMentions } from '../../components/InlineMentions.jsx';
 import { PropertiesPanel } from '../../components/PropertiesPanel.jsx';
 import { AssetPane } from '../assets/AssetPane.jsx';
+import { SparkFileMentions } from '../sparks/SparkFileMentions.jsx';
 import { CodeMirrorNoteEditor } from './CodeMirrorNoteEditor.jsx';
 import { NoteTitleField } from './NoteTitleField.jsx';
 import { parseFrontmatter } from '../../lib/markdownParse.js';
@@ -234,6 +235,7 @@ function EditorContent({ file, content, onChange, linkIndex, phantomRecords, han
           <NoteTitleField file={file} onRename={handlers.onRenameFile} />
           <PropertiesPanel properties={properties} handlers={handlers} linkIndex={linkIndex} />
           {renderMarkdownBlocks(body, readingHandlers, linkIndex, '', foldState)}
+          <SparkFileMentions fileId={file.id} sparksByFileId={handlers.sparksByFileId} onOpenSparksForFile={handlers.onOpenSparksForFile} />
           <InlineMentions
             file={linkIndex.records.find((r) => r.id === file.id) || file}
             linkIndex={linkIndex}

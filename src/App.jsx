@@ -5,7 +5,7 @@ import { ActivityBar } from './components/ActivityBar.jsx';
 import { ResizeHandle } from './components/ResizeHandle.jsx';
 import { StatusBar } from './components/StatusBar.jsx';
 import { useAppUpdate } from './hooks/useAppUpdate.js';
-import { IconCanvasKind, IconDatabase, IconEye, IconFilePlus, IconFolder, IconFolderPlus, IconGraph, IconHelp, IconLogOut, IconPalette, IconPanelLeft, IconRefresh, IconSearch, IconSettings, IconSliders, IconSplitHorizontal, IconSplitVertical, IconStar, IconTag, IconVectorKind } from './components/icons.jsx';
+import { IconCanvasKind, IconDatabase, IconEye, IconFilePlus, IconFolder, IconFolderPlus, IconGraph, IconHelp, IconLogOut, IconPalette, IconPanelLeft, IconRefresh, IconSearch, IconSettings, IconSliders, IconSplitHorizontal, IconSplitVertical, IconStar, IconTag, IconVectorKind, IconZap } from './components/icons.jsx';
 import { AccentColorPicker } from './features/accent/AccentColorPicker.jsx';
 import { useAccentColor } from './features/accent/accentColor.js';
 import { BookmarksPanel } from './features/bookmarks/BookmarksPanel.jsx';
@@ -21,6 +21,8 @@ import { PopoutNotePane } from './features/panes/PopoutNotePane.jsx';
 import { PopoutWindow } from './features/panes/PopoutWindow.jsx';
 import { SearchPanel } from './features/search/SearchPanel.jsx';
 import { ExplorerPanel } from './features/sidebar/ExplorerPanel.jsx';
+import { SparksPanel } from './features/sparks/SparksPanel.jsx';
+import { useSparks } from './hooks/useSparks.js';
 import { TagsPanel } from './features/tags/TagsPanel.jsx';
 import { TocPanel } from './features/toc/TocPanel.jsx';
 import { useBackendAuth, useProxyAuth } from './hooks/useAuth.js';
@@ -91,6 +93,8 @@ export default function App() {
   const offline = useOfflineSync(token, folder, sync);
   const appUpdate = useAppUpdate();
   const vaultIndex = useVaultIndex(token, sync.filesMeta);
+  const sparks = useSparks(token, folder, sync);
+  const [sparkFocusFileId, setSparkFocusFileId] = useState(null);
 
   // buffers: fileId -> { content, dirty, saving, loading, loadError }
   const [buffers, setBuffers] = useState({});
@@ -107,8 +111,23 @@ export default function App() {
   // both editing the exact same shared `buffers` entry.
   const [poppedOutFileIds, setPoppedOutFileIds] = useState(() => new Set());
 
-  const [activeSideView, setActiveSideView] = useState('explorer'); // explorer | search | tags | bookmarks
+  const [activeSideView, setActiveSideView] = useState('explorer'); // explorer | search | tags | sparks | bookmarks
   const [mobileDockOpen, setMobileDockOpen] = useState(false);
+  const [quickSparkRequested, setQuickSparkRequested] = useState(false);
+
+  // Deep link for the Android home-screen widget's quick-capture button
+  // (see android/README.md): opening `#/spark-quick-add` jumps straight to
+  // the Sparks panel with the capture form already open and focused. Runs
+  // once folder/sync are ready so the panel it's opening into actually
+  // exists; clears the hash so a later in-app reload doesn't re-trigger it.
+  useEffect(() => {
+    if (!folder || folderRestoring) return;
+    if (window.location.hash !== '#/spark-quick-add') return;
+    setActiveSideView('sparks');
+    setMobileDockOpen(true);
+    setQuickSparkRequested(true);
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+  }, [folder, folderRestoring]);
   const [sideDockWidth, setSideDockWidth] = useState(280);
   const [searchQuery, setSearchQuery] = useState('');
   const [bookmarks, setBookmarks] = useState(new Set());
@@ -1142,7 +1161,13 @@ export default function App() {
       ensureVaultIndexed: vaultIndex.ensureIndexed,
       vaultIndexReady: vaultIndex.ready,
       vaultIndexProgress: vaultIndex.progress,
-      getBody: vaultIndex.getBody
+      getBody: vaultIndex.getBody,
+      sparksByFileId: sparks.sparksByFileId,
+      onOpenSparksForFile: (fileId) => {
+        setSparkFocusFileId(fileId);
+        setActiveSideView('sparks');
+        setMobileDockOpen(true);
+      }
     }),
     [
       token,
@@ -1159,7 +1184,8 @@ export default function App() {
       vaultIndex.ensureIndexed,
       vaultIndex.ready,
       vaultIndex.progress,
-      vaultIndex.getBody
+      vaultIndex.getBody,
+      sparks.sparksByFileId
     ]
   );
 
@@ -1347,6 +1373,22 @@ export default function App() {
                 indexing={vaultIndex}
                 ensureIndexed={vaultIndex.ensureIndexed}
                 indexVersion={vaultIndex.version}
+              />
+            )}
+            {activeSideView === 'sparks' && (
+              <SparksPanel
+                token={token}
+                sparks={sparks.sparks}
+                categoryTree={sparks.categoryTree}
+                busy={sparks.busy}
+                addSparkCapture={sparks.addSparkCapture}
+                deleteSpark={sparks.deleteSpark}
+                filesMeta={sync.filesMeta}
+                getBody={vaultIndex.getBody}
+                onOpenNote={(id) => openFileInPane(activePaneId, id)}
+                focusFileId={sparkFocusFileId}
+                onClearFocusFile={() => setSparkFocusFileId(null)}
+                autoOpenCapture={quickSparkRequested}
               />
             )}
             {activeSideView === 'toc' && (

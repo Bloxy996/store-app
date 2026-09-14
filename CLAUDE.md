@@ -25,8 +25,10 @@ installable PWA, deployed as a static site on GitHub Pages.
   `@codemirror/commands`, `@codemirror/autocomplete`) driving a live
   "WYSIWYG-ish" markdown editor — see `features/editor/`.
 - **Storage:** Google Drive REST API (`drive.file` scope) is the *only*
-  persistence layer. No app backend, no app database. IndexedDB and an
-  in-memory `Map` are used purely as caches (section 3.1).
+  persistence layer for vault content. A small backend (`server/`) exists
+  purely as an OAuth/session relay — it holds no vault data of its own and
+  is not a database; see `server/README.md`. IndexedDB and an in-memory
+  `Map` are used purely as caches (section 3.1).
 - **Auth:** Google Identity Services (OAuth token client) loaded via
   `<script>` in `index.html`, wrapped by `hooks/useAuth.js`. An
   alternative "proxy" auth mode also exists for an Apps-Script-relay
@@ -36,6 +38,13 @@ installable PWA, deployed as a static site on GitHub Pages.
 - **Styling:** plain CSS, one stylesheet per component/feature (section
   5), no CSS-in-JS, no Tailwind, no CSS modules. Global tokens (`--bg-1`,
   `--accent`, `--font-mono`, etc.) live in `styles/theme.css`.
+- **Android companion:** `android/` — a separate, standalone Gradle
+  project (own build, not part of the Vite build or the GitHub Pages
+  deploy workflow) providing THREE deep-link entry points into this same
+  PWA (a home-screen widget, a Quick Settings tile, and a floating button
+  via Android's Accessibility Button system — section 3.9), none of
+  which are a required part of using the app. Not a native rewrite of
+  the app.
 
 Don't propose swapping any of the above without a concrete, stated reason.
 
@@ -216,6 +225,71 @@ the same boat as `App.jsx`: the remainder is one stateful pointer-
 handling/rendering component, not boilerplate — same one-hook-at-a-time
 caution applies before cutting it further.
 
+### 3.8 Internal (non-vault) data lives in `.store/`, and is never a normal file
+
+Sparks (section 3.9) needed somewhere to keep its own small dataset
+*inside* the user's Drive vault folder — same account, same permission
+grant, no new consent flow — without it being a browsable note. The
+convention, if anything else needs this later: a root-level Drive folder
+named `.store` (see `lib/sparkStore.js`'s `SPARK_FOLDER_NAME`), stripped out
+of `foldersMeta`/`filesMeta` by `splitInternalVaultData` at the one point
+`useVaultSync.js` sets that state — not filtered per-consumer. That single
+strip point is what keeps it out of the file tree, search, tags, and the
+wikilink graph without every one of those needing to know it exists.
+Don't add a second internal folder without a real reason; put unrelated
+internal data in `.store/` too (a subfolder, not a sibling root folder) so
+there's one strip point, not several.
+
+### 3.9 Sparks — quick one-line captures
+
+A "spark" is a one-line note (optionally with a screenshot + caption)
+filed under a nested category (`vehicles/boat/small`, same slash
+convention as tags) and optionally linked to one or more vault
+files. Deliberately NOT a vault note: no frontmatter, no markdown body,
+can't be opened in the editor — it's meant to be captured in a couple of
+seconds, not written.
+
+- **Storage:** `.store/spark.txt` — one spark per line, tab-separated
+  (`lib/sparkStore.js`'s `parseSparkFile`/`serializeSparkFile`). Plain
+  text on purpose, not JSON: a spark's own text is inherently one line, so
+  the format doubles as the validation (anything that would break the
+  one-line-per-record invariant gets stripped on save), and it stays
+  readable/appendable without a JSON parser if anything outside this app
+  ever needs to write to it directly.
+- **Screenshots** are uploaded as ordinary image files into
+  `.store/spark-attachments/` (via the existing `driveUploadBinary` —
+  same as any other vault image upload); `spark.txt` only stores the
+  resulting file id, same "large content lives in its own file, RAM/UI
+  layers hold ids or on-demand blob URLs" split as everything else in
+  3.1.
+- **Own hook, not folded into useVaultSync:** `hooks/useSparks.js` reads
+  `internalFolder`/`internalFiles` off `useVaultSync`'s return value and
+  does its own load/save — it doesn't participate in the main sync loop's
+  diffing/caching at all (small file, no debounce needed, saved in full
+  on every change). Lazily creates `.store/` and `spark.txt` on the first
+  capture, not eagerly.
+- **UI:** `features/sparks/SparksPanel.jsx` (category browse, mirrors
+  `TagsPanel.jsx`) + `SparkCaptureForm.jsx` (the actual capture UI —
+  category autocomplete, multi-line text where each line becomes its own
+  spark, screenshot attach, and a note linker built on
+  `lib/search.js`'s `searchNotesForLink`). The capture form is the single
+  shared component behind the inline "+" in the panel AND the
+  `#/spark-quick-add` deep link every Android entry point opens — no
+  native capture UI exists anywhere in `android/`, all three of its
+  pieces (home-screen widget, Quick Settings tile, and a floating button
+  via Android's own Accessibility Button system) fire a plain
+  `ACTION_VIEW` intent at that one URL and let whatever resolves it (the
+  browser, or the installed PWA if it's set as the verified handler) open
+  to the exact same signed-in session and the exact same form as using
+  the app normally. See `android/README.md` for all three and why the
+  accessibility-button approach — not a self-drawn `WindowManager`
+  overlay — was chosen for the floating piece (system-drawn, no
+  `SYSTEM_ALERT_WINDOW`/foreground-service/notification cost).
+- **Note-side indicator:** `features/sparks/SparkFileMentions.jsx`, shown
+  in reading view alongside `InlineMentions`, and its click target
+  (`handlers.onOpenSparksForFile`) filters the Sparks panel down to that
+  file instead of by category.
+
 ## 4. Mobile performance & bundle size
 
 Ongoing priority: this app should feel fast and light on a phone, not
@@ -287,6 +361,7 @@ src/
     paneTree.js                     — split-pane tree math
     frontmatterSchema.js            — customizable frontmatter property schema (3.4)
     offlineRules.js                 — live offline-root expansion and conflict-copy names
+    sparkStore.js                   — spark.txt parse/serialize, category tree, internal-folder split (3.8/3.9)
     mathUtils.js                    — clamp
 
   hooks/
@@ -298,6 +373,7 @@ src/
     useFrontmatterSchema.js         — persisted frontmatter schema state
     useAppUpdate.js                 — wraps vite-plugin-pwa's useRegisterSW; surfaces "update available"
     useOfflineSync.js               — opt-in offline cache, sync, and conflict model
+    useSparks.js                    — spark.txt load/save/create/delete, own lazy folder/file creation (3.9)
 
   components/                       — Generic, reusable View pieces (3.5)
     icons.jsx                       — every <Icon*/> in the app
@@ -316,6 +392,7 @@ src/
     sidebar/        ExplorerPanel.jsx / .css, sidebar.css
     search/         SearchPanel.jsx / .css
     tags/           TagsPanel.jsx / .css
+    sparks/         SparksPanel.jsx, SparkCaptureForm.jsx, SparkFileMentions.jsx, sparks.css (3.9)
     bookmarks/      BookmarksPanel.jsx
     toc/            TocPanel.jsx
     panes/          PaneNode.jsx / .css (recursive split-pane + LeafPane), TabBar.jsx / .css, PaneHeader.css
@@ -371,6 +448,14 @@ src/
     layout.css                     — app shell grid
     modal.css                      — shared centered-modal-overlay look (still used by Palette/Help/Onboarding/FrontmatterSchemaSettings/CanvasFilePickerModal)
     responsive.css                 — mobile breakpoints (kept as one file; import order matters, see index.css)
+
+android/                             — separate Gradle project (3.9's widget/tile/accessibility-button), not part of the Vite build
+  README.md                          — build/install instructions, what each of the 3 pieces costs
+  app/src/main/kotlin/.../SparkConfig.kt               — the one shared SPARK_CAPTURE_URL constant
+  app/src/main/kotlin/.../SparkWidgetProvider.kt        — home-screen widget (no deps, no permissions)
+  app/src/main/kotlin/.../SparkTileService.kt           — Quick Settings tile, opens the capture form directly
+  app/src/main/kotlin/.../SparkAccessibilityService.kt  — floating button via Android's Accessibility Button (system-drawn, no overlay permission/foreground service)
+  app/src/main/res/                  — widget layout, icon, strings, spark_widget_info.xml, accessibility_service_config.xml
 ```
 
 A CSS file next to a component/feature file with the same name is that

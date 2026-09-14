@@ -5,3 +5,14 @@ dist/
 reader/context.txt
 reader/aggregated.txt
 node_modules
+
+# android/ — standalone Gradle project, own build outputs/local config
+android/.gradle/
+android/local.properties
+android/**/build/
+android/.idea/
+android/*.iml
+android/**/*.iml
+android/captures/
+android/**/*.apk
+android/**/*.aab

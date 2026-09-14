@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      That's the whole permission list. Neither the widget nor the tile
+      nor the accessibility-button service need anything of their own —
+      the OS resolves ACTION_VIEW, and the accessibility button is drawn
+      and positioned by the system, not by this app (SYSTEM_ALERT_WINDOW
+      and a foreground service were needed by an earlier, self-drawn
+      overlay design; both are gone now that the accessibility button
+      does that job instead — see android/README.md).
+    -->
+
+    <application
+        android:allowBackup="false"
+        android:icon="@drawable/ic_spark"
+        android:label="@string/app_name"
+        android:supportsRtl="true">
+
+        <!--
+          android:exported="true" is required here (and enforced since
+          Android 12) because the widget host — the launcher — is what
+          fires the APPWIDGET_UPDATE broadcast this receiver listens for;
+          it's not a general-purpose exported surface, it only reacts to
+          that one system broadcast (see SparkWidgetProvider.kt).
+        -->
+        <receiver
+            android:name=".SparkWidgetProvider"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/spark_widget_info" />
+        </receiver>
+
+        <!--
+          Quick Settings tile — a plain "open the capture form" shortcut.
+          Must be exported + BIND_QUICK_SETTINGS_TILE-protected (system
+          enforced, not a user-facing permission) for the shade to bind
+          to it at all.
+        -->
+        <service
+            android:name=".SparkTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_spark"
+            android:label="@string/tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!--
+          The floating bubble: Android's own accessibility-button system.
+          BIND_ACCESSIBILITY_SERVICE is system-enforced (only the OS may
+          bind to it), and the config below requests ONLY the
+          accessibility button — no window-content reading, no gesture
+          capture (see accessibility_service_config.xml).
+        -->
+        <service
+            android:name=".SparkAccessibilityService"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+    </application>
+</manifest>

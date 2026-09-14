@@ -6,6 +6,7 @@ import { driveGetFileContent, driveListFolderTree, driveListVaultContentInFolder
 import { idbDeleteMany, idbGetAll, idbPut, idbPutMany } from '../lib/indexedDb.js';
 import { buildBacklinkIndex, buildLinkIndex, fuzzyScore } from '../lib/linkGraph.js';
 import { parseWikilinks } from '../lib/markdownParse.js';
+import { splitInternalVaultData } from '../lib/sparkStore.js';
 import { FETCH_CONCURRENCY, STORE_FILES, STORE_FOLDERS, STORE_LINKS } from '../lib/vaultConfig.js';
 
 
@@ -21,6 +22,14 @@ import { FETCH_CONCURRENCY, STORE_FILES, STORE_FOLDERS, STORE_LINKS } from '../l
 function useVaultSync(token, folder) {
   const [filesMeta, setFilesMeta] = useState([]); // notes AND images
   const [foldersMeta, setFoldersMeta] = useState([]);
+  // The vault's internal `.store/` folder (spark.txt + attachments) and its
+  // contents — deliberately kept OUT of filesMeta/foldersMeta above (and
+  // out of the IndexedDB cache below) so it never reaches the file tree,
+  // search, tags, or the wikilink graph. useSparks.js reads these two
+  // instead of doing its own separate Drive folder listing. See
+  // splitInternalVaultData (lib/sparkStore.js).
+  const [internalFolder, setInternalFolder] = useState(null);
+  const [internalFiles, setInternalFiles] = useState([]);
   const [linksByFileId, setLinksByFileId] = useState(new Map());
   const [backlinkIndex, setBacklinkIndex] = useState(new Map());
   const [syncing, setSyncing] = useState(false);
@@ -58,11 +67,14 @@ function useVaultSync(token, folder) {
       ]);
       if (cancelled) return;
       const linksMap = new Map(cachedLinks.map((l) => [l.fileId, l.links]));
-      const index = buildLinkIndex(cachedFiles, cachedFolders, folder.id);
-      setFilesMeta(cachedFiles);
-      setFoldersMeta(cachedFolders);
+      const split = splitInternalVaultData(cachedFolders, cachedFiles, folder.id);
+      const index = buildLinkIndex(split.files, split.folders, folder.id);
+      setFilesMeta(split.files);
+      setFoldersMeta(split.folders);
+      setInternalFolder(split.internalFolder);
+      setInternalFiles(split.internalFiles);
       setLinksByFileId(linksMap);
-      recomputeBacklinks(cachedFiles, linksMap, index);
+      recomputeBacklinks(split.files, linksMap, index);
       setCacheLoaded(true);
     })();
     return () => {
@@ -76,11 +88,24 @@ function useVaultSync(token, folder) {
     setSyncError('');
     try {
       setSyncProgress({ phase: 'listing-folders', loaded: 0, total: 0 });
-      const remoteFolders = await driveListFolderTree(token, folder.id);
-      const folderIds = [folder.id, ...remoteFolders.map((f) => f.id)];
+      const rawRemoteFolders = await driveListFolderTree(token, folder.id);
+      const folderIds = [folder.id, ...rawRemoteFolders.map((f) => f.id)];
 
       setSyncProgress({ phase: 'listing-files', loaded: 0, total: 0 });
-      const remoteFiles = await driveListVaultContentInFolders(token, folderIds);
+      const rawRemoteFiles = await driveListVaultContentInFolders(token, folderIds);
+
+      // folderIds (above) deliberately still included the internal `.store/`
+      // folder, so its contents got listed in that one query — but every
+      // downstream step from here on uses these split-out, public-only
+      // lists, so `.store/` never touches the normal tree/search/link-graph
+      // pipeline or the IndexedDB cache below. useSparks.js reads
+      // `internalFolder`/`internalFiles` directly off this hook's return
+      // value instead of doing its own separate Drive listing.
+      const split = splitInternalVaultData(rawRemoteFolders, rawRemoteFiles, folder.id);
+      const remoteFolders = split.folders;
+      const remoteFiles = split.files;
+      setInternalFolder(split.internalFolder);
+      setInternalFiles(split.internalFiles);
 
       // Transient cache: previously seen metadata + derived link graph.
       const [cachedFiles, cachedLinks] = await Promise.all([idbGetAll(STORE_FILES), idbGetAll(STORE_LINKS)]);
@@ -332,7 +357,9 @@ function useVaultSync(token, folder) {
     registerNewFolder,
     renameFolder,
     removeFolder,
-    resetVault
+    resetVault,
+    internalFolder,
+    internalFiles
   };
 }
 

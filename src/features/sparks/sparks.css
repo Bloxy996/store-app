@@ -1,0 +1,233 @@
+/* ---------------------------------------------------------------------------
+   Sparks — quick captures panel + inline capture form
+--------------------------------------------------------------------------- */
+.side-panel-count {
+  margin-left: auto;
+  margin-right: 6px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.spark-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.spark-capture-panel {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-2);
+}
+
+.spark-capture-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.spark-field-wrap {
+  position: relative;
+}
+
+.spark-input,
+.spark-textarea {
+  width: 100%;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-normal);
+  font: inherit;
+  padding: 7px 9px;
+  box-sizing: border-box;
+}
+
+.spark-input:focus,
+.spark-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.spark-textarea {
+  resize: vertical;
+  line-height: 1.4;
+}
+
+.spark-suggest-panel {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+  padding: 4px;
+}
+
+.spark-linked-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.spark-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--accent-soft);
+  color: var(--text-normal);
+  border: none;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  max-width: 100%;
+}
+
+.spark-chip button {
+  display: inline-flex;
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 0;
+  margin-left: 2px;
+}
+
+.spark-screenshot-preview {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.spark-screenshot-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spark-screenshot-preview button {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.spark-capture-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.spark-file-input-hidden {
+  display: none;
+}
+
+.spark-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.spark-focus-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--accent-soft);
+  color: var(--text-normal);
+  font-size: 12px;
+}
+
+.spark-category-list,
+.spark-list {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.spark-row {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  align-items: flex-start;
+}
+
+.spark-row-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.spark-row-text {
+  color: var(--text-normal);
+  font-size: 13px;
+  word-break: break-word;
+}
+
+.spark-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.spark-row-category {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.spark-delete-btn {
+  flex-shrink: 0;
+  color: var(--text-faint);
+}
+
+.spark-delete-btn:hover {
+  color: var(--text-normal);
+}
+
+.spark-thumb {
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+  border-radius: 4px;
+  flex-shrink: 0;
+  background: var(--bg-3);
+}
+
+.spark-thumb-loading {
+  opacity: 0.5;
+}
+
+/* Note-side "N sparks link here" indicator (reading view) */
+.spark-file-mentions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 16px 0 0;
+  padding: 6px 10px;
+  background: var(--accent-soft);
+  border: none;
+  border-radius: 6px;
+  color: var(--text-normal);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.spark-file-mentions:hover {
+  background: var(--accent-hover);
+  color: var(--bg-0);
+}

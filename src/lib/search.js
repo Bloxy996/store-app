@@ -168,4 +168,44 @@ function snippetAround(haystack, needle, radius = 60) {
   };
 }
 
-export { parseSearchQuery, runVaultSearch, snippetAround };
+// Lightweight note finder for the Sparks capture form's "link to a
+// note/file" picker — matches title, frontmatter (raw block text, so both
+// keys and values count), and body content, in that priority order. Kept
+// separate from runVaultSearch/parseSearchQuery: that pipeline is built
+// around Obsidian-style structural query syntax (path:/tag:/[key:value]/…)
+// for the Search panel, where a bare term only matches content — this is a
+// deliberately dumber single-box substring match, which is what "search
+// through title, frontmatter, and contents" (asked for verbatim) means for
+// a quick picker, not a query language.
+function searchNotesForLink(query, filesMeta, getBody, limit = 20) {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const results = [];
+  for (const f of filesMeta) {
+    if (f.kind !== 'note') continue;
+    const body = getBody(f.id) || '';
+    const { frontmatterText, rest } = splitFrontmatterText(body);
+    const titleHit = f.name.toLowerCase().includes(q);
+    const frontmatterHit = frontmatterText.toLowerCase().includes(q);
+    const contentHit = rest.toLowerCase().includes(q);
+    if (!titleHit && !frontmatterHit && !contentHit) continue;
+    // Title match ranks best, then frontmatter, then plain content —
+    // matches the priority order the feature was asked for.
+    const rank = titleHit ? 0 : frontmatterHit ? 1 : 2;
+    results.push({ file: f, rank });
+  }
+  results.sort((a, b) => a.rank - b.rank || a.file.name.localeCompare(b.file.name));
+  return results.slice(0, limit).map((r) => r.file);
+}
+
+// The leading `---\n...\n---` block as raw text (for substring matching
+// above) plus everything after it. Doesn't need parseFrontmatter's
+// key/value structure — a plain substring test over the raw block covers
+// both keys and values in one pass.
+function splitFrontmatterText(body) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(body);
+  if (!m) return { frontmatterText: '', rest: body };
+  return { frontmatterText: m[1], rest: body.slice(m[0].length) };
+}
+
+export { parseSearchQuery, runVaultSearch, snippetAround, searchNotesForLink };

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Store Sparks</string>
+    <string name="widget_label">+ Spark</string>
+    <string name="tile_label">Add spark</string>
+    <string name="accessibility_service_description">Adds a floating accessibility button that opens the Store app\'s quick spark-capture form. Reads no screen content — it only listens for the button being tapped.</string>
+</resources>
