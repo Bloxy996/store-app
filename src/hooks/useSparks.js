@@ -8,9 +8,11 @@ import {
   buildSparkCategoryTree,
   buildSparksByFileId,
   buildSparksFromCapture,
+  makeSparkId,
   parseSparkFile,
   serializeSparkFile
 } from '../lib/sparkStore.js';
+import { insertStatementsSorted } from '../lib/statementSort.js';
 
 // ---------------------------------------------------------------------------
 // Sparks — RAM-only, same "content lives in memory for the session, Drive
@@ -151,6 +153,48 @@ function useSparks(token, folder, sync) {
     [sparks, persist]
   );
 
+  const insertSortedStatements = useCallback(
+    async (category, rawText, weights) => {
+      setBusy(true);
+      setError('');
+      try {
+        const positions = [];
+        sparks.forEach((s, i) => {
+          if (s.category === category) positions.push(i);
+        });
+        const existingPhrases = positions.map((i) => sparks[i].text);
+        const { phrases: nextPhrases, report } = insertStatementsSorted(existingPhrases, rawText, weights);
+
+        const now = Date.now();
+        const byText = new Map(positions.map((i) => [sparks[i].text, sparks[i]]));
+        const nextRecords = nextPhrases.map((text) => {
+          const existing = byText.get(text);
+          if (existing) return existing;
+          return { id: makeSparkId(), createdAt: now, category, linkedFileIds: [], screenshotFileId: '', text };
+        });
+
+        const firstPos = positions.length ? positions[0] : sparks.length;
+        const withoutCategory = [];
+        let insertAt = 0;
+        sparks.forEach((s, i) => {
+          if (s.category === category) return;
+          if (i < firstPos) insertAt++;
+          withoutCategory.push(s);
+        });
+        const nextSparks = [...withoutCategory.slice(0, insertAt), ...nextRecords, ...withoutCategory.slice(insertAt)];
+
+        await persist(nextSparks);
+        return report;
+      } catch (err) {
+        setError(err.message || 'Failed to sort statements');
+        throw err;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [sparks, persist]
+  );
+
   const categoryTree = useMemo(() => buildSparkCategoryTree(sparks), [sparks]);
   const sparksByFileId = useMemo(() => buildSparksByFileId(sparks), [sparks]);
 
@@ -161,6 +205,7 @@ function useSparks(token, folder, sync) {
     error,
     addSparkCapture,
     deleteSpark,
+    insertSortedStatements,
     categoryTree,
     sparksByFileId
   };

@@ -1,0 +1,102 @@
+.reader-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 12px;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.reader-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.reader-section:last-child {
+  border-bottom: none;
+}
+
+.reader-section-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.reader-section-title-spaced {
+  margin-top: 6px;
+}
+
+.reader-hint {
+  margin: 0 0 4px;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.reader-filter-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.reader-input {
+  flex: 1;
+  min-width: 120px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-normal);
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+.reader-actions-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.reader-status {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.reader-output,
+.reader-textarea {
+  width: 100%;
+  resize: vertical;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-normal);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 8px;
+}
+
+.reader-output {
+  height: 160px;
+}
+
+.reader-log {
+  height: auto;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.reader-log-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.reader-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
