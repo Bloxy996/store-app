@@ -1,501 +1,243 @@
 # CLAUDE.md
 
-This file is read automatically by Claude Code at the start of every session
-in this repository. It exists so that decisions and conventions don't have
-to be re-explained. Treat everything in this file as standing project
-context, not suggestions to reconsider. Historical changelog entries have
-been moved out of this file (see `TODO.md` for open work) — this file now
-holds only durable, still-true architecture facts.
+Read automatically by Claude Code at the start of every session here.
+Holds durable architecture facts so they don't need re-explaining.
+Historical changelog entries live in `TODO.md`, not here.
 
 ## 1. What this project is
 
-**store** (lowercase, always) — a file store that reads and writes `.md`
-notes (and `.base` database, `.canvas` board, `.vec` vector art) files
-directly to and from
-the user's Google Drive. Client-only React SPA (no backend server, no
-database of its own), runs entirely in the browser, packaged as an
-installable PWA, deployed as a static site on GitHub Pages.
+**store** (lowercase) — a note/file app that reads and writes `.md` notes
+(and `.base` database, `.canvas` board, `.vec` vector art files) to the
+user's Google Drive. React SPA + PWA, deployed to GitHub Pages, backed by
+a real Node/Express server (`server/`). The backend is not limited to
+being an OAuth relay — it's a normal app server and fair game for new
+routes, server-side logic, caching, or anything else that's a better fit
+there than in the browser.
 
-## 2. Tech stack (decided, not open questions)
+## 2. Tech stack
 
-- **Framework:** React 18 + Vite. Plain client-rendered SPA — no
-  Next.js/Remix/SSR. `vite-plugin-pwa` handles the service worker and
-  manifest.
-- **Editor:** CodeMirror 6 (`@codemirror/state`, `@codemirror/view`,
-  `@codemirror/commands`, `@codemirror/autocomplete`) driving a live
-  "WYSIWYG-ish" markdown editor — see `features/editor/`.
-- **Storage:** Google Drive REST API (`drive.file` scope) is the *only*
-  persistence layer for vault content. A small backend (`server/`) exists
-  purely as an OAuth/session relay — it holds no vault data of its own and
-  is not a database; see `server/README.md`. IndexedDB and an in-memory
-  `Map` are used purely as caches (section 3.1).
-- **Auth:** Google Identity Services (OAuth token client) loaded via
-  `<script>` in `index.html`, wrapped by `hooks/useAuth.js`. An
-  alternative "proxy" auth mode also exists for an Apps-Script-relay
-  deployment path — see `lib/driveApi.js`'s `isProxy`/`proxy*` functions.
-- **Hosting:** GitHub Pages via GitHub Actions (`vite.config.js` derives
-  the `/<repo>/` base path from `GITHUB_REPOSITORY`).
+- **Frontend:** React 18 + Vite, client-rendered (no SSR).
+  `vite-plugin-pwa` handles the service worker/manifest.
+- **Editor:** CodeMirror 6, driving a live "WYSIWYG-ish" markdown editor
+  (`features/editor/`).
+- **Storage:** Google Drive REST API (`drive.file` scope) holds vault
+  content. IndexedDB and an in-memory `Map` are used as caches (3.1).
+- **Backend (`server/`):** Node/Express. Currently holds the OAuth
+  refresh token server-side and proxies `/api/drive/*` calls for the
+  frontend (session-cookie authed — see `server/README.md`). This is its
+  current job, not a ceiling on its job — extend it for anything that
+  benefits from running server-side.
+- **Auth:** Google Identity Services via the backend's authorization-code
+  flow (`hooks/useAuth.js`). An older client-only "proxy" mode (Apps
+  Script relay) also still exists — `lib/driveApi.js`'s
+  `isProxy`/`proxy*` functions.
+- **Hosting:** Frontend on GitHub Pages via GitHub Actions; backend on
+  any Node host (Render etc., see `server/README.md`).
 - **Styling:** plain CSS, one stylesheet per component/feature (section
-  5), no CSS-in-JS, no Tailwind, no CSS modules. Global tokens (`--bg-1`,
-  `--accent`, `--font-mono`, etc.) live in `styles/theme.css`.
-- **Android companion:** `android/` — a separate, standalone Gradle
-  project (own build, not part of the Vite build or the GitHub Pages
-  deploy workflow) providing THREE deep-link entry points into this same
-  PWA (a home-screen widget, a Quick Settings tile, and a floating button
-  via Android's Accessibility Button system — section 3.9), none of
-  which are a required part of using the app. Not a native rewrite of
-  the app.
+  5). Global tokens in `styles/theme.css`.
+- **Android companion:** `android/` — standalone Gradle project, three
+  deep-link entry points (home-screen widget, Quick Settings tile,
+  accessibility-button floating button) into the same PWA. Not a native
+  rewrite.
 
-Don't propose swapping any of the above without a concrete, stated reason.
+## 3. Architecture notes
 
-## 3. Non-negotiable architecture principles
+### 3.1 Local storage of note content
 
-### 3.1 Local note storage: zero by default, one scoped opt-in exception
+Historically this app avoided writing note content to disk except when a
+file/folder is marked "Available offline" (`hooks/useOfflineSync.js`,
+`lib/offlineRules.js`, the `STORE_OFFLINE_NOTES`/`STORE_OFFLINE_ASSETS`
+IndexedDB stores). That's still the default behavior, but it's a design
+choice, not a hard constraint — if a feature benefits from caching more
+(content-derived data, prefetching, offline-first behavior beyond the
+current opt-in, server-side caching in `server/`) go ahead, just keep
+`hooks/useOfflineSync.js`'s unsynced-edit warning working for offline
+files so people don't silently lose local edits. App settings
+(accent color, frontmatter schema, graph view settings) live in
+`localStorage`.
 
-Note **content** is never written to disk on this device *unless the user
-has explicitly marked that file, or a folder containing it, "Available
-offline."* Outside that opt-in, content lives only in React state /
-in-memory caches for as long as the tab is open, and is streamed to/from
-Drive over the REST API. IndexedDB (`lib/indexedDb.js`) is used as a
-transient cache for (a) file metadata / `modifiedTime`, (b) the derived
-wikilink graph, and (c) — the one exception — the body of any file
-currently covered by an offline rule (`STORE_OFFLINE_NOTES` /
-`STORE_OFFLINE_ASSETS`, owned exclusively by `hooks/useOfflineSync.js`,
-rules resolved by `lib/offlineRules.js`). Never `idbPut` a note body
-outside that one path. Clearing IndexedDB never loses data **except** for
-offline files with unsynced edits made while disconnected — the app must
-warn before clearing in that case (see `useOfflineSync.js`'s
-`hasUnsyncedOfflineEdits`). Image bytes follow the zero-storage rule
-(`hooks/useDriveImageUrl.js` — fetched on demand, in-memory blob URLs
-only) unless that same image's file is itself covered by an offline rule,
-in which case its bytes live in `STORE_OFFLINE_ASSETS` as a read-only
-cache (no offline editing of binary assets — no dirty/conflict state for
-that store). The full-text search/tag index (`hooks/useVaultIndex.js`)
-is unaffected: still RAM-only, still rebuilt from whatever content is
-available (Drive when online, the offline cache when not).
+### 3.2 Drive access layer
 
-**Any new feature that touches note content must go through this same
-discipline.** Cache derived-from-content data in a `useRef`/module-scope
-`Map` (RAM), or don't cache it — with the single exception above, never
-`idbPut` a note body or anything derived from one. `vite.config.js`'s
-service-worker config still enforces zero storage at the *network* layer
-(`NetworkOnly` for all `googleapis.com` traffic) — offline files are
-cached at the *app-data* layer instead, deliberately never as
-`runtimeCaching` entries; don't add any.
+Frontend Drive REST calls go through `lib/driveApi.js`; backend Drive
+calls go through `server/src/driveClient.js`. Keeping Drive calls
+centralized in those two files (rather than scattered `fetch`s) makes it
+easy to see everywhere Drive is touched — worth keeping as a pattern,
+not a rule to route around.
 
-App settings/config that are *not* note content (accent color, the
-frontmatter schema, graph view settings) are fine in `localStorage` — a
-separate, sanctioned exception, not a loophole in it.
+### 3.3 MVC-ish separation
 
-### 3.2 Decoupled Drive layer
-
-All Google Drive REST calls are isolated in **`lib/driveApi.js`**. This is
-the only file allowed to call `fetch()` against `googleapis.com`/the proxy
-endpoint, or use `gapi`/Google Picker directly.
-
-- Everything else — hooks, features, components — calls the plain
-  functions this file exports (`driveGetFileContent`, `driveCreateFile`,
-  `driveMoveItem`, etc.), never raw `fetch`.
-- `hooks/useVaultSync.js`, `hooks/useAuth.js`, and `lib/indexedDb.js` sit
-  directly on top of this layer; UI components should not — they call the
-  hooks instead.
-- Rationale: if this app ever needs a different backend, only
-  `lib/driveApi.js` and the two hooks above need to change.
-
-### 3.3 MVC-style separation of concerns
-
-- **Model** = `lib/` (pure functions + the one Drive-access file) and the
-  data-shaping half of `hooks/` (`useVaultSync`, `useVaultIndex`,
-  `useDriveImageUrl`). Nothing here renders JSX except
-  `lib/markdownRender.jsx`, a pure `(text) -> ReactNode` function.
+- **Model** = `lib/` (pure functions + `driveApi.js`) and the
+  data-shaping hooks (`useVaultSync`, `useVaultIndex`,
+  `useDriveImageUrl`).
 - **Controller** = the top of `App.jsx` (state, effects, the `handlers`
-  object passed down) plus feature-level hooks (`useAccentColor`,
-  `useForceGraph`, `useClickOutside`, `useFrontmatterSchema`,
-  `useAppUpdate`). Wires Model functions to View components; owns
-  cross-cutting state (active pane, open modals, dirty-tracking).
-- **View** = `components/` (generic, reusable) and `features/*`
-  (feature-specific UI). Views call Model read functions only through
-  props/hooks from `App.jsx` — a feature component should not reach into
-  `lib/driveApi.js` or `lib/indexedDb.js` directly.
+  object) plus feature-level hooks.
+- **View** = `components/` (generic) and `features/*` (feature-specific).
+  Views reach Model functions through props/hooks from `App.jsx`.
 
 ### 3.4 One source of truth per calculation
 
-Each of these lives in exactly one file, and every feature that needs it
-imports from there — never re-derive it inline:
+| Calculation | Lives in |
+|---|---|
+| Markdown → tags/frontmatter/wikilinks parsing | `lib/markdownParse.js` |
+| Markdown → React elements rendering | `lib/markdownRender.jsx` |
+| `query`/`dataview` language | `lib/queryEngine.js` |
+| Backlink/wikilink graph | `lib/linkGraph.js` |
+| Search matching + ranking | `lib/search.js` |
+| Split-pane tree math | `lib/paneTree.js` |
+| File-kind classification | `lib/vaultConfig.js` |
+| Offline root expansion / conflict-copy names | `lib/offlineRules.js` |
+| DB row group-by/aggregate | `dbState.js`'s `aggregateDbRows` |
+| Frontmatter schema | `lib/frontmatterSchema.js` |
 
-| Calculation                                          | Lives in                  |
-| ----------------------------------------------------- | -------------------------- |
-| Markdown → tags/frontmatter/wikilinks parsing         | `lib/markdownParse.js`     |
-| Markdown → React elements rendering                   | `lib/markdownRender.jsx`   |
-| The ```query/```dataview language                     | `lib/queryEngine.js`       |
-| Backlink / wikilink graph                             | `lib/linkGraph.js`         |
-| Search matching + ranking                             | `lib/search.js`            |
-| Split-pane tree math                                  | `lib/paneTree.js`          |
-| File-kind classification                              | `lib/vaultConfig.js`       |
-| Offline root expansion and conflict-copy names       | `lib/offlineRules.js`      |
-| DB row group-by/aggregate (count/sum/average)         | `dbState.js`'s `aggregateDbRows` |
-| Frontmatter schema (properties, value options, child-properties) | `lib/frontmatterSchema.js` |
-
-If a future feature needs a new cross-cutting calculation, give it the
-same treatment: one new file in `lib/`, imported everywhere it's needed,
-not copy-pasted.
+New cross-cutting calculations: one file in `lib/`, imported where
+needed, rather than copy-pasted.
 
 ### 3.5 Shared UI, floating menus
 
-`components/` (`icons.jsx`'s `Icon*` set, `StatusBar`, `PropertiesPanel`,
-`ResizeHandle`, `LinkEmbeds`, `InlineMentions`, `MiniMarkdownEditor`) are
-the building blocks. **All icons live in `components/icons.jsx`** — add
-new ones there rather than inlining a new `<svg>` in a feature file.
+Icons live in `components/icons.jsx`. Floating/toggleable menus are
+usually a local `open` boolean + a block in normal document flow, closed
+via `useClickOutside`; `DbPopover` (`features/database/DbCells.jsx`) is a
+portal-based approach used where an anchor's scroll position is
+unpredictable — a reasonable pattern to reuse, not a one-off to avoid
+copying. `PaletteModal` and `HelpModal` are centered modals (summon
+from anywhere); `FrontmatterSchemaSettings` and `DbRowDetailModal`/
+`DbManageColumnsModal` (right-docked slide-overs) follow the shape that
+fits their interaction, not a fixed rule.
 
-There is no generic `DropdownMenu` component anymore (deleted once its
-last usage was converted). For a floating/toggleable menu, default to an
-**inline panel**: a local `open`/`menuId` boolean plus a plain block
-rendered in normal document flow, closed via `useClickOutside`. If the
-trigger's scroll position is genuinely unpredictable (an arbitrary row
-inside an `overflow: auto` container), `DbPopover`
-(`features/database/DbCells.jsx`) is the one portal-based escape hatch
-left in the app — a deliberate, documented exception for that specific
-layout constraint, not a pattern to reach for by default.
-`components/DropdownMenu.css` still holds shared `.menu-item`/
-`.search-options-*` classes used by inline panels and `SearchPanel`.
+### 3.6 Kind-aware routing
 
-A few floating surfaces are intentionally *not* inline: `PaletteModal`
-(Cmd/Ctrl+K command palette) and `HelpModal` stay centered modals — a
-"summon from anywhere, look something up, dismiss" interaction has no
-natural anchor point, so a centered modal is the right shape, not a
-workaround. Same for `FrontmatterSchemaSettings` (a settings lookup) and
-`ProxyFolderBrowser`'s modal variant (a rare one-off action). Two
-full-page modals were converted to right-docked slide-over panels instead
-of inline expansion — `DbRowDetailModal` and `DbManageColumnsModal` —
-since each is a "live list beside your other work," not a small menu;
-`OnboardingFlow`, `CanvasFilePickerModal`, and `DbCells.jsx`'s
-dense/table-cell popovers remain their original shapes for reasons
-specific to each (see inline code comments before changing them).
+`features/editor/EditorContent.jsx` switches on `file.kind` to render
+`DatabaseView`/`CanvasView`/`VectorEditorView`/`GraphView`/the markdown
+editor. `GraphView` is backed by a singleton pseudo-file
+(`graphPaneFile.js`, id `__graph__`) that's injected into `filesById` but
+not `sync.filesMeta`. New file kinds: extend this switch; anything not
+backed by a real Drive file can follow the same pseudo-file pattern.
 
-### 3.6 Kind-aware, not kind-forked
+### 3.7 File length
 
-A note pane's file can be a plain markdown note, a `.base` database, a
-`.canvas` board, a `.vec` vector art document, or the virtual graph view.
-This is handled by **one** router (`features/editor/EditorContent.jsx`)
-switching on `file.kind` to render `DatabaseView` / `CanvasView` /
-`VectorEditorView` / `GraphView` / the normal markdown editor — not
-separate copy-pasted pane implementations. The graph view is
-a real tab backed by a singleton pseudo-file (`graphPaneFile.js`, id
-`__graph__`, injected into `filesById` but never into `sync.filesMeta`, so
-it never triggers a Drive fetch or shows up in search). If a new file kind
-is ever added, extend this same switch and follow that pseudo-file pattern
-for anything not backed by a real Drive file, rather than forking
-`PaneNode`/`LeafPane`.
+Large files (`App.jsx` ~1500 lines, `VectorEditorView.jsx` ~2200,
+`markdownRender.jsx` ~770) exist because splitting them means extracting
+stateful hooks by hand with no test suite yet — real work, not a "must
+never grow" line. Split when it's convenient or when a section is
+genuinely reusable elsewhere; don't block a feature on a refactor first.
 
-### 3.7 File length — keep scripts short
+### 3.8 Internal (non-vault) data: `.store/`
 
-Target **under ~400 lines** per file; **500 is a hard soft-ceiling** you
-should stop and split past. When a file approaches the ceiling:
+A root-level Drive folder, `.store` (`lib/sparkStore.js`'s
+`SPARK_FOLDER_NAME`), holds app-internal data (currently sparks, 3.9)
+that shouldn't show up as a browsable note. `useVaultSync.js`'s
+`splitInternalVaultData` strips it from `foldersMeta`/`filesMeta` in one
+place. New internal data: a subfolder under `.store/` keeps that single
+strip point working.
 
-- If it's a component with sub-pieces only it uses, split those into
-  sibling files in the same feature folder (see `features/database/`'s
-  `DbCalendarView.jsx`/`DbChartView.jsx`/`DbTimelineView.jsx`/
-  `DbViewPanel.jsx` split out of `DatabaseView.jsx` for the pattern).
-- If it's a hook or lib file doing two unrelated things, split by
-  responsibility, not by size alone.
+### 3.9 Sparks
 
-**Known exceptions** (honest about limits, not hiding them): `App.jsx` is
-the composition root (auth, pane tree, open buffers, every modal's open
-flag, the `handlers` object) and has grown well past a comfortable size.
-Checked directly (2026-09): it's a single ~1500-line component with no
-top-level pure helper functions to pull out — every line closes over
-component state, so there's no low-risk extraction available here.
-Splitting it for real means extracting custom hooks (`usePaneTreeState`,
-`useModalState`, etc.), each requiring the shared state it touches to be
-threaded through explicitly and tested by hand (no test suite exists
-yet) — worth doing, but one hook at a time with a build+smoke-test after
-each, not as a single pass. `lib/markdownRender.jsx` is also oversized by
-line count but low complexity per line; `renderMarkdownBlocks` is the
-best candidate if it's ever split. `components/icons.jsx` was in this
-bucket too (~60 near-identical multi-line icon components) until a
-2026-09 pass collapsed every `IconX = (p) => (\n <Svg>...\n</Svg>\n)`
-down to one line each (JSX between tags with nothing but whitespace/
-newlines compiles away regardless of formatting, so this is a pure
-formatting change, not a behavior change) — 699 lines -> ~200. Keep new
-icons in that same one-liner shape rather than reverting to the
-multi-line form. `features/vector/VectorEditorView.jsx` had its pure
-geometry helpers (no closure over editor state) pulled into the new
-`vectorGeometry.jsx` (2026-09, 2375 -> ~2216 lines) but is otherwise in
-the same boat as `App.jsx`: the remainder is one stateful pointer-
-handling/rendering component, not boilerplate — same one-hook-at-a-time
-caution applies before cutting it further.
+A "spark" is a one-line quick-capture (optional screenshot + caption),
+filed under a nested category, optionally linked to vault files — not a
+full vault note. Stored tab-separated in `.store/spark.txt`
+(`lib/sparkStore.js`); screenshots go to `.store/spark-attachments/` as
+normal Drive image uploads. `hooks/useSparks.js` handles its own
+load/save outside the main sync loop. UI:
+`features/sparks/SparksPanel.jsx` (browse) + `SparkCaptureForm.jsx`
+(capture — also behind the `#/spark-quick-add` deep link every Android
+entry point opens). See `android/README.md` for the three Android entry
+points.
 
-### 3.8 Internal (non-vault) data lives in `.store/`, and is never a normal file
+## 4. Mobile performance
 
-Sparks (section 3.9) needed somewhere to keep its own small dataset
-*inside* the user's Drive vault folder — same account, same permission
-grant, no new consent flow — without it being a browsable note. The
-convention, if anything else needs this later: a root-level Drive folder
-named `.store` (see `lib/sparkStore.js`'s `SPARK_FOLDER_NAME`), stripped out
-of `foldersMeta`/`filesMeta` by `splitInternalVaultData` at the one point
-`useVaultSync.js` sets that state — not filtered per-consumer. That single
-strip point is what keeps it out of the file tree, search, tags, and the
-wikilink graph without every one of those needing to know it exists.
-Don't add a second internal folder without a real reason; put unrelated
-internal data in `.store/` too (a subfolder, not a sibling root folder) so
-there's one strip point, not several.
-
-### 3.9 Sparks — quick one-line captures
-
-A "spark" is a one-line note (optionally with a screenshot + caption)
-filed under a nested category (`vehicles/boat/small`, same slash
-convention as tags) and optionally linked to one or more vault
-files. Deliberately NOT a vault note: no frontmatter, no markdown body,
-can't be opened in the editor — it's meant to be captured in a couple of
-seconds, not written.
-
-- **Storage:** `.store/spark.txt` — one spark per line, tab-separated
-  (`lib/sparkStore.js`'s `parseSparkFile`/`serializeSparkFile`). Plain
-  text on purpose, not JSON: a spark's own text is inherently one line, so
-  the format doubles as the validation (anything that would break the
-  one-line-per-record invariant gets stripped on save), and it stays
-  readable/appendable without a JSON parser if anything outside this app
-  ever needs to write to it directly.
-- **Screenshots** are uploaded as ordinary image files into
-  `.store/spark-attachments/` (via the existing `driveUploadBinary` —
-  same as any other vault image upload); `spark.txt` only stores the
-  resulting file id, same "large content lives in its own file, RAM/UI
-  layers hold ids or on-demand blob URLs" split as everything else in
-  3.1.
-- **Own hook, not folded into useVaultSync:** `hooks/useSparks.js` reads
-  `internalFolder`/`internalFiles` off `useVaultSync`'s return value and
-  does its own load/save — it doesn't participate in the main sync loop's
-  diffing/caching at all (small file, no debounce needed, saved in full
-  on every change). Lazily creates `.store/` and `spark.txt` on the first
-  capture, not eagerly.
-- **UI:** `features/sparks/SparksPanel.jsx` (category browse, mirrors
-  `TagsPanel.jsx`) + `SparkCaptureForm.jsx` (the actual capture UI —
-  category autocomplete, multi-line text where each line becomes its own
-  spark, screenshot attach, and a note linker built on
-  `lib/search.js`'s `searchNotesForLink`). The capture form is the single
-  shared component behind the inline "+" in the panel AND the
-  `#/spark-quick-add` deep link every Android entry point opens — no
-  native capture UI exists anywhere in `android/`, all three of its
-  pieces (home-screen widget, Quick Settings tile, and a floating button
-  via Android's own Accessibility Button system) fire a plain
-  `ACTION_VIEW` intent at that one URL and let whatever resolves it (the
-  browser, or the installed PWA if it's set as the verified handler) open
-  to the exact same signed-in session and the exact same form as using
-  the app normally. See `android/README.md` for all three and why the
-  accessibility-button approach — not a self-drawn `WindowManager`
-  overlay — was chosen for the floating piece (system-drawn, no
-  `SYSTEM_ALERT_WINDOW`/foreground-service/notification cost).
-- **Note-side indicator:** `features/sparks/SparkFileMentions.jsx`, shown
-  in reading view alongside `InlineMentions`, and its click target
-  (`handlers.onOpenSparksForFile`) filters the Sparks panel down to that
-  file instead of by category.
-
-## 4. Mobile performance & bundle size
-
-Ongoing priority: this app should feel fast and light on a phone, not
-just on desktop.
-
-- **Code-split anything that isn't the note-editing hot path.** Graph
-  view, help modal, command palette, database view, and canvas view are
-  all lazy-loaded (`React.lazy` + `Suspense`) from `App.jsx` /
-  `EditorContent.jsx`. Lazy-load any new large/optional feature the same
-  way.
-- **Respect the RAM-only caching rule (3.1).** Also a mobile win: avoids
-  IndexedDB read/write churn (slow on mobile Safari) on the
-  typing/scrolling hot path.
-- **CodeMirror already virtualizes** (only renders visible
-  lines/decorations). Don't add decoration logic that walks the whole
-  document on every keystroke.
-- **Avoid layout thrash** in frequently-updated UI (status bar, pane
-  header, live query blocks): prefer CSS transforms/opacity over
-  width/height/top/left animation; batch DOM reads before writes in
-  imperative code (canvas dragging, resize handles).
-- **Large lists should stay virtualized or paginated** as a vault grows —
-  watch `ExplorerPanel.jsx`/`SearchPanel.jsx` if a large-vault user shows
-  up.
-- **Keep the PWA cache app-shell-only.** `vite.config.js`'s `workbox`
-  config only precaches build output and explicitly `NetworkOnly`s
-  Drive/auth traffic. Don't widen `globPatterns` or add `runtimeCaching`
-  for API responses.
-- **Touch-action is not inherited loosely** — an ancestor's
-  `touch-action: none` can only be *narrowed* by a descendant, never
-  loosened. Where a scrollable region sits inside a `touch-action: none`
-  drag surface (canvas cards), the allowance (`pan-y`) has to be declared
-  on the ancestor via `:has()`, and the drag-start handler must bail out
-  when the pointerdown lands on genuinely overflowing content — see
-  `canvas.css`/`CanvasView.jsx`'s `beginMove` for the pattern before
-  copying it elsewhere.
-- **On-screen keyboard can hide content with nowhere to scroll it to.**
-  CodeMirror only lets you scroll as far as its own content height, so on
-  a short note the last lines can end up permanently behind the mobile
-  keyboard. Fix is a bounded (not infinite) extra bottom pad on the
-  scroller, mobile-breakpoint-only — see `.cm-editor-host .cm-scroller`'s
-  `@media (max-width: 720px)` rule in `features/editor/
-  CodeMirrorEditor.css`. Apply the same pattern to any other
-  text-input surface that can be focused on mobile (e.g. `DbTextCell`'s
-  multiline editor) if the same complaint comes up there.
+Priority, not just a desktop app: code-split anything outside the
+note-editing hot path (graph, help modal, palette, database, canvas are
+already `React.lazy`); CodeMirror already virtualizes; prefer CSS
+transforms over layout-triggering properties in hot UI (status bar, pane
+header, query blocks); keep large lists virtualized/paginated as vaults
+grow. Touch-action on drag surfaces (canvas) only narrows, never loosens,
+down the tree — see `canvas.css`/`CanvasView.jsx`'s `beginMove`. On
+short notes the on-screen keyboard can cover the last lines — see the
+bottom-pad fix in `CodeMirrorEditor.css`'s mobile breakpoint; apply the
+same pattern to other mobile text-input surfaces if needed.
 
 ## 5. File structure
 
 ```
-index.html                          — Vite entry HTML; loads Google Identity + gapi <script> tags, mounts src/main.jsx
-vite.config.js                      — Vite + vite-plugin-pwa config; derives GitHub Pages base path; NetworkOnly Drive/auth caching; build-time __APP_VERSION__ stamp
+index.html                          — Vite entry; loads Google Identity script, mounts src/main.jsx
+vite.config.js                      — Vite + vite-plugin-pwa; GitHub Pages base path; build-time __APP_VERSION__
 public/                             — PWA icons, _nojekyll
 
 src/
-  main.jsx                          — ReactDOM root
-  App.jsx                           — composition root: auth state, pane-tree state, open buffers, every
-                                       modal's open/closed flag, the `handlers` object passed to every
-                                       feature (see 3.7 for size)
+  main.jsx, App.jsx                 — root + composition root (auth, pane tree, buffers, modals, handlers — 3.7)
 
-  lib/                              — Model layer: pure functions + the one Drive-access file (3.3)
-    vaultConfig.js                  — env-derived Drive config, MIME/extension tables, file-kind classification
-    concurrency.js                  — mapWithConcurrency, withRetry
-    indexedDb.js                    — the ONLY file touching IndexedDB; metadata/link-graph cache only (3.1)
-    driveApi.js                     — the ONLY file calling the Drive REST API / proxy / Picker (3.2)
-    markdownParse.js                — frontmatter, wikilinks, tags, inline fields — parsing only
-    markdownRender.jsx              — markdown text -> React elements (reading view)
-    queryEngine.js                  — the ```query/```dataview language
-    linkGraph.js                    — wikilink + backlink index, fuzzy note-title matching
-    search.js                       — full-text/tag search parsing and ranking
-    paneTree.js                     — split-pane tree math
-    frontmatterSchema.js            — customizable frontmatter property schema (3.4)
-    offlineRules.js                 — live offline-root expansion and conflict-copy names
-    sparkStore.js                   — spark.txt parse/serialize, category tree, internal-folder split (3.8/3.9)
-    mathUtils.js                    — clamp
+  lib/                              — pure functions + driveApi.js (3.2, 3.3)
+    vaultConfig.js, concurrency.js, indexedDb.js, driveApi.js,
+    markdownParse.js, markdownRender.jsx, queryEngine.js, linkGraph.js,
+    search.js, paneTree.js, frontmatterSchema.js, offlineRules.js,
+    sparkStore.js, mathUtils.js
 
   hooks/
-    useAuth.js                      — useGoogleAuth (Identity Services, remembered sign-in via localStorage), useProxyAuth
-    useVaultSync.js                 — owns the live file tree, drives Drive polling/diffing
-    useVaultIndex.js                — RAM-only search/tag index built from note bodies (3.1)
-    useDriveImageUrl.js             — on-demand image byte fetch -> in-memory blob URL cache (3.1)
-    useClickOutside.js              — generic "close on outside click" hook
-    useFrontmatterSchema.js         — persisted frontmatter schema state
-    useAppUpdate.js                 — wraps vite-plugin-pwa's useRegisterSW; surfaces "update available"
-    useOfflineSync.js               — opt-in offline cache, sync, and conflict model
-    useSparks.js                    — spark.txt load/save/create/delete, own lazy folder/file creation (3.9)
+    useAuth.js, useVaultSync.js, useVaultIndex.js, useDriveImageUrl.js,
+    useClickOutside.js, useFrontmatterSchema.js, useAppUpdate.js,
+    useOfflineSync.js, useSparks.js
 
-  components/                       — Generic, reusable View pieces (3.5)
-    icons.jsx                       — every <Icon*/> in the app
-    DropdownMenu.css                — shared .menu-item/.search-options-* styles (component itself deleted)
-    ActivityBar.jsx / .css          — left-most icon ribbon
-    StatusBar.jsx / .css            — footer: word count, sync status, version/update control
-    PropertiesPanel.jsx / .css      — frontmatter property editor
-    InlineMentions.jsx / .css       — linked/unlinked mentions block
-    LinkEmbeds.jsx                  — AmbiguousLink, ImageEmbed
-    ImageViewer.css                 — inline image rendering styles
-    MiniMarkdownEditor.jsx / .css   — small CM6 instance for db cells / canvas cards (3.5)
-    ResizeHandle.jsx                — generic drag-to-resize handle
+  components/                       — generic View pieces: icons.jsx, DropdownMenu.css,
+    ActivityBar, StatusBar, PropertiesPanel, InlineMentions, LinkEmbeds,
+    ImageViewer.css, MiniMarkdownEditor, ResizeHandle
 
   features/
-    onboarding/     OnboardingFlow.jsx / .css, ProxyFolderBrowser.jsx
-    sidebar/        ExplorerPanel.jsx / .css, sidebar.css
-    search/         SearchPanel.jsx / .css
-    tags/           TagsPanel.jsx / .css
-    sparks/         SparksPanel.jsx, SparkCaptureForm.jsx, SparkFileMentions.jsx, sparks.css (3.9)
-    bookmarks/      BookmarksPanel.jsx
-    toc/            TocPanel.jsx
-    panes/          PaneNode.jsx / .css (recursive split-pane + LeafPane), TabBar.jsx / .css, PaneHeader.css
-    editor/                         — CodeMirror integration; the note-editing hot path (section 4)
-      CodeMirrorNoteEditor.jsx      — the CM6 instance: extensions, keymaps, live-preview wiring
-      EditorContent.jsx / .css      — reading/editing mode switch; routes by file.kind (3.6)
-      NoteTitleField.jsx
-      inlinePreviewPlugin.js        — CM6 ViewPlugin: hides markdown syntax around the cursor's line
-      wysiwygBlocks.jsx             — block-level live-preview widgets
-      wikilinkCompletion.js         — [[wikilink]] and #tag autocomplete
-      frontmatterCompletion.js      — schema-driven frontmatter key/value autocomplete (only inside --- blocks)
-      cmIndent.js                   — Tab/Shift-Tab indent
-      TaskCheckboxWidget.js         — clickable `- [ ]` checkboxes
-    query/          QueryBlock.jsx / .css
+    onboarding/, sidebar/, search/, tags/, sparks/, bookmarks/, toc/
+    panes/          PaneNode.jsx (recursive split-pane), TabBar.jsx
+    editor/         CodeMirrorNoteEditor, EditorContent (3.6), NoteTitleField,
+                     inlinePreviewPlugin, wysiwygBlocks, wikilinkCompletion,
+                     frontmatterCompletion, cmIndent, TaskCheckboxWidget
+    query/          QueryBlock.jsx
     assets/         AssetPane.jsx
-    database/                       — Notion-style views for .base files
-      dbState.js                    — row/column model, parse/serialize, aggregateDbRows (3.4)
-      DbCells.jsx                   — per-column-type cell editors; also owns the DbPopover portal exception (3.5)
-      DbViews.jsx                   — table/board/gallery view renderers
-      DbCalendarView.jsx, DbChartView.jsx, DbTimelineView.jsx — calendar/chart/timeline views (3.7 split)
-      dbDateUtils.jsx                — shared date-column picker + date math for calendar/timeline
-      DbViewPanel.jsx                — add-view / view-settings inline panel (extracted from DatabaseView, 3.7)
-      DbModals.jsx                   — row detail + manage-columns panels (slide-over shells, 3.5)
-      DatabaseView.jsx               — top-level view switcher + view-tab bar
-    canvas/                         — infinite-canvas board for .canvas files
-      canvasState.js                 — node/edge model, hit-testing, parse/serialize
-      CanvasToolbar.jsx, CanvasFilePickerModal.jsx, CanvasNode.jsx
-      CanvasView.jsx                 — pan/zoom/drag, touch-action handling (section 4)
-    vector/                         — topological (node-centric) vector art editor for .vec files
-      vectorState.js                  — Vertex/Edge/fill/group schema, parse/serialize, mutations, SVG export
-      vectorTopology.js               — half-edge face tracing, fill-only planarization, spatial grid, snapping
-      vectorGeometry.jsx              — pure geometry/snap helpers + MeasurementLabel, split out of VectorEditorView.jsx (3.7); nothing here closes over editor state
-      VectorToolbar.jsx               — tool switcher, style pickers, undo/redo, export
-      VectorEditorView.jsx            — pan/zoom/drag SVG canvas, all tools, transforms (3.6 pattern); still oversized (~2200 lines) — remaining bulk is one stateful component, not pure helpers, see 3.7's known-exceptions note
-    graph/
-      useForceGraph.js               — force-directed layout simulation (framework-agnostic; tunable forces)
-      graphSettings.js                — persisted Filters/Groups/Forces (localStorage)
-      graphPaneFile.js                — the `__graph__` pseudo-file (3.6)
-      GraphView.jsx                   — the graph pane itself (local graph, groups, forces, tags-as-nodes)
-      GraphViewModal.css              — graph pane styles (filename predates the modal->pane conversion)
-    compile/                        — vault <-> XML for LLM mass-editing
-      compileVault.js                 — flatten/include-exclude/build XML/parse+apply XML, incl. <create>/<delete> (pure logic)
-      CompilePanel.jsx / .css         — sidebar panel: compile (copy/download) and apply (paste/upload)
-    palette/        PaletteModal.jsx / .css
-    help/           HelpModal.jsx      — in-app shortcuts/markdown/features reference (keep in sync — section 6)
-    offline/        OfflineConflictsPanel.jsx / .css — right-docked offline conflict resolver
-    settings/       FrontmatterSchemaSettings.jsx / .css
+    database/       dbState.js (3.4), DbCells.jsx, DbViews.jsx,
+                     DbCalendarView/DbChartView/DbTimelineView, dbDateUtils,
+                     DbViewPanel, DbModals, DatabaseView
+    canvas/         canvasState.js, CanvasToolbar, CanvasFilePickerModal,
+                     CanvasNode, CanvasView
+    vector/         vectorState.js, vectorTopology.js, vectorGeometry.jsx,
+                     VectorToolbar, VectorEditorView (3.7)
+    graph/          useForceGraph.js, graphSettings.js, graphPaneFile.js (3.6),
+                     GraphView.jsx
+    compile/        compileVault.js (vault <-> XML for LLM mass-editing), CompilePanel.jsx
+    palette/        PaletteModal.jsx
+    help/           HelpModal.jsx — keep in sync, section 6
+    offline/        OfflineConflictsPanel.jsx
+    settings/       FrontmatterSchemaSettings.jsx
     accent/         accentColor.js, AccentColorPicker.jsx
 
-  styles/
-    index.css                      — imports every other stylesheet, in cascade order (don't reorder without checking mobile overrides)
-    theme.css                      — design tokens + base reset
-    layout.css                     — app shell grid
-    modal.css                      — shared centered-modal-overlay look (still used by Palette/Help/Onboarding/FrontmatterSchemaSettings/CanvasFilePickerModal)
-    responsive.css                 — mobile breakpoints (kept as one file; import order matters, see index.css)
+  styles/           index.css (import order matters), theme.css, layout.css,
+                     modal.css, responsive.css
 
-android/                             — separate Gradle project (3.9's widget/tile/accessibility-button), not part of the Vite build
-  README.md                          — build/install instructions, what each of the 3 pieces costs
-  app/src/main/kotlin/.../SparkConfig.kt               — the one shared SPARK_CAPTURE_URL constant
-  app/src/main/kotlin/.../SparkWidgetProvider.kt        — home-screen widget (no deps, no permissions)
-  app/src/main/kotlin/.../SparkTileService.kt           — Quick Settings tile, opens the capture form directly
-  app/src/main/kotlin/.../SparkAccessibilityService.kt  — floating button via Android's Accessibility Button (system-drawn, no overlay permission/foreground service)
-  app/src/main/res/                  — widget layout, icon, strings, spark_widget_info.xml, accessibility_service_config.xml
+server/                              — Node/Express backend (2)
+  src/index.js, config.js, session.js, googleAuth.js, driveClient.js
+  src/routes/auth.js, drive.js
+  README.md                          — setup/deploy
+
+android/                             — separate Gradle project (3.9)
+  README.md
+  app/src/main/kotlin/.../SparkConfig.kt, SparkWidgetProvider.kt,
+    SparkTileService.kt, SparkAccessibilityService.kt
+  app/src/main/res/                  — widget layout, icon, strings
 ```
 
 A CSS file next to a component/feature file with the same name is that
-piece's styles. Not every JS/JSX file has a matching CSS file — some share
-a feature-level stylesheet (`canvas.css`, `vector.css`, `database.css`, `sidebar.css`).
+piece's styles; some features share one stylesheet instead
+(`canvas.css`, `vector.css`, `database.css`, `sidebar.css`).
 
 ## 6. Keep the in-app help in sync
 
 `features/help/HelpModal.jsx` (`HELP_SHORTCUTS`, `HELP_MARKDOWN`,
-`HELP_FEATURES`) is the in-app reference, including the query-engine
-syntax guide. Any change to a keyboard shortcut, markdown syntax, or
-feature behavior should update the matching entry here in the same piece
-of work, not as a deferred follow-up.
+`HELP_FEATURES`) is the in-app reference. Update it in the same piece of
+work when a shortcut, markdown syntax, or feature behavior changes.
 
-## 7. When in doubt
+## 7. Notes
 
-- Don't relitigate the stack choices in section 2 without a concrete new
-  reason.
-- Don't weaken section 3.1 (zero local note-content storage) for a
-  performance shortcut — section 4 lists the sanctioned ways to make
-  things faster instead, all of which keep the invariant intact.
-- Prefer extending an existing `lib/` module over adding a new one that
-  duplicates part of it (section 3.4).
-- If you notice a file creeping past ~500 lines while working on it,
-  split it as part of that change rather than leaving it for later
-  (section 3.7) — unless it's one of the known exceptions, in which case
-  leave a comment rather than a silent oversized file.
-- If you add a new optional/heavy feature, default to lazy-loading it
-  (section 4).
-- For a new floating menu, default to an inline panel; only reach for a
-  portal (`DbPopover`) when the trigger's scroll position is genuinely
-  unpredictable (section 3.5).
-- See `TODO.md` for open/requested work and its current status.
-- Token-budget passes (trimming file size to shrink what `compile/`
-  sends an LLM, not just for humans): prefer mechanical, provably
-  behavior-preserving cuts (dead code, formatting, de-duplicated
-  constants) over rewrites, and verify with `npm run build` before
-  calling a cut done. `components/icons.jsx` is done (see 3.7). The next
-  highest-line-count candidates, largest first, none yet attempted:
-  `features/vector/VectorEditorView.jsx` (~2375), `App.jsx` (~1538, see
-  3.7's known-exception note before touching it), `features/vector/vectorState.js`
-  (~1013), `lib/markdownRender.jsx` (~768), `features/vector/vectorTopology.js`
+- Prefer extending an existing `lib/` module over duplicating part of it
+  (3.4).
+- See `TODO.md` for open/requested work and status.
+- Token-budget passes (trimming file size for `compile/`'s LLM export,
+  not just humans): `components/icons.jsx` is done. Largest remaining,
+  if it's ever worth doing: `features/vector/VectorEditorView.jsx`
+  (~2375), `App.jsx` (~1538), `features/vector/vectorState.js` (~1013),
+  `lib/markdownRender.jsx` (~768), `features/vector/vectorTopology.js`
   (~689).
