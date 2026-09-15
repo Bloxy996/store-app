@@ -40,7 +40,6 @@ import { OfflineConflictsPanel } from './features/offline/OfflineConflictsPanel.
 // EditorContent.jsx's file.kind switch same as DatabaseView/CanvasView.)
 const HelpModal = lazy(() => import('./features/help/HelpModal.jsx').then((m) => ({ default: m.HelpModal })));
 const CompilePanel = lazy(() => import('./features/compile/CompilePanel.jsx').then((m) => ({ default: m.CompilePanel })));
-const ReaderPanel = lazy(() => import('./features/reader/ReaderPanel.jsx').then((m) => ({ default: m.ReaderPanel })));
 const PaletteModal = lazy(() => import('./features/palette/PaletteModal.jsx').then((m) => ({ default: m.PaletteModal })));
 const FrontmatterSchemaSettings = lazy(() =>
   import('./features/settings/FrontmatterSchemaSettings.jsx').then((m) => ({ default: m.FrontmatterSchemaSettings }))
@@ -1384,7 +1383,6 @@ export default function App() {
                 busy={sparks.busy}
                 addSparkCapture={sparks.addSparkCapture}
                 deleteSpark={sparks.deleteSpark}
-                insertSortedStatements={sparks.insertSortedStatements}
                 filesMeta={sync.filesMeta}
                 getBody={vaultIndex.getBody}
                 onOpenNote={(id) => openFileInPane(activePaneId, id)}
@@ -1392,11 +1390,6 @@ export default function App() {
                 onClearFocusFile={() => setSparkFocusFileId(null)}
                 autoOpenCapture={quickSparkRequested}
               />
-            )}
-            {activeSideView === 'reader' && (
-              <Suspense fallback={null}>
-                <ReaderPanel />
-              </Suspense>
             )}
             {activeSideView === 'toc' && (
               <TocPanel

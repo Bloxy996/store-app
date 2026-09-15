@@ -1,6 +1,6 @@
 import React from 'react';
 
-import { IconBraces, IconCommand, IconFilePlus, IconFolder, IconFolderPlus, IconGraph, IconListTree, IconLoader, IconLogOut, IconRefresh, IconSearch, IconStar, IconTag, IconZap } from './icons.jsx';
+import { IconBraces, IconCommand, IconFilePlus, IconFolder, IconGraph, IconListTree, IconLoader, IconLogOut, IconRefresh, IconSearch, IconStar, IconTag, IconZap } from './icons.jsx';
 
 
 // ---------------------------------------------------------------------------
@@ -29,7 +29,6 @@ const ActivityBar = React.memo(function ActivityBar({ activeView, onSetView, onO
         {item('sparks', IconZap, 'Sparks')}
         {item('bookmarks', IconStar, 'Bookmarks')}
         {item('compile', IconBraces, 'Compile to XML')}
-        {item('reader', IconFolderPlus, 'Local files')}
         <button className="activity-btn" onClick={onOpenGraph} title="Graph view" aria-label="Graph view">
           <IconGraph size={19} />
         </button>
