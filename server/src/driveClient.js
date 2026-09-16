@@ -100,9 +100,16 @@ async function getFileMetadata(accessToken, fileId) {
 
 // Returns the raw Response so the route can stream bytes + content-type
 // straight through without buffering the whole file in memory twice.
-async function getFileRaw(accessToken, fileId) {
-  const res = await fetch(`${DRIVE_FILES_URL}/${fileId}?alt=media&${DRIVE_ALL_DRIVES}`, { headers: authHeaders(accessToken) });
-  if (!res.ok) throw driveError(res, 'Drive fetch failed');
+// `ifNoneMatch` (the browser's own conditional-GET header, forwarded by
+// the route) is passed straight through to Drive's media endpoint, which
+// honors it the same way any HTTP server would — a 304 comes back with no
+// body, so an unchanged asset (image/audio/video, see the route comment)
+// never gets re-transferred OR re-decoded by the browser on a revisit,
+// without this server needing to fetch/compare anything itself.
+async function getFileRaw(accessToken, fileId, ifNoneMatch) {
+  const headers = authHeaders(accessToken, ifNoneMatch ? { 'If-None-Match': ifNoneMatch } : {});
+  const res = await fetch(`${DRIVE_FILES_URL}/${fileId}?alt=media&${DRIVE_ALL_DRIVES}`, { headers });
+  if (!res.ok && res.status !== 304) throw driveError(res, 'Drive fetch failed');
   return res;
 }
 

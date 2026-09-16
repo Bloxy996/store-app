@@ -74,11 +74,21 @@ router.get('/api/drive/file/:id/metadata', requireAuth, async (req, res) => {
 // Streamed straight through with the original content-type — used for
 // images/video/audio, which can be arbitrarily large; buffering the whole
 // thing into a JS string/base64 (like the Apps-Script proxy mode has to)
-// would be wasteful here since this route can just pipe bytes.
+// would be wasteful here since this route can just pipe bytes. Also
+// forwards conditional-GET caching (see driveClient.getFileRaw) so a
+// revisit to an unchanged asset costs one small 304 round trip instead of
+// a full re-download + re-decode on the frontend.
 router.get('/api/drive/file/:id/blob', requireAuth, async (req, res) => {
   try {
-    const upstream = await drive.getFileRaw(req.accessToken, req.params.id);
+    const upstream = await drive.getFileRaw(req.accessToken, req.params.id, req.get('If-None-Match'));
     res.status(upstream.status);
+    const etag = upstream.headers.get('etag');
+    if (etag) res.set('ETag', etag);
+    res.set('Cache-Control', 'private, no-cache');
+    if (upstream.status === 304) {
+      res.end();
+      return;
+    }
     const contentType = upstream.headers.get('content-type');
     if (contentType) res.type(contentType);
     const body = Buffer.from(await upstream.arrayBuffer());

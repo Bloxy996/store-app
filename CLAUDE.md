@@ -36,8 +36,16 @@ there than in the browser.
   flow (`hooks/useAuth.js`). An older client-only "proxy" mode (Apps
   Script relay) also still exists — `lib/driveApi.js`'s
   `isProxy`/`proxy*` functions.
-- **Hosting:** Frontend on GitHub Pages via GitHub Actions; backend on
-  any Node host (Render etc., see `server/README.md`).
+- **Hosting:** Two supported paths for the frontend + Node/Express half,
+  sharing the same Express app (`server/src/app.js`) so they can't drift
+  apart: (1) frontend on GitHub Pages via GitHub Actions, backend on any
+  plain Node host (Render etc., `server/src/index.js`); or (2) both
+  together on Vercel — frontend as a static build, backend as one
+  serverless function (`server/api/index.js`) — via the root
+  `vercel.json`. Either way, the Python service (above) is out of scope
+  for both and needs its own persistent host regardless — see
+  `server/README.md`'s "Deploying" section. The Vercel path is unverified
+  against a real deployment — see `TODO.md`.
 - **Styling:** plain CSS, one stylesheet per component/feature (section
   5). Global tokens in `styles/theme.css`.
 - **Android companion:** `android/` — standalone Gradle project, three
@@ -169,8 +177,8 @@ YouTube-audio-to-vault downloader (`lib/musicApi.js` ->
 ## 4. Mobile performance
 
 Priority, not just a desktop app: code-split anything outside the
-note-editing hot path (graph, help modal, palette, database, canvas are
-already `React.lazy`); CodeMirror already virtualizes; prefer CSS
+note-editing hot path (graph, help modal, palette, database, canvas, and
+vector are already `React.lazy`); CodeMirror already virtualizes; prefer CSS
 transforms over layout-triggering properties in hot UI (status bar, pane
 header, query blocks); keep large lists virtualized/paginated as vaults
 grow. Touch-action on drag surfaces (canvas) only narrows, never loosens,
@@ -236,11 +244,18 @@ src/
                      modal.css, responsive.css
 
 server/                              — Node/Express backend (2)
-  src/index.js, config.js, session.js, googleAuth.js, driveClient.js
+  src/app.js                         — Express app factory (routes/CORS), shared by both entrypoints below
+  src/index.js                       — long-running entrypoint (Render/plain Node host)
+  api/index.js                       — Vercel serverless entrypoint (no .listen())
+  src/config.js, session.js, googleAuth.js, driveClient.js
   src/routes/auth.js, drive.js, statements.js, music.js
-  python/                            — optional Python service (2), own README
+  python/                            — optional Python service (2), own README — NOT part of the
+                                        Vercel path above, needs its own persistent host regardless
     app.py, statements_engine.py, music_downloader.py, requirements.txt
   README.md                          — setup/deploy
+
+vercel.json                          — Vercel build+rewrite config for hosting frontend + the Node
+                                        backend half together (2)
 
 android/                             — separate Gradle project (3.9)
   README.md

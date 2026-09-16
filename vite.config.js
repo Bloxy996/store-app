@@ -140,7 +140,18 @@ export default defineConfig({
                   handler: 'NetworkOnly'
                 }
               ]
-            : [])
+            : []),
+          {
+            // Same rule as above, but path-based instead of origin-based —
+            // covers a same-origin backend (e.g. frontend + server/api
+            // deployed together on Vercel, see /vercel.json), where
+            // VITE_BACKEND_URL is unset/relative and backendOrigin above
+            // never gets computed. Redundant with the origin-based rule
+            // above when the backend IS cross-origin (Render etc.); kept
+            // unconditional since matching both costs nothing.
+            urlPattern: ({ url }) => /^\/(api|auth|healthz)\//.test(url.pathname) || url.pathname === '/healthz',
+            handler: 'NetworkOnly'
+          }
         ]
       },
       devOptions: {

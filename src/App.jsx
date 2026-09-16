@@ -754,15 +754,25 @@ export default function App() {
     [paneTree, ensureFileLoaded]
   );
 
-  const resizeSplit = useCallback(
-    (splitId, index, deltaPx, containerRef) => {
+  const resizeSplit = useCallback((splitId, index, deltaPx, containerRef) => {
+    // Reads/writes via the functional setPaneTree form (not the `paneTree`
+    // closure) on purpose: ResizeHandle attaches its window mousemove
+    // listener once, at mousedown, closing over whatever this callback
+    // was at that instant. Every mousemove during that same drag was
+    // calling that one stale closure, which kept computing sizes from
+    // the pane tree as it existed when the drag *started* — so each
+    // frame's delta got applied to the same unmoved base instead of
+    // accumulating, and the divider visibly fought the cursor. Deriving
+    // `node`/`sizes` from `prev` here means every call — however old the
+    // closure — always reads and writes the latest state.
+    setPaneTree((prev) => {
       const el = containerRef?.current;
-      if (!el) return;
-      const node = findSplitNode(paneTree, splitId);
-      if (!node) return;
+      if (!el) return prev;
+      const node = findSplitNode(prev, splitId);
+      if (!node) return prev;
       const rect = el.getBoundingClientRect();
       const totalPx = node.direction === 'row' ? rect.width : rect.height;
-      if (!totalPx) return;
+      if (!totalPx) return prev;
       const deltaPct = (deltaPx / totalPx) * 100;
       const sizes = node.sizes.slice();
       const a = index;
@@ -780,10 +790,9 @@ export default function App() {
       }
       sizes[a] = newA;
       sizes[b] = newB;
-      setPaneTree(updateSplitSizes(paneTree, splitId, sizes));
-    },
-    [paneTree]
-  );
+      return updateSplitSizes(prev, splitId, sizes);
+    });
+  }, []);
 
   // --- Create / open-by-name / rename / delete / move / upload -------------
   const openNoteByName = useCallback(
