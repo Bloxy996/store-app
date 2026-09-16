@@ -4,7 +4,6 @@ import express from 'express';
 import { config } from './config.js';
 import { authRouter } from './routes/auth.js';
 import { driveRouter } from './routes/drive.js';
-import { musicRouter } from './routes/music.js';
 import { statementsRouter } from './routes/statements.js';
 
 // Factored out of index.js so both the long-running Node entrypoint
@@ -13,10 +12,10 @@ import { statementsRouter } from './routes/statements.js';
 // config duplicated or drifting between the two hosting paths.
 //
 // Note: this only wraps the Node/Express half. The Python service
-// (server/python/) that statementsRouter/musicRouter proxy to is a
-// separate, long-running process (sentence-transformers/torch stay
-// resident in memory across requests, per its README) — it isn't part of
-// this factory and isn't a Vercel serverless candidate either; see
+// (server/python/) that statementsRouter proxies to is a separate,
+// long-running process (sentence-transformers/torch stay resident in
+// memory across requests, per its README) — it isn't part of this
+// factory and isn't a Vercel serverless candidate either; see
 // vercel.json's header comment and TODO.md.
 function createApp() {
   const app = express();
@@ -38,7 +37,6 @@ function createApp() {
   app.use(authRouter);
   app.use(driveRouter);
   app.use(statementsRouter);
-  app.use(musicRouter);
 
   app.use((err, req, res, next) => {
     console.error('Unhandled error:', err);

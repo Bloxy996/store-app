@@ -1,12 +1,12 @@
 import React, { Suspense, lazy, useMemo, useState } from 'react';
 
-import { IconLink2, IconLoader, IconPlus, IconTrash, IconX, IconZap } from '../../components/icons.jsx';
+import { IconLink2, IconLoader, IconPlus, IconSliders, IconTrash, IconX, IconZap } from '../../components/icons.jsx';
 import { useDriveImageUrl } from '../../hooks/useDriveImageUrl.js';
 import { isProxy } from '../../lib/driveApi.js';
-import { STATEMENTS_CATEGORY } from '../../lib/sparkStore.js';
+import { loadSortedCategories, toggleSortedCategory } from '../../lib/sortedCategories.js';
 import { SparkCaptureForm } from './SparkCaptureForm.jsx';
 
-const StatementsPanel = lazy(() => import('./StatementsPanel.jsx').then((m) => ({ default: m.StatementsPanel })));
+const CategorySorterPanel = lazy(() => import('./CategorySorterPanel.jsx').then((m) => ({ default: m.CategorySorterPanel })));
 
 function SparkScreenshotThumb({ token, fileId }) {
   const { url } = useDriveImageUrl(token, fileId);
@@ -20,6 +20,16 @@ function SparkScreenshotThumb({ token, fileId }) {
 const SparksPanel = React.memo(function SparksPanel({ token, sparks, categoryTree, busy, addSparkCapture, deleteSpark, saveSparks, filesMeta, getBody, onOpenNote, focusFileId, onClearFocusFile, autoOpenCapture }) {
   const [activeCategory, setActiveCategory] = useState(null);
   const [captureOpen, setCaptureOpen] = useState(!!autoOpenCapture);
+  // Which categories the user has toggled into "sorter" mode (lib/
+  // sortedCategories.js) — any number of them, independently. Re-read from
+  // localStorage into state on toggle so the tree/panel below re-render.
+  const [sortedCategories, setSortedCategories] = useState(() => loadSortedCategories());
+  const activeIsSorted = !!activeCategory && sortedCategories.has(activeCategory);
+
+  const handleToggleSorter = (path, e) => {
+    e.stopPropagation();
+    setSortedCategories(toggleSortedCategory(path));
+  };
 
   const visible = useMemo(() => {
     let list = sparks;
@@ -70,21 +80,32 @@ const SparksPanel = React.memo(function SparksPanel({ token, sparks, categoryTre
           <div className="spark-category-list">
             {categoryTree.length === 0 && <p className="muted small empty-hint">No sparks yet. Tap + to capture one.</p>}
             {categoryTree.map(({ path, name, depth, count }) => (
-              <button
-                key={path}
-                className={`tag-row ${activeCategory === path ? 'active' : ''}`}
-                style={{ paddingLeft: 10 + depth * 16 }}
-                title={path}
-                onClick={() => setActiveCategory(activeCategory === path ? null : path)}
-              >
-                <IconZap size={13} className="tag-row-icon" />
-                <span className="tag-row-name">{name}</span>
-                <span className="tag-row-count">{count}</span>
-              </button>
+              <div key={path} className="tag-row" style={{ paddingLeft: 10 + depth * 16 }}>
+                <button
+                  className={`spark-category-select ${activeCategory === path ? 'active' : ''}`}
+                  title={path}
+                  onClick={() => setActiveCategory(activeCategory === path ? null : path)}
+                >
+                  <IconZap size={13} className="tag-row-icon" />
+                  <span className="tag-row-name">{name}</span>
+                  <span className="tag-row-count">{count}</span>
+                </button>
+                <button
+                  className={`icon-btn ${sortedCategories.has(path) ? 'active' : ''}`}
+                  title={
+                    sortedCategories.has(path)
+                      ? 'Similarity sorter is on for this category (sparks filed directly under it, not nested sub-categories) — click to turn off'
+                      : 'Turn on the similarity sorter for this category (sparks filed directly under it, not nested sub-categories)'
+                  }
+                  onClick={(e) => handleToggleSorter(path, e)}
+                >
+                  <IconSliders size={13} />
+                </button>
+              </div>
             ))}
           </div>
         )}
-        {(activeCategory || focusFileId) && activeCategory !== STATEMENTS_CATEGORY && (
+        {(activeCategory || focusFileId) && !activeIsSorted && (
           <div className="spark-list">
             {visible.length === 0 && <p className="muted small empty-hint">No sparks here.</p>}
             {visible.map((s) => (
@@ -113,9 +134,9 @@ const SparksPanel = React.memo(function SparksPanel({ token, sparks, categoryTre
             ))}
           </div>
         )}
-        {activeCategory === STATEMENTS_CATEGORY && (
+        {activeIsSorted && (
           <Suspense fallback={null}>
-            <StatementsPanel sparks={sparks} busy={busy} saveSparks={saveSparks} />
+            <CategorySorterPanel sparks={sparks} category={activeCategory} busy={busy} saveSparks={saveSparks} />
           </Suspense>
         )}
       </div>

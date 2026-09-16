@@ -1,11 +1,10 @@
 import { useMemo, useRef, useState } from 'react';
 
-import { IconAudio, IconBraces, IconCheck, IconDownload, IconFolder, IconImage, IconRefresh } from '../../components/icons.jsx';
-import { APPLY_FORMAT_PROMPT, applyFileChanges, buildCompiledXml, flattenVaultTree, parseApplyXml } from '../compile/compileVault.js';
+import { IconBraces, IconCheck, IconDownload, IconFolder, IconImage, IconRefresh } from '../../components/icons.jsx';
+import { APPLY_FORMAT_PROMPT, applyFileChanges, buildCompiledXml, parseApplyXml } from '../compile/compileVault.js';
 import { extractEmbeddedImages } from '../../lib/embeddedImages.js';
 import { buildPdfFromImages } from '../../lib/imagesToPdf.js';
 import { applyLocalChanges, DEFAULT_TEXT_EXTS, isLocalFsSupported, pickLocalDirectory, readLocalFiles } from '../../lib/localFs.js';
-import { downloadMusic } from '../../lib/musicApi.js';
 
 function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
@@ -261,84 +260,11 @@ function EmbeddedImagesSection({ token, folder, activeNoteName, activeNoteConten
   );
 }
 
-// --- 4. Music downloader (music/app.py) -------------------------------------
-function MusicSection({ tree, folder }) {
-  const [linksText, setLinksText] = useState('');
-  const [targetFolderId, setTargetFolderId] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState(null);
-
-  const folderOptions = useMemo(() => {
-    const { folders } = flattenVaultTree(tree);
-    return [{ id: folder.id, path: 'vault' }, ...folders];
-  }, [tree, folder.id]);
-
-  const handleDownload = async () => {
-    const links = linksText.split('\n').map((l) => l.trim()).filter(Boolean);
-    if (!links.length) return;
-    setBusy(true);
-    setResult(null);
-    try {
-      const data = await downloadMusic({ links, folderId: targetFolderId || folder.id });
-      setResult(data);
-    } catch (err) {
-      setResult({ uploaded: [], failed: [{ url: '', error: err.message }] });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="compile-panel-section">
-      <div className="compile-panel-title">
-        <IconAudio size={14} /> YouTube → audio
-      </div>
-      <p className="muted compile-panel-hint">
-        One link per line (videos or playlists). Downloads audio, tags it, and saves it into the vault folder below — needs the
-        Python service running (server/python/README.md).
-      </p>
-      <textarea
-        className="compile-apply-input"
-        placeholder="https://www.youtube.com/watch?v=…"
-        value={linksText}
-        onChange={(e) => setLinksText(e.target.value)}
-      />
-      <select className="spark-input" value={targetFolderId} onChange={(e) => setTargetFolderId(e.target.value)}>
-        {folderOptions.map((f) => (
-          <option key={f.id} value={f.id}>
-            {f.path}
-          </option>
-        ))}
-      </select>
-      <button className="btn-secondary compile-run-btn" onClick={handleDownload} disabled={busy || !linksText.trim()}>
-        {busy ? <IconRefresh size={13} className="spin" /> : <IconAudio size={13} />}
-        {busy ? 'Downloading…' : 'Download'}
-      </button>
-      {result && (
-        <div className="compile-apply-results">
-          {result.uploaded.map((u) => (
-            <div key={u.url} className="compile-apply-row">
-              <span className="compile-apply-path">{u.title || u.name}</span>
-              <span className="compile-apply-status">Saved</span>
-            </div>
-          ))}
-          {result.failed.map((f, i) => (
-            <div key={f.url || i} className="compile-apply-row error">
-              <span className="compile-apply-path">{f.url || 'Download'}</span>
-              <span className="compile-apply-status">{f.error}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Sidebar panel bundling the local-folder mass-edit flow, images→PDF,
-// embedded-image extraction, and the music downloader — the app's
-// integrations of temp/processing's standalone .py scripts (CLAUDE.md
-// section 3 notes where each one's own logic lives now).
-function ToolsPanel({ tree, folder, token, activeNoteName, activeNoteContent, uploadBinary }) {
+// Sidebar panel bundling the local-folder mass-edit flow, images→PDF, and
+// embedded-image extraction — the app's integrations of temp/processing's
+// standalone .py scripts (CLAUDE.md section 3 notes where each one's own
+// logic lives now).
+function ToolsPanel({ folder, token, activeNoteName, activeNoteContent, uploadBinary }) {
   return (
     <div className="compile-panel">
       <LocalFolderSection />
@@ -350,7 +276,6 @@ function ToolsPanel({ tree, folder, token, activeNoteName, activeNoteContent, up
         activeNoteContent={activeNoteContent}
         uploadBinary={uploadBinary}
       />
-      <MusicSection tree={tree} folder={folder} />
     </div>
   );
 }

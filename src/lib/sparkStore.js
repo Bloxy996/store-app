@@ -29,13 +29,6 @@ const SPARK_FOLDER_NAME = '.store';
 const SPARK_ATTACHMENTS_FOLDER_NAME = 'spark-attachments';
 const SPARK_FILE_NAME = 'spark.txt';
 
-// The one spark category that's order-sensitive — see
-// features/sparks/StatementsPanel.jsx. Every other category is just
-// browsed (sorted by capture time in SparksPanel); this one's array order
-// *is* its sorted order, maintained by the Statements backend's sort/
-// insert operations rather than by capture time.
-const STATEMENTS_CATEGORY = 'statements';
-
 const FIELD_SEP = '\t';
 const LINE_SEP = '\n';
 
@@ -208,7 +201,6 @@ export {
   SPARK_FOLDER_NAME,
   SPARK_ATTACHMENTS_FOLDER_NAME,
   SPARK_FILE_NAME,
-  STATEMENTS_CATEGORY,
   makeSparkId,
   parseSparkFile,
   serializeSparkFile,

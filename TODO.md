@@ -3,6 +3,41 @@
 Referenced by `CLAUDE.md` section 7 as the place for open/requested work and
 changelog-style notes, so it doesn't bloat the living architecture doc.
 
+## Removed music downloader; generalized the sorter + Python backend (2026-09)
+
+- **Removed the YouTube-audio music downloader** (`server/python/
+  music_downloader.py`, its `/music/download` Flask route,
+  `server/src/routes/music.js`, `lib/musicApi.js`, `ToolsPanel.jsx`'s
+  `MusicSection`, the `yt-dlp` dependency) — not worth the ffmpeg
+  install/deploy story for what it did. `server/python/` now backs one
+  feature (statements), though it's still written to host more.
+- **Generalized the sorter** off its one hardcoded `statements` category:
+  any category can be toggled into similarity-sorted mode from
+  `SparksPanel.jsx`'s category tree (new `lib/sortedCategories.js`,
+  localStorage-backed), any number at once, each independently. Matching
+  is by exact category path, so a category with nested sub-categories
+  only ever sorts sparks filed directly under its own name,  never the
+  nested ones. `StatementsPanel.jsx` is now `CategorySorterPanel.jsx`,
+  taking `category` as a prop instead of a hardcoded constant. A
+  fresh/upgraded install defaults to `['statements']` toggled on, so
+  existing "statements" data keeps sorting exactly as before with no
+  manual step.
+- **Generalized the Python backend's naming**, since it's no longer
+  framed as "the two features that need Python": `STATEMENTS_SERVICE_URL`
+  is now `PYTHON_SERVICE_URL` (`server/.env.example`, `server/src/
+  config.js`, `server/README.md`, `server/api/index.js`'s comment) —
+  update your `.env` if you had the old name set.
+- **Added an embedding cache to `statements_engine.py`**
+  (`_EMBEDDING_CACHE`, keyed by exact phrase text) alongside its existing
+  word-similarity/alignment/syllable/pairwise-score caches, all now
+  capped at `_MAX_CACHE_ENTRIES` with a blunt full-clear past that rather
+  than growing unboundedly. Repeated sort/insert/lookup calls over
+  phrases the process has already embedded skip the model forward pass
+  entirely — the expensive part, versus the cheap pure-Python scoring
+  the other caches cover. This matters more now that the sorter isn't
+  tied to one category: the same corpus can come back across many calls
+  across many categories.
+
 ## Hosting: Vercel + repo privacy (2026-09)
 
 Shipped: `server/src/app.js` (Express app factory, now wiring up

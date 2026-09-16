@@ -1432,7 +1432,6 @@ export default function App() {
             {activeSideView === 'tools' && (
               <Suspense fallback={null}>
                 <ToolsPanel
-                  tree={tree}
                   folder={folder}
                   token={token}
                   activeNoteName={activeFileForStatus?.name}

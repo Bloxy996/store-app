@@ -21,7 +21,7 @@ async function requireSession(req, res, next) {
 
 async function forward(res, path, body) {
   try {
-    const upstream = await fetch(`${config.statementsServiceUrl}${path}`, {
+    const upstream = await fetch(`${config.pythonServiceUrl}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body || {})

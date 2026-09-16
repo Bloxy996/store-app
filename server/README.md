@@ -42,9 +42,9 @@ Set `VITE_BACKEND_URL` in the frontend's `.env` (e.g.
 
 ## Optional: the Python service
 
-Two features (the Statements spark category, the music downloader) proxy
-through to a separate Python process — see `python/README.md`. Everything
-else in this server works fine without it.
+A general-purpose Python process backs the Statements spark category (and
+is where future Python-only features would live) — see `python/README.md`.
+Everything else in this server works fine without it.
 
 ## Deploying
 
@@ -77,7 +77,7 @@ memory across requests (see `python/README.md`), and its dependencies
 (`torch`, `sentence-transformers`) are well past what a serverless
 function's size/cold-start budget can reasonably absorb — that's true
 whether the rest of the backend is on Render or on Vercel. Point
-`STATEMENTS_SERVICE_URL` at wherever it ends up running.
+`PYTHON_SERVICE_URL` at wherever it ends up running.
 
 Not yet done: no live Vercel deployment of the Node half has actually
 been exercised against this config (no Vercel account/project available

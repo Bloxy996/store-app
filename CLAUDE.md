@@ -27,11 +27,15 @@ there than in the browser.
   frontend (session-cookie authed — see `server/README.md`). This is its
   current job, not a ceiling on its job — extend it for anything that
   benefits from running server-side. A second, optional Python process
-  (`server/python/`, its own README) sits behind two of its routes
-  (`/api/statements/*`, `/api/music/*`) for the two features that
-  actually benefit from Python libraries (sentence-transformers/torch,
-  yt-dlp) — not a general rule that new backend work should be Python,
-  just what those two needed.
+  (`server/python/`, its own README) sits behind `/api/statements/*` for
+  the one feature so far that actually benefits from a Python library
+  (sentence-transformers/torch) — not a general rule that new backend
+  work should be Python, just what that one needed. It's written as a
+  general-purpose Python service, not a statements-only one: add new
+  feature modules there as they come up rather than starting a second
+  process. Config points at it via `PYTHON_SERVICE_URL`
+  (`server/src/config.js`), named for the service, not any one feature
+  behind it.
 - **Auth:** Google Identity Services via the backend's authorization-code
   flow (`hooks/useAuth.js`). An older client-only "proxy" mode (Apps
   Script relay) also still exists — `lib/driveApi.js`'s
@@ -156,23 +160,34 @@ load/save outside the main sync loop. UI:
 entry point opens). See `android/README.md` for the three Android entry
 points.
 
-One category, `statements` (`STATEMENTS_CATEGORY`), is order-sensitive —
-its sparks' array order in `spark.txt` *is* their similarity-sorted
-order, maintained by `server/python/statements_engine.py` (sort/
-sorted-insert/lookup/spellcheck) via `lib/statementsApi.js`.
-`SparksPanel.jsx` special-cases this one category to render
-`StatementsPanel.jsx` instead of the normal browse list.
+Any category can be made order-sensitive — the user toggles it on per
+category (an icon next to it in `SparksPanel.jsx`'s category tree), and
+any number of categories can be toggled on at once, independently.
+`lib/sortedCategories.js` tracks the toggled set in `localStorage`
+(3.1). A toggled-on category's sparks' array order in `spark.txt` *is*
+their similarity-sorted order, maintained by
+`server/python/statements_engine.py` (sort/sorted-insert/lookup/
+spellcheck) via `lib/statementsApi.js` — matched by *exact* category
+path, so a category with nested sub-categories under it only sorts the
+sparks filed directly under its own name, never the nested ones (those
+are separate categories with their own independent toggle).
+`SparksPanel.jsx` renders `CategorySorterPanel.jsx` instead of the
+normal browse list for whichever category is both active and toggled
+on. (Before this was generalized, exactly one hardcoded category,
+`statements`, had this behavior — `lib/sortedCategories.js` defaults a
+fresh/upgraded install's toggled set to just `['statements']` so
+existing data keeps sorting the same way with no manual step.)
 
 ### 3.10 Tools panel (local-disk + media utilities)
 
-`features/tools/ToolsPanel.jsx` — four utilities that operate outside the
+`features/tools/ToolsPanel.jsx` — three utilities that operate outside the
 Drive vault: a local-folder counterpart to Compile/Apply
 (`lib/localFs.js`, File System Access API, reuses `compile/
 compileVault.js`'s XML format rather than having its own), images→PDF
-(`lib/imagesToPdf.js`, client-side via jsPDF), extracting embedded
-base64 images out of the open note (`lib/embeddedImages.js`), and a
-YouTube-audio-to-vault downloader (`lib/musicApi.js` ->
-`server/python/music_downloader.py`, yt-dlp + ffmpeg).
+(`lib/imagesToPdf.js`, client-side via jsPDF), and extracting embedded
+base64 images out of the open note (`lib/embeddedImages.js`). (A fourth,
+a YouTube-audio-to-vault downloader via yt-dlp/ffmpeg, was removed —
+see `TODO.md`.)
 
 ## 4. Mobile performance
 
@@ -201,8 +216,8 @@ src/
     vaultConfig.js, concurrency.js, indexedDb.js, driveApi.js,
     markdownParse.js, markdownRender.jsx, queryEngine.js, linkGraph.js,
     search.js, paneTree.js, frontmatterSchema.js, offlineRules.js,
-    sparkStore.js, mathUtils.js, localFs.js, imagesToPdf.js,
-    embeddedImages.js, statementsApi.js, musicApi.js
+    sparkStore.js, sortedCategories.js, mathUtils.js, localFs.js,
+    imagesToPdf.js, embeddedImages.js, statementsApi.js
 
   hooks/
     useAuth.js, useVaultSync.js, useVaultIndex.js, useDriveImageUrl.js,
@@ -216,8 +231,8 @@ src/
   features/
     onboarding/, sidebar/, search/, tags/, bookmarks/, toc/
     sparks/         sparkStore-backed SparksPanel.jsx, SparkCaptureForm.jsx,
-                     StatementsPanel.jsx — the "statements" category (3.9)
-    tools/          ToolsPanel.jsx — local-folder/PDF/image/music utilities (3.10)
+                     CategorySorterPanel.jsx — sorter-enabled categories (3.9)
+    tools/          ToolsPanel.jsx — local-folder/PDF/image utilities (3.10)
     panes/          PaneNode.jsx (recursive split-pane), TabBar.jsx
     editor/         CodeMirrorNoteEditor, EditorContent (3.6), NoteTitleField,
                      inlinePreviewPlugin, wysiwygBlocks, wikilinkCompletion,
@@ -248,10 +263,11 @@ server/                              — Node/Express backend (2)
   src/index.js                       — long-running entrypoint (Render/plain Node host)
   api/index.js                       — Vercel serverless entrypoint (no .listen())
   src/config.js, session.js, googleAuth.js, driveClient.js
-  src/routes/auth.js, drive.js, statements.js, music.js
-  python/                            — optional Python service (2), own README — NOT part of the
-                                        Vercel path above, needs its own persistent host regardless
-    app.py, statements_engine.py, music_downloader.py, requirements.txt
+  src/routes/auth.js, drive.js, statements.js
+  python/                            — optional, general-purpose Python service (2), own README — NOT
+                                        part of the Vercel path above, needs its own persistent host
+                                        regardless; new Python-only features get their own module here
+    app.py, statements_engine.py, requirements.txt
   README.md                          — setup/deploy
 
 vercel.json                          — Vercel build+rewrite config for hosting frontend + the Node

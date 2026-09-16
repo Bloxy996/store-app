@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# Phrase-similarity engine backing the Statements spark category (see
+# Phrase-similarity engine backing sorter-enabled spark categories (see
 # CLAUDE.md section 3.9 and this folder's README). Ported from the original
 # CLI tool (temp/processing/statements/scripts/app.py): same scoring —
 # semantic embedding cosine similarity + a custom word-alignment score +
@@ -8,11 +8,23 @@
 # count). What changed moving from a one-shot CLI to a service:
 #   - No disk-pickled similarity cache and no interactive tie-halt-and-ask —
 #     an API call resolves ties itself via the same chain and returns a
-#     result, it doesn't block on a human. Caches below are in-memory only,
-#     for the lifetime of one request's own comparisons.
+#     result, it doesn't block on a human.
 #   - Two new operations the CLI never had: sorted-insertion (place new
 #     phrases into an already-sorted list without re-sorting everything) and
 #     lookup (rank stored phrases by similarity to a query, not reorder).
+#
+# Caching: all caches below (_EMBEDDING_CACHE plus the four further down)
+# are module-level, so they live for as long as this process stays warm —
+# not just one request. That matters now more than it used to: the sorter
+# is no longer tied to one hardcoded category, so the same corpus of
+# phrases can come back across many sort/insert/lookup calls across
+# multiple categories, and re-embedding (by far the most expensive step —
+# a model forward pass, vs. the cheap pure-Python alignment/matcher scores)
+# on every call would scale badly with that. Keyed by exact phrase text, so
+# a cache hit only ever returns a value some prior call already computed
+# for that exact string. Unbounded like the pre-existing caches below; see
+# _maybe_trim_cache if that ever needs a real eviction policy instead of a
+# blunt periodic clear.
 # ---------------------------------------------------------------------------
 
 import re
@@ -21,12 +33,25 @@ from difflib import SequenceMatcher
 DEFAULT_WEIGHTS = {'semantic': 0.50, 'alignment': 0.30, 'phrase_matcher': 0.20}
 
 _MODEL = None
+_EMBEDDING_CACHE = {}
 _WORD_SIM_CACHE = {}
 _ALIGNMENT_CACHE = {}
 _SYLLABLE_CACHE = {}
 _PAIR_SCORE_CACHE = {}
 
+# Rough cap so a long-running process handling many distinct phrases over
+# time doesn't grow these dicts unboundedly. Not an LRU — just a full clear
+# once a cache gets big, cheap re-warming since embedding is the only
+# genuinely slow part and even that's fast per-phrase once the model is
+# loaded.
+_MAX_CACHE_ENTRIES = 20000
+
 TOKEN_RE = re.compile(r'[^\w\s]')
+
+
+def _maybe_trim_cache(cache):
+    if len(cache) > _MAX_CACHE_ENTRIES:
+        cache.clear()
 
 
 def load_model():
@@ -38,7 +63,20 @@ def load_model():
 
 
 def embed(phrases):
-    return load_model().encode(list(phrases), convert_to_tensor=True, show_progress_bar=False)
+    """Encodes phrases to embeddings, reusing _EMBEDDING_CACHE for any
+    phrase (exact string match) already embedded by a prior call — only
+    genuinely new phrases hit the model. Returns a tensor stacked in the
+    same order as the input, matching the old encode()-only behavior."""
+    import torch
+
+    phrases = list(phrases)
+    to_encode = [p for p in phrases if p not in _EMBEDDING_CACHE]
+    if to_encode:
+        _maybe_trim_cache(_EMBEDDING_CACHE)
+        new_embs = load_model().encode(to_encode, convert_to_tensor=True, show_progress_bar=False)
+        for p, e in zip(to_encode, new_embs):
+            _EMBEDDING_CACHE[p] = e
+    return torch.stack([_EMBEDDING_CACHE[p] for p in phrases])
 
 
 def _cos_sim_row(anchor_emb, other_embs):
@@ -93,6 +131,7 @@ def dedupe(phrases):
 def cached_sequence_matcher(w1, w2):
     key = (w1, w2)
     if key not in _WORD_SIM_CACHE:
+        _maybe_trim_cache(_WORD_SIM_CACHE)
         _WORD_SIM_CACHE[key] = SequenceMatcher(None, w1, w2).ratio()
     return _WORD_SIM_CACHE[key]
 
@@ -118,6 +157,7 @@ def compute_custom_alignment(words1, words2):
         if best != -1.0:
             total += best
     res = max(-1.0, min(1.0, total / len1))
+    _maybe_trim_cache(_ALIGNMENT_CACHE)
     _ALIGNMENT_CACHE[key] = res
     return res
 
@@ -132,6 +172,7 @@ def estimate_syllables(text):
         if word.endswith('e') and n > 1:
             n -= 1
         count += max(1, n)
+    _maybe_trim_cache(_SYLLABLE_CACHE)
     _SYLLABLE_CACHE[text] = count
     return count
 
@@ -143,6 +184,7 @@ def pairwise_score(p1, p2, semantic_score, weights):
     alignment = compute_custom_alignment(tokenize(p1), tokenize(p2))
     matcher = SequenceMatcher(None, p1, p2).ratio()
     score = max(0.0, semantic_score * weights['semantic'] + alignment * weights['alignment'] + matcher * weights['phrase_matcher'])
+    _maybe_trim_cache(_PAIR_SCORE_CACHE)
     _PAIR_SCORE_CACHE[key] = score
     return score
 

@@ -158,6 +158,18 @@
   overflow-y: auto;
 }
 
+/* Category row is a plain flex container (not a button, unlike TagsPanel's
+   .tag-row) so it can hold two independent controls: the select button and
+   the sorter-toggle icon-btn next to it — see SparksPanel.jsx. */
+.spark-category-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+
 .spark-row {
   display: flex;
   gap: 8px;

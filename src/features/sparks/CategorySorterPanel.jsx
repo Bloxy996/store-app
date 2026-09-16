@@ -2,36 +2,41 @@ import { useMemo, useState } from 'react';
 
 import { IconCheck, IconRefresh, IconSearch } from '../../components/icons.jsx';
 import { insertStatements, lookupStatements, sortStatements, spellcheckStatements } from '../../lib/statementsApi.js';
-import { makeSparkId, STATEMENTS_CATEGORY } from '../../lib/sparkStore.js';
+import { makeSparkId } from '../../lib/sparkStore.js';
 
-function newStatementSpark(text) {
-  return { id: makeSparkId(), createdAt: Date.now(), category: STATEMENTS_CATEGORY, linkedFileIds: [], screenshotFileId: '', text };
+function newSortedSpark(category, text) {
+  return { id: makeSparkId(), createdAt: Date.now(), category, linkedFileIds: [], screenshotFileId: '', text };
 }
 
 // Replays the Python service's per-phrase insert results against the
-// existing "statements" spark objects in the same order it applied them
-// to its own string list — so `position`/`previous` from the API line up
+// existing category's spark objects in the same order it applied them to
+// its own string list — so `position`/`previous` from the API line up
 // with array indices here exactly, and every spark keeps its id (and
 // therefore createdAt) unless it's a phrase inserted this call.
-function applyInsertResults(existingSparks, results) {
+function applyInsertResults(existingSparks, category, results) {
   const working = existingSparks.slice();
   results.forEach((r) => {
-    if (r.action === 'inserted') working.splice(r.position, 0, newStatementSpark(r.phrase));
+    if (r.action === 'inserted') working.splice(r.position, 0, newSortedSpark(category, r.phrase));
     else if (r.action === 'replaced_duplicate') working[r.position] = { ...working[r.position], text: r.phrase };
     // 'skipped_duplicate' — nothing to apply.
   });
   return working;
 }
 
-// The Statements spark category (see CLAUDE.md 3.9 and this repo's
-// temp/processing/statements — now folded in here rather than being its
-// own standalone tool). Sparks in this category are order-sensitive: the
-// stored array order *is* the sorted order, maintained by the Python
-// similarity engine's sort/insert operations, not by capture time like
-// every other spark category.
-function StatementsPanel({ sparks, busy, saveSparks }) {
-  const statementsSparks = useMemo(() => sparks.filter((s) => s.category === STATEMENTS_CATEGORY), [sparks]);
-  const existingPhrases = useMemo(() => statementsSparks.map((s) => s.text), [statementsSparks]);
+// Renders whichever category the user has toggled into "sorter" mode (see
+// lib/sortedCategories.js) — any category, not just one hardcoded name,
+// and more than one can be sorter-enabled at once, each independently.
+// Sparks in `category` are order-sensitive: the stored array order *is*
+// the sorted order, maintained by the Python similarity engine's
+// sort/insert operations, not by capture time like a normal category.
+//
+// `category` is matched exactly (`s.category === category`), not by
+// prefix — a category with nested sub-categories only sorts the sparks
+// filed directly under its own name; sparks under a nested category are a
+// separate category with its own independent sorter toggle.
+function CategorySorterPanel({ sparks, category, busy, saveSparks }) {
+  const categorySparks = useMemo(() => sparks.filter((s) => s.category === category), [sparks, category]);
+  const existingPhrases = useMemo(() => categorySparks.map((s) => s.text), [categorySparks]);
 
   const [addText, setAddText] = useState('');
   const [working, setWorking] = useState(false);
@@ -71,9 +76,9 @@ function StatementsPanel({ sparks, busy, saveSparks }) {
     setInsertSummary(null);
     try {
       const { results } = await insertStatements(existingPhrases, phrases);
-      const nextStatements = applyInsertResults(statementsSparks, results);
-      const others = sparks.filter((s) => s.category !== STATEMENTS_CATEGORY);
-      await saveSparks([...others, ...nextStatements]);
+      const nextCategorySparks = applyInsertResults(categorySparks, category, results);
+      const others = sparks.filter((s) => s.category !== category);
+      await saveSparks([...others, ...nextCategorySparks]);
       setInsertSummary(results);
       setAddText('');
       setSpellResults(null);
@@ -87,8 +92,8 @@ function StatementsPanel({ sparks, busy, saveSparks }) {
     setWorking(true);
     try {
       const sorted = await sortStatements(existingPhrases);
-      const others = sparks.filter((s) => s.category !== STATEMENTS_CATEGORY);
-      await saveSparks([...others, ...sorted.map(newStatementSpark)]);
+      const others = sparks.filter((s) => s.category !== category);
+      await saveSparks([...others, ...sorted.map((text) => newSortedSpark(category, text))]);
     } finally {
       setWorking(false);
     }
@@ -111,7 +116,7 @@ function StatementsPanel({ sparks, busy, saveSparks }) {
   return (
     <div className="compile-panel-section" style={{ border: 'none', padding: 0 }}>
       <p className="muted compile-panel-hint">
-        {statementsSparks.length} stored phrase{statementsSparks.length === 1 ? '' : 's'}, in similarity-sorted order.
+        {categorySparks.length} stored phrase{categorySparks.length === 1 ? '' : 's'}, in similarity-sorted order.
       </p>
 
       <div className="compile-panel-section">
@@ -209,14 +214,14 @@ function StatementsPanel({ sparks, busy, saveSparks }) {
       <div className="compile-panel-section">
         <div className="compile-panel-title">All stored phrases</div>
         <div className="compile-apply-results">
-          {statementsSparks.length === 0 && <p className="muted small empty-hint">None yet — add some above.</p>}
-          {statementsSparks.map((s) => (
+          {categorySparks.length === 0 && <p className="muted small empty-hint">None yet — add some above.</p>}
+          {categorySparks.map((s) => (
             <div key={s.id} className="compile-apply-row">
               <span className="compile-apply-path">{s.text}</span>
             </div>
           ))}
         </div>
-        {statementsSparks.length > 1 && (
+        {categorySparks.length > 1 && (
           <button className="btn-secondary compile-run-btn" onClick={handleResortAll} disabled={working || busy}>
             {working ? <IconRefresh size={13} className="spin" /> : <IconRefresh size={13} />} Re-sort all
           </button>
@@ -226,4 +231,4 @@ function StatementsPanel({ sparks, busy, saveSparks }) {
   );
 }
 
-export { StatementsPanel };
+export { CategorySorterPanel };
