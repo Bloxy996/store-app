@@ -175,4 +175,4 @@ router.patch('/api/drive/item/:id/trash', requireAuth, async (req, res) => {
   }
 });
 
-export { router as driveRouter };
+export { router as driveRouter, requireAuth };

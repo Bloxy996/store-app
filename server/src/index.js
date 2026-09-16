@@ -4,6 +4,8 @@ import express from 'express';
 import { config } from './config.js';
 import { authRouter } from './routes/auth.js';
 import { driveRouter } from './routes/drive.js';
+import { musicRouter } from './routes/music.js';
+import { statementsRouter } from './routes/statements.js';
 
 const app = express();
 
@@ -21,6 +23,8 @@ app.get('/healthz', (req, res) => res.json({ ok: true }));
 
 app.use(authRouter);
 app.use(driveRouter);
+app.use(statementsRouter);
+app.use(musicRouter);
 
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);

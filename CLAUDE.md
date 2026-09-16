@@ -26,7 +26,12 @@ there than in the browser.
   refresh token server-side and proxies `/api/drive/*` calls for the
   frontend (session-cookie authed — see `server/README.md`). This is its
   current job, not a ceiling on its job — extend it for anything that
-  benefits from running server-side.
+  benefits from running server-side. A second, optional Python process
+  (`server/python/`, its own README) sits behind two of its routes
+  (`/api/statements/*`, `/api/music/*`) for the two features that
+  actually benefit from Python libraries (sentence-transformers/torch,
+  yt-dlp) — not a general rule that new backend work should be Python,
+  just what those two needed.
 - **Auth:** Google Identity Services via the backend's authorization-code
   flow (`hooks/useAuth.js`). An older client-only "proxy" mode (Apps
   Script relay) also still exists — `lib/driveApi.js`'s
@@ -143,6 +148,24 @@ load/save outside the main sync loop. UI:
 entry point opens). See `android/README.md` for the three Android entry
 points.
 
+One category, `statements` (`STATEMENTS_CATEGORY`), is order-sensitive —
+its sparks' array order in `spark.txt` *is* their similarity-sorted
+order, maintained by `server/python/statements_engine.py` (sort/
+sorted-insert/lookup/spellcheck) via `lib/statementsApi.js`.
+`SparksPanel.jsx` special-cases this one category to render
+`StatementsPanel.jsx` instead of the normal browse list.
+
+### 3.10 Tools panel (local-disk + media utilities)
+
+`features/tools/ToolsPanel.jsx` — four utilities that operate outside the
+Drive vault: a local-folder counterpart to Compile/Apply
+(`lib/localFs.js`, File System Access API, reuses `compile/
+compileVault.js`'s XML format rather than having its own), images→PDF
+(`lib/imagesToPdf.js`, client-side via jsPDF), extracting embedded
+base64 images out of the open note (`lib/embeddedImages.js`), and a
+YouTube-audio-to-vault downloader (`lib/musicApi.js` ->
+`server/python/music_downloader.py`, yt-dlp + ffmpeg).
+
 ## 4. Mobile performance
 
 Priority, not just a desktop app: code-split anything outside the
@@ -170,7 +193,8 @@ src/
     vaultConfig.js, concurrency.js, indexedDb.js, driveApi.js,
     markdownParse.js, markdownRender.jsx, queryEngine.js, linkGraph.js,
     search.js, paneTree.js, frontmatterSchema.js, offlineRules.js,
-    sparkStore.js, mathUtils.js
+    sparkStore.js, mathUtils.js, localFs.js, imagesToPdf.js,
+    embeddedImages.js, statementsApi.js, musicApi.js
 
   hooks/
     useAuth.js, useVaultSync.js, useVaultIndex.js, useDriveImageUrl.js,
@@ -182,7 +206,10 @@ src/
     ImageViewer.css, MiniMarkdownEditor, ResizeHandle
 
   features/
-    onboarding/, sidebar/, search/, tags/, sparks/, bookmarks/, toc/
+    onboarding/, sidebar/, search/, tags/, bookmarks/, toc/
+    sparks/         sparkStore-backed SparksPanel.jsx, SparkCaptureForm.jsx,
+                     StatementsPanel.jsx — the "statements" category (3.9)
+    tools/          ToolsPanel.jsx — local-folder/PDF/image/music utilities (3.10)
     panes/          PaneNode.jsx (recursive split-pane), TabBar.jsx
     editor/         CodeMirrorNoteEditor, EditorContent (3.6), NoteTitleField,
                      inlinePreviewPlugin, wysiwygBlocks, wikilinkCompletion,
@@ -210,7 +237,9 @@ src/
 
 server/                              — Node/Express backend (2)
   src/index.js, config.js, session.js, googleAuth.js, driveClient.js
-  src/routes/auth.js, drive.js
+  src/routes/auth.js, drive.js, statements.js, music.js
+  python/                            — optional Python service (2), own README
+    app.py, statements_engine.py, music_downloader.py, requirements.txt
   README.md                          — setup/deploy
 
 android/                             — separate Gradle project (3.9)

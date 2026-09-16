@@ -1,0 +1,5 @@
+flask>=3.0,<4
+sentence-transformers>=2.7,<3
+torch>=2.2,<3
+pyspellchecker>=0.8,<1
+yt-dlp>=2024.8.6

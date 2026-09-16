@@ -40,6 +40,12 @@ Services token-client flow (see `docs/CLAUDE.md` section 2 for why).
 Set `VITE_BACKEND_URL` in the frontend's `.env` (e.g.
 `http://localhost:8787` for local dev) — see `src/lib/vaultConfig.js`.
 
+## Optional: the Python service
+
+Two features (the Statements spark category, the music downloader) proxy
+through to a separate Python process — see `python/README.md`. Everything
+else in this server works fine without it.
+
 ## Deploying
 
 Any host that runs a plain Node/Express process works (Render's free tier

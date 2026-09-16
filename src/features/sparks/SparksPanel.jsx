@@ -1,9 +1,12 @@
-import React, { useMemo, useState } from 'react';
+import React, { Suspense, lazy, useMemo, useState } from 'react';
 
 import { IconLink2, IconLoader, IconPlus, IconTrash, IconX, IconZap } from '../../components/icons.jsx';
 import { useDriveImageUrl } from '../../hooks/useDriveImageUrl.js';
 import { isProxy } from '../../lib/driveApi.js';
+import { STATEMENTS_CATEGORY } from '../../lib/sparkStore.js';
 import { SparkCaptureForm } from './SparkCaptureForm.jsx';
+
+const StatementsPanel = lazy(() => import('./StatementsPanel.jsx').then((m) => ({ default: m.StatementsPanel })));
 
 function SparkScreenshotThumb({ token, fileId }) {
   const { url } = useDriveImageUrl(token, fileId);
@@ -14,7 +17,7 @@ function SparkScreenshotThumb({ token, fileId }) {
 // `focusFileId`, when set (via a note's "N sparks" indicator — see
 // SparkFileMentions.jsx), pre-filters the list to sparks linked to that
 // file instead of by category, and shows a "clear filter" chip.
-const SparksPanel = React.memo(function SparksPanel({ token, sparks, categoryTree, busy, addSparkCapture, deleteSpark, filesMeta, getBody, onOpenNote, focusFileId, onClearFocusFile, autoOpenCapture }) {
+const SparksPanel = React.memo(function SparksPanel({ token, sparks, categoryTree, busy, addSparkCapture, deleteSpark, saveSparks, filesMeta, getBody, onOpenNote, focusFileId, onClearFocusFile, autoOpenCapture }) {
   const [activeCategory, setActiveCategory] = useState(null);
   const [captureOpen, setCaptureOpen] = useState(!!autoOpenCapture);
 
@@ -81,7 +84,7 @@ const SparksPanel = React.memo(function SparksPanel({ token, sparks, categoryTre
             ))}
           </div>
         )}
-        {(activeCategory || focusFileId) && (
+        {(activeCategory || focusFileId) && activeCategory !== STATEMENTS_CATEGORY && (
           <div className="spark-list">
             {visible.length === 0 && <p className="muted small empty-hint">No sparks here.</p>}
             {visible.map((s) => (
@@ -109,6 +112,11 @@ const SparksPanel = React.memo(function SparksPanel({ token, sparks, categoryTre
               </div>
             ))}
           </div>
+        )}
+        {activeCategory === STATEMENTS_CATEGORY && (
+          <Suspense fallback={null}>
+            <StatementsPanel sparks={sparks} busy={busy} saveSparks={saveSparks} />
+          </Suspense>
         )}
       </div>
     </div>

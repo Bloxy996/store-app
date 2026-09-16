@@ -40,6 +40,7 @@ import { OfflineConflictsPanel } from './features/offline/OfflineConflictsPanel.
 // EditorContent.jsx's file.kind switch same as DatabaseView/CanvasView.)
 const HelpModal = lazy(() => import('./features/help/HelpModal.jsx').then((m) => ({ default: m.HelpModal })));
 const CompilePanel = lazy(() => import('./features/compile/CompilePanel.jsx').then((m) => ({ default: m.CompilePanel })));
+const ToolsPanel = lazy(() => import('./features/tools/ToolsPanel.jsx').then((m) => ({ default: m.ToolsPanel })));
 const PaletteModal = lazy(() => import('./features/palette/PaletteModal.jsx').then((m) => ({ default: m.PaletteModal })));
 const FrontmatterSchemaSettings = lazy(() =>
   import('./features/settings/FrontmatterSchemaSettings.jsx').then((m) => ({ default: m.FrontmatterSchemaSettings }))
@@ -1383,6 +1384,7 @@ export default function App() {
                 busy={sparks.busy}
                 addSparkCapture={sparks.addSparkCapture}
                 deleteSpark={sparks.deleteSpark}
+                saveSparks={sparks.saveSparks}
                 filesMeta={sync.filesMeta}
                 getBody={vaultIndex.getBody}
                 onOpenNote={(id) => openFileInPane(activePaneId, id)}
@@ -1415,6 +1417,18 @@ export default function App() {
                   ensureIndexed={vaultIndex.ensureIndexed}
                   indexReady={vaultIndex.ready}
                   onApplyChanges={applyCompiledChanges}
+                />
+              </Suspense>
+            )}
+            {activeSideView === 'tools' && (
+              <Suspense fallback={null}>
+                <ToolsPanel
+                  tree={tree}
+                  folder={folder}
+                  token={token}
+                  activeNoteName={activeFileForStatus?.name}
+                  activeNoteContent={activeContentForStatus}
+                  uploadBinary={driveUploadBinary}
                 />
               </Suspense>
             )}

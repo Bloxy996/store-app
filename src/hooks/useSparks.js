@@ -151,6 +151,27 @@ function useSparks(token, folder, sync) {
     [sparks, persist]
   );
 
+  // For callers that build a whole next `sparks` array themselves — e.g.
+  // StatementsPanel replacing the "statements" category's slice after a
+  // sort/insert, order and all. `persist` already does the save + local
+  // state update either way; this just exposes it under a name that
+  // doesn't imply "append one capture" like addSparkCapture does.
+  const saveSparks = useCallback(
+    async (nextSparks) => {
+      setBusy(true);
+      setError('');
+      try {
+        await persist(nextSparks);
+      } catch (err) {
+        setError(err.message || 'Failed to save sparks');
+        throw err;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [persist]
+  );
+
   const categoryTree = useMemo(() => buildSparkCategoryTree(sparks), [sparks]);
   const sparksByFileId = useMemo(() => buildSparksByFileId(sparks), [sparks]);
 
@@ -161,6 +182,7 @@ function useSparks(token, folder, sync) {
     error,
     addSparkCapture,
     deleteSpark,
+    saveSparks,
     categoryTree,
     sparksByFileId
   };

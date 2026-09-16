@@ -24,7 +24,12 @@ const config = {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
-  driveScope: DRIVE_SCOPE
+  driveScope: DRIVE_SCOPE,
+  // Optional: the Python service (server/python/, see its README) backing
+  // the Statements spark category and the music downloader. Not
+  // `required()` — the rest of the app works without it; routes that need
+  // it just fail with a clear error if it isn't reachable.
+  statementsServiceUrl: process.env.STATEMENTS_SERVICE_URL || 'http://127.0.0.1:8788'
 };
 
 export { config };

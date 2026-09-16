@@ -1,3 +1,0 @@
-sentence-transformers
-torch
-flgreatgamer1776et
