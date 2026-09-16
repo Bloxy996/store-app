@@ -3,6 +3,59 @@
 Referenced by `CLAUDE.md` section 7 as the place for open/requested work and
 changelog-style notes, so it doesn't bloat the living architecture doc.
 
+## Removed the Python backend; Statements now runs entirely client-side (2026-09)
+
+- **Removed `server/python/`** (Flask app, `statements_engine.py`,
+  `sentence-transformers`/`torch`/`pyspellchecker` deps) and its Node proxy
+  (`server/src/routes/statements.js`, the `/api/statements/*` routes,
+  `PYTHON_SERVICE_URL` in `server/src/config.js`/`.env.example`). The
+  backend no longer has any compute-heavy route or reason to run a second
+  process — just OAuth + Drive proxying.
+- **Ported `statements_engine.py` to run in the browser** instead:
+  `lib/statementsEngine.js` (the pure scoring/tie-break/dedupe logic,
+  hand-translated 1:1), `lib/statementsEmbeddings.js` (`@xenova/
+  transformers` running the same `all-MiniLM-L6-v2` model as an ONNX
+  build, in place of `sentence-transformers`/PyTorch), and
+  `lib/spellcheck.js` (`nspell` + `dictionary-en`'s `.aff`/`.dic` files,
+  fetched lazily via Vite `?url` rather than importing `dictionary-en`
+  itself — its loader reads via Node's `fs` and doesn't run in a browser
+  bundle). `lib/statementsApi.js` keeps the exact same four exported
+  functions/signatures/return shapes it always had, so
+  `CategorySorterPanel.jsx` didn't need any changes.
+- **Not an exact algorithmic match, deliberately**: word/phrase similarity
+  ratios now come from `string-similarity-js` (Dice coefficient) instead
+  of Python's `difflib.SequenceMatcher` (Ratcliff/Obershelp) —
+  `DEFAULT_WEIGHTS` in `statementsEngine.js` were adjusted for the new
+  scale. Spellcheck suggestions come from `nspell` (Hunspell-based)
+  instead of `pyspellchecker` (Norvig frequency-list based) — different
+  dictionary, different suggestions for the same misspelling. Embeddings
+  are the same model, converted to ONNX; not bit-identical to the PyTorch
+  version but close enough not to matter for similarity ranking.
+- **Bundle size tradeoff**: `@xenova/transformers` (onnxruntime-web) adds
+  real weight to the single main JS bundle — `vite.config.js`'s
+  `rolldownOptions.output.codeSplitting: false` (a workaround for an
+  unrelated Rolldown/Vite 8 init-order bug — see its comment) means this
+  can't currently be split into a lazy-loaded chunk the way graph/
+  database/canvas/vector are, so every user downloads it on first load,
+  not just people who use the Statements sorter. Bumped `workbox.
+  maximumFileSizeToCacheInBytes` (was hitting the 2 MiB default) so it
+  still gets precached for offline use. Revisit splitting it out once the
+  Rolldown bug is fixed upstream.
+- **Model weights and the dictionary word list are fetched at runtime**,
+  not bundled: the `all-MiniLM-L6-v2` ONNX weights come from Hugging
+  Face's CDN on first use (cached by `@xenova/transformers` itself via
+  Cache Storage, separate from the service worker), and the ~550KB
+  `dictionary-en` word list is a separate build asset fetched only if/when
+  spellcheck is actually used — neither is precached by the service
+  worker, so first use of either needs network once, and (for the model)
+  needs `huggingface.co` reachable, a new runtime dependency the old
+  Vercel/Render deploy never had.
+- **New capability, not just a rewrite**: since sorting/insert/lookup no
+  longer depend on a reachable backend once the model's cached, the
+  Statements sorter now works fully offline — it didn't before (it
+  degraded to a "service unavailable" message if the Python process
+  wasn't reachable).
+
 ## Removed music downloader; generalized the sorter + Python backend (2026-09)
 
 - **Removed the YouTube-audio music downloader** (`server/python/

@@ -1,8 +1,8 @@
 // ---------------------------------------------------------------------------
 // Which spark categories are "sorter" categories — i.e. their sparks are
-// kept in a similarity-sorted order (via the Python service's phrase-sort
-// engine, server/python/statements_engine.py) instead of being browsed by
-// capture time like a normal category (see CategorySorterPanel.jsx).
+// kept in a similarity-sorted order (via lib/statementsEngine.js's phrase-
+// sort engine, running client-side) instead of being browsed by capture
+// time like a normal category (see CategorySorterPanel.jsx).
 //
 // This used to be one hardcoded category ("statements"). Now it's a set the
 // user builds themselves — any category can be toggled in or out from the

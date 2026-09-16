@@ -40,12 +40,6 @@ Services token-client flow (see `CLAUDE.md` section 2 for why).
 Set `VITE_BACKEND_URL` in the frontend's `.env` (e.g.
 `http://localhost:8787` for local dev) — see `src/lib/vaultConfig.js`.
 
-## Optional: the Python service
-
-A general-purpose Python process backs the Statements spark category (and
-is where future Python-only features would live) — see `python/README.md`.
-Everything else in this server works fine without it.
-
 ## Deploying
 
 Two supported paths, both running the exact same route/middleware code
@@ -63,7 +57,7 @@ env vars point where — no code changes either way.
   `https://<your-app>.vercel.app`, and `VITE_BACKEND_URL` to an empty
   string (frontend and backend share one origin, so calls are relative).
   Verified against a real deployment.
-- **All on Render (three separate services in one workspace):**
+- **All on Render (two separate services in one workspace):**
   - Frontend: a Render **Static Site** pointing at the repo root, build
     command `npm install && npm run build`, publish directory `dist`.
   - Backend: a Render **Web Service** pointing at `server/`, build
@@ -88,13 +82,11 @@ OAuth client in Google Cloud Console (old one can stay too, multiple are
 allowed), and redeploy on the new host. `src/app.js` and everything it
 wires up stays untouched.
 
-**The Python service is part of neither path above and needs its own
-persistent host regardless** (a small VM, Render/Fly/etc. — anything
-that keeps one process warm; if you're already on the all-Render path,
-a third free Render Web Service in the same workspace works fine for
-this too). Its embedding model has to stay loaded in memory across
-requests (see `python/README.md`), and its dependencies (`torch`,
-`sentence-transformers`) are well past what a serverless function's
-size/cold-start budget can reasonably absorb — that's true whether the
-rest of the backend is on Render or on Vercel. Point
-`PYTHON_SERVICE_URL` at wherever it ends up running.
+There used to be a third piece here — a separate Python process
+(`server/python/`) that needed its own persistent host regardless of
+which path above was in use, since its embedding model had to stay
+loaded in memory across requests. That's gone: the Statements spark
+category now runs entirely client-side (`src/lib/statementsEngine.js`
+and friends, on the frontend) instead of calling out to a Python
+service, so there's nothing left that needs a long-running host outside
+the two paths above. See `TODO.md` for the removal.

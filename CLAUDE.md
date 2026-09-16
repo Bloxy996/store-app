@@ -22,20 +22,22 @@ caching, or anything else that's a better fit there than in the browser.
   (`features/editor/`).
 - **Storage:** Google Drive REST API (`drive.file` scope) holds vault
   content. IndexedDB and an in-memory `Map` are used as caches (3.1).
-- **Backend (`server/`):** Node/Express. Currently holds the OAuth
-  refresh token server-side and proxies `/api/drive/*` calls for the
-  frontend (session-cookie authed — see `server/README.md`). This is its
-  current job, not a ceiling on its job — extend it for anything that
-  benefits from running server-side. A second, optional Python process
-  (`server/python/`, its own README) sits behind `/api/statements/*` for
-  the one feature so far that actually benefits from a Python library
-  (sentence-transformers/torch) — not a general rule that new backend
-  work should be Python, just what that one needed. It's written as a
-  general-purpose Python service, not a statements-only one: add new
-  feature modules there as they come up rather than starting a second
-  process. Config points at it via `PYTHON_SERVICE_URL`
-  (`server/src/config.js`), named for the service, not any one feature
-  behind it.
+- **Backend (`server/`):** Node/Express. Holds the OAuth refresh token
+  server-side and proxies `/api/drive/*` calls for the frontend
+  (session-cookie authed — see `server/README.md`). This is its current
+  job, not a ceiling on its job — extend it for anything that benefits
+  from running server-side. There used to be a second, optional Python
+  process (`server/python/`) behind `/api/statements/*` for phrase
+  similarity/spellcheck (sentence-transformers/torch) — that's gone; the
+  Statements spark category (3.9) now runs entirely client-side instead
+  (`lib/statementsEngine.js`, `lib/statementsEmbeddings.js`,
+  `lib/spellcheck.js` — `@xenova/transformers` running the same
+  all-MiniLM-L6-v2 model as an ONNX build in-browser, plus
+  `string-similarity-js` and `nspell`/`dictionary-en`). See TODO.md for
+  the removal and what changed scoring-wise. This backend has no
+  compute-heavy route anymore, and no reason to reach for Python again
+  unless something genuinely needs a library with no JS/browser
+  equivalent.
 - **Auth:** Google Identity Services via the backend's authorization-code
   flow (`hooks/useAuth.js`). An older client-only "proxy" mode (Apps
   Script relay) also still exists — `lib/driveApi.js`'s
@@ -47,10 +49,9 @@ caching, or anything else that's a better fit there than in the browser.
   (1) Vercel — frontend as a static build + backend as one serverless
   function (`server/api/index.js`) in the same project, via the root
   `vercel.json`; or (2) all on Render — frontend as a Render Static Site,
-  backend as a Render Web Service (`server/src/index.js`), same host as
-  the Python service below if you want everything in one place. Either
-  way, the Python service (above) is out of scope for both and needs its
-  own persistent host regardless.
+  backend as a Render Web Service (`server/src/index.js`). No third
+  persistent host needed now that the Python service is gone (see the
+  Backend bullet above).
 - **Styling:** plain CSS, one stylesheet per component/feature (section
   5). Global tokens in `styles/theme.css`.
 - **Android companion:** `android/` — standalone Gradle project, three
@@ -166,10 +167,11 @@ category (an icon next to it in `SparksPanel.jsx`'s category tree), and
 any number of categories can be toggled on at once, independently.
 `lib/sortedCategories.js` tracks the toggled set in `localStorage`
 (3.1). A toggled-on category's sparks' array order in `spark.txt` *is*
-their similarity-sorted order, maintained by
-`server/python/statements_engine.py` (sort/sorted-insert/lookup/
-spellcheck) via `lib/statementsApi.js` — matched by *exact* category
-path, so a category with nested sub-categories under it only sorts the
+their similarity-sorted order, maintained client-side by
+`lib/statementsEngine.js` (sort/sorted-insert/lookup, embeddings via
+`lib/statementsEmbeddings.js`) and `lib/spellcheck.js`, both called
+through `lib/statementsApi.js` — matched by *exact* category path, so a
+category with nested sub-categories under it only sorts the
 sparks filed directly under its own name, never the nested ones (those
 are separate categories with their own independent toggle).
 `SparksPanel.jsx` renders `CategorySorterPanel.jsx` instead of the
@@ -218,7 +220,8 @@ src/
     markdownParse.js, markdownRender.jsx, queryEngine.js, linkGraph.js,
     search.js, paneTree.js, frontmatterSchema.js, offlineRules.js,
     sparkStore.js, sortedCategories.js, mathUtils.js, localFs.js,
-    imagesToPdf.js, embeddedImages.js, statementsApi.js
+    imagesToPdf.js, embeddedImages.js, statementsApi.js,
+    statementsEngine.js, statementsEmbeddings.js, spellcheck.js
 
   hooks/
     useAuth.js, useVaultSync.js, useVaultIndex.js, useDriveImageUrl.js,
@@ -264,11 +267,7 @@ server/                              — Node/Express backend (2)
   src/index.js                       — long-running entrypoint (Render/plain Node host)
   api/index.js                       — Vercel serverless entrypoint (no .listen())
   src/config.js, session.js, googleAuth.js, driveClient.js
-  src/routes/auth.js, drive.js, statements.js
-  python/                            — optional, general-purpose Python service (2), own README — NOT
-                                        part of the Vercel path above, needs its own persistent host
-                                        regardless; new Python-only features get their own module here
-    app.py, statements_engine.py, requirements.txt
+  src/routes/auth.js, drive.js
   README.md                          — setup/deploy
 
 vercel.json                          — Vercel build+rewrite config for hosting frontend + the Node

@@ -7,13 +7,13 @@
 // This function is stateless between invocations (no in-memory anything
 // survives a cold start) — already how this backend is written, since the
 // only server-side state is the encrypted session cookie held in the
-// browser (server/src/session.js). One thing this does NOT cover: the
-// Python service (server/python/) behind /api/statements/* still needs
-// to run somewhere with a persistent, warm process (see that folder's
-// README — the embedding model has to stay loaded in memory, and it's
-// well past what fits in a serverless function's size/warm-start
-// budget). Point PYTHON_SERVICE_URL at wherever that's hosted; it
-// doesn't have to be Vercel.
+// browser (server/src/session.js). There used to be a caveat here about a
+// separate Python process (server/python/) behind /api/statements/*
+// needing its own persistent host, since a serverless function can't keep
+// an embedding model warm — that's gone; the Statements spark category
+// now runs entirely client-side (src/lib/statementsEngine.js and
+// friends), so this function has no route left that needs anything more
+// than a cold start.
 import { createApp } from '../src/app.js';
 
 const app = createApp();

@@ -4,19 +4,17 @@ import express from 'express';
 import { config } from './config.js';
 import { authRouter } from './routes/auth.js';
 import { driveRouter } from './routes/drive.js';
-import { statementsRouter } from './routes/statements.js';
 
 // Factored out of index.js so both the long-running Node entrypoint
 // (index.js, for Render/any plain Node host) and the Vercel serverless
 // entrypoint (api/index.js) construct the exact same app — no route/CORS
 // config duplicated or drifting between the two hosting paths.
 //
-// Note: this only wraps the Node/Express half. The Python service
-// (server/python/) that statementsRouter proxies to is a separate,
-// long-running process (sentence-transformers/torch stay resident in
-// memory across requests, per its README) — it isn't part of this
-// factory and isn't a Vercel serverless candidate either; see
-// vercel.json's header comment and TODO.md.
+// There used to be a third router here (statementsRouter) proxying to a
+// separate Python process for phrase-similarity/spellcheck. That's gone —
+// see TODO.md — the Statements spark category now runs entirely
+// client-side (src/lib/statementsEngine.js and friends), so this backend
+// no longer has any compute-heavy route, just auth + Drive proxying.
 function createApp() {
   const app = express();
 
@@ -36,7 +34,6 @@ function createApp() {
 
   app.use(authRouter);
   app.use(driveRouter);
-  app.use(statementsRouter);
 
   app.use((err, req, res, next) => {
     console.error('Unhandled error:', err);

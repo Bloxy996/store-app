@@ -107,6 +107,17 @@ export default defineConfig({
         // Only the app shell (build output) is precached. Never precache
         // API responses or note bodies.
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+        // Default is 2 MiB. @xenova/transformers (onnxruntime-web's WASM
+        // runtime, for the in-browser Statements embeddings — see
+        // CLAUDE.md section 2's Backend bullet) pushes the single main JS
+        // bundle well past that — see the header comment on
+        // build.rolldownOptions.output.codeSplitting below for why it
+        // can't be split into a separate lazy-loaded chunk right now.
+        // Precaching it is the right call regardless: it means Statements
+        // sorting/lookup keeps working offline once the app shell is
+        // cached, same as the rest of the PWA — genuinely better than the
+        // old server-dependent version, not just a workaround.
+        maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
         navigateFallback: `${base}index.html`,
         navigateFallbackDenylist: [/^\/api\//],
         cleanupOutdatedCaches: true,
@@ -179,6 +190,17 @@ export default defineConfig({
         // init order. Revisit once upstream fixes
         // https://github.com/rolldown/rolldown/issues/9515 and the related
         // rolldown-lazy/bundled-dev init-order issues.
+        //
+        // Side effect worth knowing about: this also prevents
+        // @xenova/transformers (lib/statementsEmbeddings.js) from being
+        // split into its own lazy-loaded chunk, even though nothing
+        // statically imports it outside the Statements sorter path — it
+        // gets bundled into the single main JS file instead, which is
+        // most of why that file is ~2.7MB (see the workbox
+        // maximumFileSizeToCacheInBytes comment above). Once
+        // codeSplitting can be turned back on, moving
+        // lib/statementsEngine.js's import of it behind a dynamic
+        // import() would let it split out again.
         codeSplitting: false
       }
     }

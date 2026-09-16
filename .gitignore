@@ -6,10 +6,6 @@ reader/context.txt
 reader/aggregated.txt
 node_modules
 
-# server/python/ — Python service (server/python/README.md)
-server/python/.venv/
-server/python/__pycache__/
-
 # android/ — standalone Gradle project, own build outputs/local config
 android/.gradle/
 android/local.properties
