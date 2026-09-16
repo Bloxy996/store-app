@@ -8,11 +8,11 @@ Historical changelog entries live in `TODO.md`, not here.
 
 **store** (lowercase) — a note/file app that reads and writes `.md` notes
 (and `.base` database, `.canvas` board, `.vec` vector art files) to the
-user's Google Drive. React SPA + PWA, deployed to GitHub Pages, backed by
-a real Node/Express server (`server/`). The backend is not limited to
-being an OAuth relay — it's a normal app server and fair game for new
-routes, server-side logic, caching, or anything else that's a better fit
-there than in the browser.
+user's Google Drive. React SPA + PWA, backed by a real Node/Express
+server (`server/`) — see section 2's "Hosting" bullet for where it
+deploys. The backend is not limited to being an OAuth relay — it's a
+normal app server and fair game for new routes, server-side logic,
+caching, or anything else that's a better fit there than in the browser.
 
 ## 2. Tech stack
 
@@ -42,14 +42,15 @@ there than in the browser.
   `isProxy`/`proxy*` functions.
 - **Hosting:** Two supported paths for the frontend + Node/Express half,
   sharing the same Express app (`server/src/app.js`) so they can't drift
-  apart: (1) frontend on GitHub Pages via GitHub Actions, backend on any
-  plain Node host (Render etc., `server/src/index.js`); or (2) both
-  together on Vercel — frontend as a static build, backend as one
-  serverless function (`server/api/index.js`) — via the root
-  `vercel.json`. Either way, the Python service (above) is out of scope
-  for both and needs its own persistent host regardless — see
-  `server/README.md`'s "Deploying" section. The Vercel path is unverified
-  against a real deployment — see `TODO.md`.
+  apart, and switching between them needs no code changes — see
+  `server/README.md`'s "Deploying" section for the env var specifics:
+  (1) Vercel — frontend as a static build + backend as one serverless
+  function (`server/api/index.js`) in the same project, via the root
+  `vercel.json`; or (2) all on Render — frontend as a Render Static Site,
+  backend as a Render Web Service (`server/src/index.js`), same host as
+  the Python service below if you want everything in one place. Either
+  way, the Python service (above) is out of scope for both and needs its
+  own persistent host regardless.
 - **Styling:** plain CSS, one stylesheet per component/feature (section
   5). Global tokens in `styles/theme.css`.
 - **Android companion:** `android/` — standalone Gradle project, three
@@ -294,7 +295,11 @@ work when a shortcut, markdown syntax, or feature behavior changes.
 
 - Prefer extending an existing `lib/` module over duplicating part of it
   (3.4).
-- See `TODO.md` for open/requested work and status.
+- See `TODO.md` for open/requested work and status. Once an item there is
+  actually done, remove it (or its now-resolved "open"/"not done" part)
+  rather than leaving it marked complete — a "Shipped: ..." summary line
+  is fine to keep as a brief changelog note, but stale caveats/open
+  questions that no longer apply should go, not accumulate.
 - Token-budget passes (trimming file size for `compile/`'s LLM export,
   not just humans): `components/icons.jsx` is done. Largest remaining,
   if it's ever worth doing: `features/vector/VectorEditorView.jsx`

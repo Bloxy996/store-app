@@ -48,37 +48,53 @@ Everything else in this server works fine without it.
 
 ## Deploying
 
-Two supported paths for the Node/Express half, both using the exact same
-route/middleware code (`src/app.js` — `src/index.js` and `api/index.js`
-are just two thin entrypoints onto it, so behavior can't drift between
-them):
+Two supported paths, both running the exact same route/middleware code
+(`src/app.js` — `src/index.js` and `api/index.js` are just two thin
+entrypoints onto it, so behavior can't drift between them). Switching
+between them is purely a matter of where things are deployed and which
+env vars point where — no code changes either way.
 
-- **Plain Node host (Render etc.):** any host that runs a long-lived
-  Node process works — `npm start` runs `src/index.js`. Whichever domain
-  you deploy to becomes both `GOOGLE_REDIRECT_URI`'s host and the value
-  the frontend's `VITE_BACKEND_URL` points at. Frontend and backend are
-  different origins in this setup, so the session cookie needs
-  `sameSite: 'none'` (already the case in production — see
-  `src/session.js`) and CORS needs `FRONTEND_URL` set correctly.
-- **Vercel (frontend + this Node backend together):** the root
-  `/vercel.json` builds the Vite frontend as a static site and
+- **Vercel (frontend + this Node backend together, one project):**
+  the root `/vercel.json` builds the Vite frontend as a static site and
   `server/api/index.js` as one Node serverless function in the same
   project, so both deploy from a single `vercel push`/Git-connected
-  deploy — no separate Render/Node host needed for this half. Set
-  `GOOGLE_REDIRECT_URI` to `https://<your-app>.vercel.app/auth/callback`,
-  `FRONTEND_URL` to `https://<your-app>.vercel.app`, and
-  `VITE_BACKEND_URL` to an empty string (same-origin relative calls) as
-  Vercel project env vars.
+  deploy. Set as Vercel project env vars: `GOOGLE_REDIRECT_URI` to
+  `https://<your-app>.vercel.app/auth/callback`, `FRONTEND_URL` to
+  `https://<your-app>.vercel.app`, and `VITE_BACKEND_URL` to an empty
+  string (frontend and backend share one origin, so calls are relative).
+  Verified against a real deployment.
+- **All on Render (three separate services in one workspace):**
+  - Frontend: a Render **Static Site** pointing at the repo root, build
+    command `npm install && npm run build`, publish directory `dist`.
+  - Backend: a Render **Web Service** pointing at `server/`, build
+    command `npm install`, start command `npm start` (runs
+    `src/index.js`).
+  - Frontend and backend land on two different `*.onrender.com`
+    subdomains, so unlike the Vercel path this is cross-origin: set
+    `GOOGLE_REDIRECT_URI` to
+    `https://<your-backend>.onrender.com/auth/callback`, `FRONTEND_URL`
+    to the static site's `https://<your-frontend>.onrender.com`, and the
+    frontend build's `VITE_BACKEND_URL` to
+    `https://<your-backend>.onrender.com` (a Vite env var, so it has to
+    be set at build time on the static site's service, not read at
+    runtime). The cross-origin session cookie already works
+    (`sameSite: 'none'` in production — `src/session.js`); CORS just
+    needs `FRONTEND_URL` set correctly on the backend service.
 
-**The Python service is NOT part of either path above and still needs its
-own persistent host regardless** (a small VM, Render/Fly/etc. — anything
-that keeps one process warm). Its embedding model has to stay loaded in
-memory across requests (see `python/README.md`), and its dependencies
-(`torch`, `sentence-transformers`) are well past what a serverless
-function's size/cold-start budget can reasonably absorb — that's true
-whether the rest of the backend is on Render or on Vercel. Point
+**Switching from one to the other later** is the same handful of steps
+either direction: point `GOOGLE_REDIRECT_URI`/`FRONTEND_URL`/
+`VITE_BACKEND_URL` at the new domain(s), add the new redirect URI to the
+OAuth client in Google Cloud Console (old one can stay too, multiple are
+allowed), and redeploy on the new host. `src/app.js` and everything it
+wires up stays untouched.
+
+**The Python service is part of neither path above and needs its own
+persistent host regardless** (a small VM, Render/Fly/etc. — anything
+that keeps one process warm; if you're already on the all-Render path,
+a third free Render Web Service in the same workspace works fine for
+this too). Its embedding model has to stay loaded in memory across
+requests (see `python/README.md`), and its dependencies (`torch`,
+`sentence-transformers`) are well past what a serverless function's
+size/cold-start budget can reasonably absorb — that's true whether the
+rest of the backend is on Render or on Vercel. Point
 `PYTHON_SERVICE_URL` at wherever it ends up running.
-
-Not yet done: no live Vercel deployment of the Node half has actually
-been exercised against this config (no Vercel account/project available
-in this pass) — see `TODO.md`.

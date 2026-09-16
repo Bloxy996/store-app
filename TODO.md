@@ -38,43 +38,33 @@ changelog-style notes, so it doesn't bloat the living architecture doc.
   tied to one category: the same corpus can come back across many calls
   across many categories.
 
-## Hosting: Vercel + repo privacy (2026-09)
+## Hosting: Vercel, verified (2026-09)
 
-Shipped: `server/src/app.js` (Express app factory, now wiring up
-auth/drive/statements/music routers) + `server/api/index.js` (Vercel
-serverless entrypoint) + root `vercel.json`, so the frontend (static
-build) and the Node/Express half of the backend can deploy together as a
-single Vercel project instead of GitHub Pages + Render. The Render/
-plain-Node path (`server/src/index.js`) still works unchanged — both
-entrypoints share `app.js`, so there's one set of routes/CORS logic, not
-two. See `server/README.md`'s "Deploying" section for env var
-differences between the two paths.
+Shipped: `server/src/app.js` (Express app factory, wiring up
+auth/drive/statements routers) + `server/api/index.js` (Vercel serverless
+entrypoint) + root `vercel.json`, so the frontend (static build) and the
+Node/Express half of the backend can deploy together as a single Vercel
+project. The plain-Node path (`server/src/index.js`, e.g. for an
+all-Render deploy) still works unchanged — both entrypoints share
+`app.js`, so there's one set of routes/CORS logic, not two. See
+`server/README.md`'s "Deploying" section for both paths' env var setup
+and how to switch between them (no code changes either way).
 
-**Not done in this pass / needs a person with Vercel + GitHub access:**
+**Verified against a real Vercel deployment** — the env var setup in
+`server/README.md` (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
+`GOOGLE_REDIRECT_URI`, `SESSION_SECRET`, `FRONTEND_URL`,
+`VITE_BACKEND_URL`, plus the OAuth redirect URI in Google Cloud Console)
+works end to end on a live `*.vercel.app` domain.
 
-- **No real Vercel deployment has been exercised against this config** —
-  no Vercel account/project was available to test against. Treat
-  `vercel.json` as a starting point to verify against, not a
-  guaranteed-working deploy: watch for env var setup (`GOOGLE_CLIENT_ID`,
-  `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, `SESSION_SECRET`,
-  `FRONTEND_URL`, `VITE_BACKEND_URL`) and the OAuth redirect URI needing
-  to be added in Google Cloud Console for the real `*.vercel.app` domain.
-- **The Python service (`server/python/`) is out of scope for the Vercel
-  path and still needs its own persistent host** (small VM, Render/Fly/
-  etc.) regardless of what the Node half runs on — `torch`/
+**Still open:**
+
+- **The Python service (`server/python/`) is out of scope for both
+  hosting paths and still needs its own persistent host** (small VM,
+  Render/Fly/etc.) regardless of what the Node half runs on — `torch`/
   `sentence-transformers` need to stay resident in memory across
   requests (see `python/README.md`), which doesn't fit a serverless
   function's size/cold-start budget. This applies whether the Node
   backend ends up on Render or Vercel; it isn't specific to either.
-- **Making the GitHub repo private, if the GitHub Pages hosting path is
-  kept:** GitHub Pages from a **private** repo requires GitHub Pro/
-  Team/Enterprise — it doesn't work on the free plan. This wasn't
-  something a code change could resolve either way, but it's worth
-  knowing before flipping the repo to private: either move fully to the
-  Vercel path above (works fine from a private repo, no plan
-  requirement), or confirm the GitHub plan supports private-repo Pages
-  first. Flipping repo visibility itself is a GitHub Settings action, not
-  something a patch can do.
 - **Further backend migration was deliberately NOT done** to editor-hot-path
   logic (markdown parsing/rendering, the query engine, search, link graph,
   pane-tree math). Moving those server-side would add a network round trip
