@@ -98,7 +98,12 @@ import {
 // image rather than inside a .map — the same reason ImageEmbed in
 // LinkEmbeds.jsx exists as its own component.
 function ReferenceImageNode({ image, token, selected, onPointerDownImage, onPointerDownResize }) {
-  const { url, loading: imgLoading } = useDriveImageUrl(token, image.fileId);
+  // useDriveImageUrl returns { url, error } — no `loading` field. This used
+  // to destructure a `loading` that was never there, so imgLoading was
+  // always undefined and the "Loading…" label below never showed while a
+  // reference image's blob was still being fetched from Drive.
+  const { url, error } = useDriveImageUrl(token, image.fileId);
+  const imgLoading = !url && !error;
   return (
     <g className={`vector-reference-image ${selected ? 'selected' : ''}`}>
       {url ? (
@@ -1645,14 +1650,6 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     URL.revokeObjectURL(url);
   };
 
-  if (loading) {
-    return (
-      <div className="db-loading">
-        <IconLoader size={18} /> Loading vector art…
-      </div>
-    );
-  }
-
   // An edge has no position of its own — only its endpoints do — so a
   // selected edge contributes its two vertices to the shared transform
   // target even when those vertices aren't independently selected.
@@ -1695,6 +1692,28 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   // is unavailable whenever the selection includes a fully-selected text.
   const canGroup = selectedVertexIds.size > 1 && !selectionIsExactlyOneGroup(doc, selectedVertexIds) && selectedTextIds.size === 0;
   const canUngroup = selectionIsExactlyOneGroup(doc, selectedVertexIds);
+
+  // Moved here from just after the last hook call above (transformVertexIds'
+  // useMemo) — it used to sit BEFORE that useMemo, as an early return, which
+  // meant this component called one more hook on the render where `loading`
+  // flips from true to false than it did on the initial (loading) render.
+  // React requires the exact same hooks, in the same order, on every render
+  // of a given component instance — an early return between two hook calls
+  // violates that no matter how far apart they are, and reliably crashed
+  // with "Rendered more hooks than during the previous render" (React error
+  // #310) the moment a vector file's content finished loading. Every hook
+  // this component calls now runs unconditionally on every render; only the
+  // JSX below is gated on `loading`. Safe to compute the derived values
+  // above during a loading render too — `doc` is always a well-formed
+  // (if empty) document even before content loads, via
+  // parseVectorContent's makeDefaultVectorState() fallback.
+  if (loading) {
+    return (
+      <div className="db-loading">
+        <IconLoader size={18} /> Loading vector art…
+      </div>
+    );
+  }
 
   return (
     <div className="vector-view">

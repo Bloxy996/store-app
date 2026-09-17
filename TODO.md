@@ -3,6 +3,32 @@
 Referenced by `CLAUDE.md` section 7 as the place for open/requested work and
 changelog-style notes, so it doesn't bloat the living architecture doc.
 
+## Fixed a crash opening vector files (React error #310) (2026-09)
+
+- `features/vector/VectorEditorView.jsx` had `if (loading) return <Loading/>;`
+  sitting between two hook calls — most of the component's `useState`/
+  `useMemo`/`useCallback`/`useEffect` calls came before it, but one more
+  `useMemo` (`transformVertexIds`) came after. Fine on the very first render
+  if `loading` was already `false` (nothing skipped), but the normal path —
+  mount while Drive is still fetching the file's content, then `loading`
+  flips to `false` once it arrives — called one *more* hook on that second
+  render than the first had recorded, which React disallows regardless of
+  how far apart the two hook calls are. Reliably threw "Rendered more hooks
+  than during the previous render" (minified as error #310) the moment a
+  vector file finished loading.
+- Fix: moved the `if (loading)` check down to immediately before the
+  component's final JSX return, after every hook call. Confirmed safe to
+  compute the (non-hook) derived values in between during a loading render
+  too — `parseVectorContent`'s `makeDefaultVectorState()` fallback already
+  guarantees `doc` is a well-formed empty document before content arrives,
+  which the earlier hooks in this same component were already relying on.
+- Also fixed a related but separate bug spotted in the same component:
+  `ReferenceImageNode` destructured `{ url, loading: imgLoading }` from
+  `useDriveImageUrl`, which actually returns `{ url, error }` — `imgLoading`
+  was always `undefined`, so the "Loading…" label over a reference image
+  never showed while its blob was being fetched. Now derived locally as
+  `!url && !error`.
+
 ## Removed the Python backend; Statements now runs entirely client-side (2026-09)
 
 - **Removed `server/python/`** (Flask app, `statements_engine.py`,
