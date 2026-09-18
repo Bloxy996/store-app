@@ -305,3 +305,17 @@ work when a shortcut, markdown syntax, or feature behavior changes.
   (~2375), `App.jsx` (~1538), `features/vector/vectorState.js` (~1013),
   `lib/markdownRender.jsx` (~768), `features/vector/vectorTopology.js`
   (~689).
+
+## 8. Standing audits
+
+Apply on every pass through touched code, making major/minor changes as
+needed:
+
+- Remove bugs and logic errors.
+- Performance/UI optimizations, for both desktop and mobile.
+- Keep the app as lightweight as possible.
+- Keep code as concise as possible: remove dead code, avoid repetition.
+- Keep documentation concise and up to date, in both `CLAUDE.md` and
+  in-script comments.
+
+**Important:** favor reducing token usage in everything above.

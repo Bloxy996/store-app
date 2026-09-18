@@ -46,6 +46,30 @@ changelog-style notes, so it doesn't bloat the living architecture doc.
   first — how much of the existing web matching logic it can reach (is
   there any bridge between the Kotlin accessibility service and the web
   app's JS, or does it need its own separate implementation/API call?).
+- **MIDI DAW editor for melodies/drum sequences.** Record voice input and
+  store the audio file; convert recorded audio to MIDI. Instruments:
+  piano, drum, synth (customizable), bass. Sequences are built as blocks
+  placed on a timeline and repeated; per-block markers on the timeline
+  adjust volume, reverb, etc. for that block. Needs a design pass:
+  audio-to-MIDI approach (library vs. hand-rolled pitch detection),
+  timeline/block data model, and audio-engine choice (Web Audio API
+  scheduling, latency).
+- **Image utility app.** View images; on mobile, capture photos of paper
+  documents directly in-app. Square-select a region to save as its own
+  image file with increased contrast applied (paper-to-PDF-style
+  cleanup) — likely extends `ToolsPanel.jsx`'s existing images→PDF
+  pipeline (`lib/imagesToPdf.js`) rather than a new one. A drawing-pen
+  tool (color from a color picker) to draw/erase on the selection. OCR
+  so any text on the page can be copied out. Also wants some kind of
+  screenshot extractor — undecided/unscoped, needs the user's decision
+  before design starts.
+- **Store-scoped chatbot.** Answers questions using only this vault's
+  own content (files + sparks), citing which file/spark each answer
+  draws from. Needs scoping: retrieval approach (likely reuses/extends
+  the Statements embeddings pipeline — `lib/statementsEngine.js`/
+  `statementsEmbeddings.js` — rather than building a new one), where it
+  runs (client-side like Statements, or a `server/` route), and UI
+  placement.
 - **General audit: convert hand-rolled logic to libraries where
   reasonable.** Not scoped to one feature — a pass across the codebase
   looking for hand-written implementations of things a well-maintained
