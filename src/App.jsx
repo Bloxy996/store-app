@@ -97,7 +97,10 @@ export default function App() {
   const sparks = useSparks(token, folder, sync);
   const [sparkFocusFileId, setSparkFocusFileId] = useState(null);
 
-  // buffers: fileId -> { content, dirty, saving, loading, loadError }
+  // buffers: fileId -> { content, dirty, saving, loading, loadError,
+  // modifiedTime }. modifiedTime is the Drive modifiedTime this buffer's
+  // content was loaded from — see the stale-buffer effect below, which is
+  // what it exists for.
   const [buffers, setBuffers] = useState({});
   const loadingFileIds = useRef(new Set());
   const saveTimers = useRef({});
@@ -312,10 +315,13 @@ export default function App() {
   );
 
   // --- Content loading (per open tab) --------------------------------------
+  // force bypasses the "already have a buffer" guard — used by the
+  // stale-buffer refresh below and by popOutTab, both of which need to
+  // re-fetch a file that's already open rather than skip it.
   const ensureFileLoaded = useCallback(
-    (fileId) => {
+    (fileId, { force = false } = {}) => {
       if (!fileId || (!token && !offline.isOnline)) return;
-      if (buffers[fileId] || loadingFileIds.current.has(fileId)) return;
+      if ((!force && buffers[fileId]) || loadingFileIds.current.has(fileId)) return;
       const meta = sync.filesMeta.find((f) => f.id === fileId);
       if (!meta || !opensInEditorPane(meta.kind)) return;
       loadingFileIds.current.add(fileId);
@@ -327,12 +333,12 @@ export default function App() {
           // Databases aren't part of the note search/tag index — only
           // notes' bodies get indexed for full-text search.
           if (meta.kind === 'note') vaultIndex.updateBody(fileId, text);
-          setBuffers((prev) => ({ ...prev, [fileId]: { content: text, dirty: false, saving: false, loading: false } }));
+          setBuffers((prev) => ({ ...prev, [fileId]: { content: text, dirty: false, saving: false, loading: false, modifiedTime: meta.modifiedTime } }));
         })
         .catch(async (err) => {
           if (!err.status && offline.offlineFileIds.has(fileId)) {
             const text = await offline.getOfflineContent(fileId);
-            if (text !== null) { if (meta.kind === 'note') vaultIndex.updateBody(fileId, text); setBuffers((prev) => ({ ...prev, [fileId]: { content: text, dirty: false, saving: false, loading: false } })); return; }
+            if (text !== null) { if (meta.kind === 'note') vaultIndex.updateBody(fileId, text); setBuffers((prev) => ({ ...prev, [fileId]: { content: text, dirty: false, saving: false, loading: false, modifiedTime: meta.modifiedTime } })); return; }
           }
           setBuffers((prev) => ({
             ...prev,
@@ -343,6 +349,32 @@ export default function App() {
     },
     [token, buffers, sync.filesMeta, vaultIndex, offline]
   );
+
+  // Reload button fix: syncNow() (ActivityBar's "Sync store" button, or the
+  // auto-sync it's wired to elsewhere) refreshes sync.filesMeta/IndexedDB/
+  // the search index, but previously left any already-open buffer alone —
+  // ensureFileLoaded only ever fetches a file's content once and then skips
+  // it forever (its guard above), so a file someone edited elsewhere
+  // (another device, another browser tab, directly in Drive) kept showing
+  // its old content here even after a manual sync said it was up to date.
+  // Fixes that by force-refetching any open file whose Drive modifiedTime
+  // moved since it was loaded. This calls ensureFileLoaded directly (with
+  // force) rather than just dropping the stale buffer, because nothing else
+  // in this file reactively re-fetches content for tabs that are already
+  // open and staying open — every other ensureFileLoaded call site fires
+  // only on a specific user action (opening a file, splitting a pane,
+  // navigating tab history), so a dropped-but-not-refetched buffer would
+  // just render blank instead of refreshing. Never touches a buffer with
+  // unsaved local edits (dirty) or one that's mid-save/mid-load, so this
+  // can't clobber or race the user's own typing.
+  useEffect(() => {
+    Object.entries(buffers).forEach(([fileId, buf]) => {
+      if (!buf || buf.dirty || buf.saving || buf.loading || buf.modifiedTime === undefined) return;
+      const meta = sync.filesMeta.find((f) => f.id === fileId);
+      if (meta && meta.modifiedTime !== buf.modifiedTime) ensureFileLoaded(fileId, { force: true });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sync.filesMeta]);
 
   const saveNow = useCallback(
     async (fileId, value) => {
@@ -356,7 +388,15 @@ export default function App() {
         sync.applyLocalEdit(fileId, value, updated.modifiedTime || new Date().toISOString());
         vaultIndex.updateBody(fileId, value);
         if (offline.offlineFileIds.has(fileId)) await offline.refreshCacheAfterSave(fileId, value, updated.modifiedTime);
-        setBuffers((prev) => (prev[fileId] ? { ...prev, [fileId]: { ...prev[fileId], dirty: false, saving: false } } : prev));
+        // Recording modifiedTime here (not just dirty/saving) matters:
+        // sync.applyLocalEdit above updates sync.filesMeta with the fresh
+        // modifiedTime right away, and the stale-buffer effect further up
+        // this file compares that against the buffer's own modifiedTime on
+        // every filesMeta change to decide whether to force-refetch a file.
+        // Without updating it here too, every autosave would look exactly
+        // like an external edit and trigger a pointless refetch of the
+        // content that was just saved.
+        setBuffers((prev) => (prev[fileId] ? { ...prev, [fileId]: { ...prev[fileId], dirty: false, saving: false, modifiedTime: updated.modifiedTime } } : prev));
       } catch (err) {
         if (!err.status && offline.offlineFileIds.has(fileId)) { await offline.setOfflineContent(fileId, value, { dirty: true }); } else console.error(err);
         setBuffers((prev) => (prev[fileId] ? { ...prev, [fileId]: { ...prev[fileId], saving: false } } : prev));
@@ -701,13 +741,23 @@ export default function App() {
       const tab = leaf?.tabs.find((t) => t.id === tabId);
       if (!tab) return;
       closeTab(paneId, tabId);
+      // Force a fresh fetch rather than reusing whatever's already in
+      // buffers — same reasoning and same safety check (never touch a
+      // dirty/saving/loading buffer) as the stale-buffer effect above,
+      // just triggered by this specific action instead of by a sync. A
+      // note that's been sitting open in this session may have been
+      // edited elsewhere since it was first loaded; popping it into its
+      // own window is a natural moment to make sure it shows the current
+      // version, not a click that accidentally preserves a stale one.
+      const buf = buffers[tab.fileId];
+      if (!buf || (!buf.dirty && !buf.saving && !buf.loading)) ensureFileLoaded(tab.fileId, { force: true });
       setPoppedOutFileIds((prev) => {
         const next = new Set(prev);
         next.add(tab.fileId);
         return next;
       });
     },
-    [paneTree, closeTab]
+    [paneTree, closeTab, buffers, ensureFileLoaded]
   );
 
   // Fires either when the person closes the popout window natively (see

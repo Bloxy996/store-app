@@ -3,6 +3,60 @@
 Referenced by `CLAUDE.md` section 7 as the place for open/requested work and
 changelog-style notes, so it doesn't bloat the living architecture doc.
 
+## Reload button, popout freshness, vector canvas-bg alpha, multi-axis/polyline snapping (2026-09)
+
+- **Reload button did nothing for already-open files.** `syncNow()`
+  refreshed `sync.filesMeta`/IndexedDB/the search index, but
+  `ensureFileLoaded` only ever fetches a file's content once and skips it
+  forever after (its `buffers[fileId]` guard) — so a file edited
+  elsewhere (another device/tab, or directly in Drive) kept showing its
+  old content in an open tab even after a manual sync said it was current.
+  Fixed: buffers now track the Drive `modifiedTime` they were loaded from;
+  a new effect in `App.jsx` force-refetches (via a new `force` option on
+  `ensureFileLoaded`) any open file whose remote `modifiedTime` moved,
+  skipping anything dirty/saving/loading so it can never clobber unsaved
+  edits or race an in-flight save. `saveNow` also now records the fresh
+  `modifiedTime` after a successful save, so autosave doesn't look like an
+  external edit and trigger a pointless refetch of what was just saved.
+- **"Open in new window" had the same staleness problem** — `popOutTab`
+  just reused whatever buffer already existed. Now force-refetches (same
+  safety check) when popping a tab out, so the popout always shows current
+  content.
+- **Vector canvas background couldn't be transparent/semi-transparent** —
+  it was a bare `<input type="color">`, the one remaining color control in
+  `VectorToolbar.jsx` not using the existing `ColorAlphaField` (hue + alpha
+  slider) that edge/circle-fill/text colors already had. Confirmed the
+  whole pipeline (storage as a plain string, live CSS `background-color`,
+  `contrastDotColor`'s luminance calc, and the exported SVG's background
+  `<rect fill>`) already handles 8-digit hex / `'transparent'` with zero
+  other changes needed, so just swapped the control.
+- **Custom snap axes only ever snapped to one at a time** — `snapCandidate`
+  in `vectorTopology.js` picked whichever single candidate line was
+  nearest. Added a `lineIntersection` helper and changed the axis-line
+  branch to snap to where two in-range lines *cross* when both are within
+  threshold at once (falling back to the single-nearest-line behavior
+  otherwise, or when they're parallel, or when the crossing point itself
+  would be further from the pointer than the snap threshold — avoids a
+  long jump off a near-parallel pair). The render side now draws both
+  guide lines when this happens (`snapLineP1b`/`snapLineP2b`).
+- **Polyline placement already snapped** (vertex/edge/custom-axis/
+  horizontal-vertical, via the same shared `resolvePlacement`/
+  `snapCandidate` every other tool uses) but the *hover preview* — the
+  dashed line from the last placed point to the cursor, plus the distance/
+  angle label — used the raw unsnapped pointer position, because polyline
+  placement is a plain click (no `dragRef` drag), and the snap-preview
+  computation in `onContainerPointerMove` only ran during an active drag.
+  Added a polyline-specific branch there so hovering while drawing a
+  polyline now shows the same guide-line/snap-marker feedback other tools'
+  drags already get, and the preview line/label follow the snapped point
+  instead of the raw cursor.
+- **GitHub Pages**: workflow (`.github/workflows/deploy.yml`) and
+  `vite.config.js`'s base-path handling already existed and needed no
+  changes — GH Pages only ever hosted the static frontend (via the Apps
+  Script proxy auth path, `isProxy()` in `driveApi.js`, since GH Pages
+  can't run the Node backend), and nothing in the Python removal or this
+  round of fixes touches any of that.
+
 ## Fixed a crash opening vector files (React error #310) (2026-09)
 
 - `features/vector/VectorEditorView.jsx` had `if (loading) return <Loading/>;`

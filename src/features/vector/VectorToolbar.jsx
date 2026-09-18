@@ -213,9 +213,11 @@ function VectorToolbar(props) {
           </select>
         </div>
         <div className="vector-toolbar-group">
-          <label className="vector-canvas-bg" title="Canvas background color" style={{ background: canvasBackground }}>
-            <input type="color" value={canvasBackground} onChange={(e) => onSetCanvasBackground(e.target.value)} />
-          </label>
+          <ColorAlphaField
+            color={canvasBackground}
+            onChange={onSetCanvasBackground}
+            title="Canvas background color — drag the opacity slider to 0 for a transparent background (exported SVG's background rect follows too)"
+          />
           <span className="vector-canvas-bg-label">Canvas</span>
           <button className="icon-btn" title="Load a reference image from the vault — placed faded, always behind every layer, for tracing over" onClick={onOpenImagePicker}>
             <IconImage size={15} />

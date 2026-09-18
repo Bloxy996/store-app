@@ -246,8 +246,7 @@
   font-size: 12px;
   padding: 3px 4px;
 }
-.vector-color-custom,
-.vector-canvas-bg {
+.vector-color-custom {
   position: relative;
   width: 16px;
   height: 16px;
@@ -257,8 +256,7 @@
   overflow: hidden;
   display: inline-block;
 }
-.vector-color-custom input,
-.vector-canvas-bg input {
+.vector-color-custom input {
   position: absolute;
   inset: -4px;
   width: calc(100% + 8px);
@@ -267,11 +265,6 @@
   padding: 0;
   cursor: pointer;
   opacity: 0;
-}
-.vector-canvas-bg {
-  border-radius: var(--radius-sm);
-  width: 20px;
-  height: 20px;
 }
 .vector-canvas-bg-label {
   font-size: 12px;

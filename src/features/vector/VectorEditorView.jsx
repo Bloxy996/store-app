@@ -1147,7 +1147,18 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     setPointerWorld(world);
     const drag = dragRef.current;
     if (!drag) {
-      setSnapPreview(null);
+      // The polyline tool places points on a plain click, not a drag (see
+      // onBackgroundPointerDown's 'polyline' branch), so it never reached
+      // any of the drag-mode snap previews below — the actual click-to-
+      // place already snapped correctly via resolvePlacement, but nothing
+      // showed the guide lines/snap marker while just hovering to line up
+      // the next point. Same snapCandidate call the other tools' live
+      // previews use below, just triggered by tool + no-drag here instead.
+      setSnapPreview(
+        tool === 'polyline' && !viewMode
+          ? snapCandidate(verticesForSnap, edgesForSnap, world, snapOpts(viewport.zoom, grid, { vertexSnapEnabled, edgeSnapEnabled, axisSnapEnabled }, { lines: customAxisLines }))
+          : null
+      );
       return;
     }
 
@@ -2076,19 +2087,24 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
             )}
             {tool === 'polyline' && polylineChain.length > 0 && pointerWorld && vertexById.get(polylineChain[polylineChain.length - 1]) && (
               <>
+                {/* Prefers snapPreview's point (from the no-drag hover branch
+                    of onContainerPointerMove above) over the raw cursor
+                    position, so this preview line — and its distance/angle
+                    label — show exactly where the next click will actually
+                    land, same as the snap marker/guide lines already do. */}
                 <line
                   className="vector-preview-line"
                   x1={vertexById.get(polylineChain[polylineChain.length - 1]).x}
                   y1={vertexById.get(polylineChain[polylineChain.length - 1]).y}
-                  x2={pointerWorld.x}
-                  y2={pointerWorld.y}
+                  x2={(snapPreview?.point ?? pointerWorld).x}
+                  y2={(snapPreview?.point ?? pointerWorld).y}
                 />
                 <MeasurementLabel
-                  x={(vertexById.get(polylineChain[polylineChain.length - 1]).x + pointerWorld.x) / 2}
-                  y={(vertexById.get(polylineChain[polylineChain.length - 1]).y + pointerWorld.y) / 2}
+                  x={(vertexById.get(polylineChain[polylineChain.length - 1]).x + (snapPreview?.point ?? pointerWorld).x) / 2}
+                  y={(vertexById.get(polylineChain[polylineChain.length - 1]).y + (snapPreview?.point ?? pointerWorld).y) / 2}
                   lines={[
-                    `${dist(vertexById.get(polylineChain[polylineChain.length - 1]), pointerWorld).toFixed(1)}`,
-                    `${lineRotationDeg(pointerWorld.x - vertexById.get(polylineChain[polylineChain.length - 1]).x, pointerWorld.y - vertexById.get(polylineChain[polylineChain.length - 1]).y).toFixed(1)}\u00b0`
+                    `${dist(vertexById.get(polylineChain[polylineChain.length - 1]), snapPreview?.point ?? pointerWorld).toFixed(1)}`,
+                    `${lineRotationDeg((snapPreview?.point ?? pointerWorld).x - vertexById.get(polylineChain[polylineChain.length - 1]).x, (snapPreview?.point ?? pointerWorld).y - vertexById.get(polylineChain[polylineChain.length - 1]).y).toFixed(1)}\u00b0`
                   ]}
                   zoom={viewport.zoom}
                 />
@@ -2133,20 +2149,26 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
             {!viewMode && snapPreview?.axisSnapVertexY != null && vertexById.get(snapPreview.axisSnapVertexY) && (
               <line className="vector-snap-guide" x1={-GUIDE_LINE_SPAN} y1={snapPreview.point.y} x2={GUIDE_LINE_SPAN} y2={snapPreview.point.y} />
             )}
-            {/* Arbitrary-angle "straighten"/"preserve direction" guide —
-                see vectorTopology.js's snapCandidate `lines` option and
-                onVertexPointerDown's candidateLines. Extended well past
-                its own two defining points so it reads as the same kind
-                of full-length guide as the horizontal/vertical ones above. */}
+            {/* Arbitrary-angle "straighten"/"preserve direction" or
+                custom-snap-axis guide — see vectorTopology.js's
+                snapCandidate `lines` option, onVertexPointerDown's
+                candidateLines, and VectorEditorView's customAxisLines.
+                Extended well past its own two defining points so it reads
+                as the same kind of full-length guide as the horizontal/
+                vertical ones above. Draws a second such line too when the
+                snap landed on two crossing lines at once (snapLineP1b/
+                snapLineP2b) rather than a single nearest line. */}
             {!viewMode &&
               snapPreview?.lineSnapped &&
-              (() => {
-                const { snapLineP1: p1, snapLineP2: p2 } = snapPreview;
+              [
+                [snapPreview.snapLineP1, snapPreview.snapLineP2],
+                ...(snapPreview.snapLineP1b ? [[snapPreview.snapLineP1b, snapPreview.snapLineP2b]] : [])
+              ].map(([p1, p2], i) => {
                 const dx = p2.x - p1.x, dy = p2.y - p1.y;
                 const len = Math.hypot(dx, dy) || 1;
                 const ux = (dx / len) * GUIDE_LINE_SPAN, uy = (dy / len) * GUIDE_LINE_SPAN;
-                return <line className="vector-snap-guide" x1={p1.x - ux} y1={p1.y - uy} x2={p2.x + ux} y2={p2.y + uy} />;
-              })()}
+                return <line key={i} className="vector-snap-guide" x1={p1.x - ux} y1={p1.y - uy} x2={p2.x + ux} y2={p2.y + uy} />;
+              })}
             {!viewMode && snapPreview?.snappedVertexId && vertexById.get(snapPreview.snappedVertexId) && (
               <circle className="vector-snap-marker" cx={snapPreview.point.x} cy={snapPreview.point.y} r={9 / viewport.zoom} />
             )}

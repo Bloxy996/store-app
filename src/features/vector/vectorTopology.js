@@ -555,6 +555,18 @@ function projectOntoLine(point, p1, p2) {
   return { point: proj, distance: dist(point, proj) };
 }
 
+// Intersection of the infinite lines through (p1,p2) and (p3,p4) — null if
+// they're parallel (or coincide). Used by snapCandidate below to snap to
+// where two candidate snap lines cross, not just the nearer of the two.
+function lineIntersection(p1, p2, p3, p4) {
+  const d1x = p2.x - p1.x, d1y = p2.y - p1.y;
+  const d2x = p4.x - p3.x, d2y = p4.y - p3.y;
+  const denom = d1x * d2y - d1y * d2x;
+  if (Math.abs(denom) < 1e-9) return null; // parallel (or one line degenerate)
+  const t = ((p3.x - p1.x) * d2y - (p3.y - p1.y) * d2x) / denom;
+  return { x: p1.x + t * d1x, y: p1.y + t * d1y };
+}
+
 // Builds candidate snap lines anchored at `anchor` that run either
 // PARALLEL or PERPENDICULAR to each of `referenceEdges` — used so a new or
 // dragged edge from `anchor` can snap to exactly match, or exactly cross,
@@ -625,20 +637,47 @@ function snapCandidate(vertices, edges, rawPoint, opts) {
   // Axis-LINE snap: candidate infinite lines derived from the vertex's own
   // pre-move topology (e.g. the straight line a bent A-B-C would form if B
   // moved back onto it, or an edge's original direction extended through
-  // its far endpoint — see VectorEditorView's candidateLines). Takes
-  // priority over the plain horizontal/vertical axis snap below since
-  // it's derived from this specific vertex's own shape rather than a
-  // generic alignment against whatever else happens to be nearby.
+  // its far endpoint — see VectorEditorView's candidateLines), or from the
+  // document's user-drawn snap axes (VectorEditorView's customAxisLines).
+  // Takes priority over the plain horizontal/vertical axis snap below
+  // since it's more specific than a generic alignment against whatever
+  // else happens to be nearby.
+  //
+  // When two of these lines are both within threshold at once (e.g. the
+  // pointer is near where two drawn snap axes cross), snaps to their exact
+  // intersection instead of just picking whichever single line is
+  // nearest — otherwise crossing axes could only ever be snapped to one
+  // at a time, never both together. Falls back to the single nearest line
+  // exactly as before when only one is in range, or the two nearest are
+  // parallel (no intersection to snap to), or the intersection itself
+  // ends up further from the pointer than the ordinary snap threshold —
+  // that last check keeps a near-parallel pair (whose crossing point can
+  // land far away) from producing a surprising long-distance jump.
   if (lines && lines.length && linePx > 0) {
-    let bestLine = null, bestLineDist = linePx;
+    const inRange = [];
     for (const line of lines) {
       const res = projectOntoLine(rawPoint, line.p1, line.p2);
-      if (res && res.distance < bestLineDist) {
-        bestLineDist = res.distance;
-        bestLine = { point: res.point, p1: line.p1, p2: line.p2 };
+      if (res && res.distance < linePx) inRange.push({ line, point: res.point, distance: res.distance });
+    }
+    inRange.sort((a, b) => a.distance - b.distance);
+    if (inRange.length >= 2) {
+      const [first, second] = inRange;
+      const crossing = lineIntersection(first.line.p1, first.line.p2, second.line.p1, second.line.p2);
+      if (crossing && dist(rawPoint, crossing) < linePx) {
+        return {
+          point: crossing,
+          lineSnapped: true,
+          snapLineP1: first.line.p1,
+          snapLineP2: first.line.p2,
+          snapLineP1b: second.line.p1,
+          snapLineP2b: second.line.p2
+        };
       }
     }
-    if (bestLine) return { point: bestLine.point, lineSnapped: true, snapLineP1: bestLine.p1, snapLineP2: bestLine.p2 };
+    if (inRange.length) {
+      const best = inRange[0];
+      return { point: best.point, lineSnapped: true, snapLineP1: best.line.p1, snapLineP2: best.line.p2 };
+    }
   }
 
   // Axis/alignment snap: pull the raw point onto a nearby vertex's x or y
