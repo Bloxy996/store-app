@@ -3,6 +3,63 @@
 Referenced by `CLAUDE.md` section 7 as the place for open/requested work and
 changelog-style notes, so it doesn't bloat the living architecture doc.
 
+## Open / requested — not started
+
+- **Vector editor: frame-by-frame animation + onion skinning.** The
+  `.vec` format/editor (`features/vector/`) currently holds one static
+  document. Add a way to define a sequence of frames and play/step
+  through them, with onion skinning (previous/next frame(s) shown faint,
+  behind the current one, while editing) as the drawing aid while doing
+  it. Needs a real design pass before starting, not just a straight
+  build — in particular: how a frame relates to the current single-`doc`
+  model (each frame a full `parseVectorContent`-shaped snapshot? a diff
+  against the previous frame? a new top-level array alongside
+  `layers`?), how onion-skinning is rendered (how many frames back/
+  forward, opacity falloff, toggle vs. always-on), how this interacts
+  with existing layers/groups, and whether frame data changes the `.vec`
+  JSON schema in a way that needs a version field for backward
+  compatibility with existing saved files.
+- **Vector files: embeddable "linked" view with an edit button.** When a
+  vector (`.vec`) file is referenced/embedded for *viewing* (as opposed
+  to opened directly in the vector editor), show it as a rendered image
+  (presumably from `compileVectorSvg`'s SVG output — see `vectorState.js`)
+  with an edit button pinned to the bottom-right corner of the image that
+  jumps to opening the actual file in the vector editor. Needs scoping:
+  where this view lives (a new embed type inside markdown notes,
+  alongside however `LinkEmbeds.jsx` handles other embedded file kinds
+  today? a reusable component other features could also use?), and
+  whether it's live (re-renders if the source file changes) or a
+  point-in-time snapshot.
+- **Sparks: search/edit existing sparks through the Android accessibility
+  interface, plus live near-duplicate suggestions.** Two related pieces:
+  (1) the Android accessibility service
+  (`android/.../SparkAccessibilityService.kt`) currently only captures
+  new sparks (3.9/3.10-adjacent) — extend it to also search and edit
+  existing ones from wherever it's invoked, not just add new ones. (2)
+  While typing a new spark (both there and in the web app's
+  `SparkCaptureForm.jsx`), show the ~5 most similar existing sparks live
+  as a duplicate-avoidance aid — this reuses `lib/statementsEngine.js`'s
+  `lookupSimilar` (already built for exactly this kind of "rank stored
+  phrases by similarity to a query" query, see `statementsApi.js`'s
+  `lookupStatements`), so the web side is mostly wiring + a debounced
+  UI, not new matching logic. The Android side needs its own design pass
+  first — how much of the existing web matching logic it can reach (is
+  there any bridge between the Kotlin accessibility service and the web
+  app's JS, or does it need its own separate implementation/API call?).
+- **General audit: convert hand-rolled logic to libraries where
+  reasonable.** Not scoped to one feature — a pass across the codebase
+  looking for hand-written implementations of things a well-maintained
+  library already does well (parsing, diffing, layout math, etc.),
+  the same kind of tradeoff already made deliberately for the Statements
+  engine (`lib/statementsEngine.js`'s header: `string-similarity-js`
+  over hand-rolled Ratcliff/Obershelp, `@xenova/transformers` over a
+  from-scratch embedding model, `nspell`/`dictionary-en` over a
+  hand-rolled spellchecker). Needs its own pass to identify candidates
+  (e.g. `vectorTopology.js`'s geometry helpers, `markdownParse.js`/
+  `markdownRender.jsx`'s hand-rolled parsing, `queryEngine.js`) and weigh
+  each one's bundle-size cost against what it'd actually replace, rather
+  than converting anything sight-unseen.
+
 ## Reload button, popout freshness, vector canvas-bg alpha, multi-axis/polyline snapping (2026-09)
 
 - **Reload button did nothing for already-open files.** `syncNow()`
