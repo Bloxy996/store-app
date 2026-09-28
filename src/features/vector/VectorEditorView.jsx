@@ -1101,7 +1101,11 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   };
 
   const onBackgroundPointerDown = (e) => {
-    if (e.target !== containerRef.current && !e.target.classList.contains('vector-bg-hit')) return;
+    // Snap-axis hit lines/endpoint handles pass non-select-tool clicks up to
+    // here on purpose (onAxisPointerDown/beginAxisEndpointDrag), so they count
+    // as canvas too — otherwise a vertex/edge/etc. can't be placed on an axis.
+    const cl = e.target.classList;
+    if (e.target !== containerRef.current && !cl.contains('vector-bg-hit') && !cl.contains('vector-snap-axis-hit') && !cl.contains('vector-snap-axis-handle')) return;
     containerRef.current.focus();
     if (spaceDown || e.button === 1) {
       beginPan(e);
@@ -2247,8 +2251,8 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
                     />
                     {selected && (
                       <>
-                        <circle className="vector-scale-handle" cx={a.x1} cy={a.y1} r={5 / viewport.zoom} style={{ cursor: 'move' }} onPointerDown={(e) => beginAxisEndpointDrag(e, a.id, 'p1')} />
-                        <circle className="vector-scale-handle" cx={a.x2} cy={a.y2} r={5 / viewport.zoom} style={{ cursor: 'move' }} onPointerDown={(e) => beginAxisEndpointDrag(e, a.id, 'p2')} />
+                        <circle className="vector-scale-handle vector-snap-axis-handle" cx={a.x1} cy={a.y1} r={5 / viewport.zoom} style={{ cursor: 'move' }} onPointerDown={(e) => beginAxisEndpointDrag(e, a.id, 'p1')} />
+                        <circle className="vector-scale-handle vector-snap-axis-handle" cx={a.x2} cy={a.y2} r={5 / viewport.zoom} style={{ cursor: 'move' }} onPointerDown={(e) => beginAxisEndpointDrag(e, a.id, 'p2')} />
                       </>
                     )}
                   </g>
