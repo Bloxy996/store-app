@@ -1865,11 +1865,12 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
         <svg className="vector-svg" width="100%" height="100%">
           <rect className="vector-bg-hit" x="0" y="0" width="100%" height="100%" fill="transparent" />
           <g transform={`translate(${viewport.x} ${viewport.y}) scale(${viewport.zoom})`}>
-            {/* Reference/tracing images loaded from the vault — always painted
-                first (behind every layer), faded, and non-interactive except
+            {/* Reference/tracing images loaded from the vault — painted first
+                (behind every layer), faded, and non-interactive except
                 through the select tool (see onReferenceImagePointerDown
-                below). Never part of the exported SVG (compileVectorSvg). */}
-            {doc.referenceImages.map((img) => (
+                below). A drawing aid only: hidden in view mode, and never
+                part of the exported SVG (compileVectorSvg). */}
+            {!viewMode && doc.referenceImages.map((img) => (
               <ReferenceImageNode
                 key={img.id}
                 image={imageDraft && imageDraft.id === img.id ? { ...img, ...imageDraft } : img}

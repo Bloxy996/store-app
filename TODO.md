@@ -138,6 +138,7 @@ _(none)_
   1. Click the reference-image button in the toolbar and pick an image from the vault.
   2. It appears faded and behind every layer, including when layers are hidden/reordered.
   3. Draw over it, save, reopen: the image is still there. It should not appear in the SVG export.
+  4. Switch to view mode: the reference image should not be visible there.
 - **Vector: proportional scaling toggle.**
   1. Select one object, then several. Turn proportional scaling on and drag a corner handle: aspect ratio is kept.
   2. Turn it off and drag again: width/height scale independently.
