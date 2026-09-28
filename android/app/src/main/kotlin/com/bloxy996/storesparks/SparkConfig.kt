@@ -6,4 +6,4 @@ package com.bloxy996.storesparks
 // App.jsx already listens for (see its "Deep link for the Android
 // home-screen widget" effect — the same route serves all three entry
 // points below, not just the widget).
-const val SPARK_CAPTURE_URL = "https://bloxy996.github.io/store-app/#/spark-quick-add"
+const val SPARK_CAPTURE_URL = "https://store-app-blxy.vercel.app/#/spark-quick-add"
