@@ -1023,12 +1023,15 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   // whole; its two endpoint handles (rendered only when selected) resize
   // it — see beginAxisEndpointDrag.
   const onAxisPointerDown = (e, axis) => {
-    e.stopPropagation();
     if (spaceDown) {
+      e.stopPropagation();
       beginPan(e);
       return;
     }
+    // Other tools' clicks must fall through to the canvas (placing a
+    // vertex/edge/etc. on an axis) — only the select tool owns axis clicks.
     if (viewMode || tool !== 'select') return;
+    e.stopPropagation();
     containerRef.current.setPointerCapture(e.pointerId);
     const world = screenToWorld(e.clientX, e.clientY);
     setSelectedAxisIds((prev) => {
@@ -1045,8 +1048,8 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   };
 
   const beginAxisEndpointDrag = (e, axisId, which) => {
+    if (viewMode || tool !== 'select') return;
     e.stopPropagation();
-    if (viewMode) return;
     containerRef.current.setPointerCapture(e.pointerId);
     // Both endpoints' CURRENT coordinates have to be captured up front —
     // pointer-move's 'resize-axis' branch reads drag.x1/y1/x2/y2 to know
