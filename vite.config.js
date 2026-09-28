@@ -119,7 +119,11 @@ export default defineConfig({
         // old server-dependent version, not just a workaround.
         maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
         navigateFallback: `${base}index.html`,
-        navigateFallbackDenylist: [/^\/api\//],
+        // Backend routes must reach the server on same-origin (Vercel) deploys:
+        // top-level navigations to /auth/login and /auth/callback (OAuth
+        // redirects) were being served index.html by the SW, so sign-in
+        // just reloaded the app and the session cookie was never set.
+        navigateFallbackDenylist: [/^\/(api|auth|healthz)(\/|$)/],
         cleanupOutdatedCaches: true,
         runtimeCaching: [
           {
