@@ -134,10 +134,6 @@ _(none)_
 
 ## Verify
 
-- **Vector: hiding a layer hides its editor elements.**
-  1. Open a `.vec` file with 2+ layers, each with vertices/edges, and select a vertex.
-  2. Open Layers and hide one layer: its artwork, points, edge handles, and snap axes vanish; the other layer's stay.
-  3. Unhide it: everything returns. Try selecting/clicking where the hidden layer's points were: nothing should be hit.
 - **Vector: reference (tracing) image.**
   1. Click the reference-image button in the toolbar and pick an image from the vault.
   2. It appears faded and behind every layer, including when layers are hidden/reordered.
