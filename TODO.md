@@ -134,15 +134,6 @@ _(none)_
 
 ## Verify
 
-- **Vector: reference (tracing) image.**
-  1. Click the reference-image button in the toolbar and pick an image from the vault.
-  2. It appears faded and behind every layer, including when layers are hidden/reordered.
-  3. Draw over it, save, reopen: the image is still there. It should not appear in the SVG export.
-  4. Switch to view mode: the reference image should not be visible there.
-- **Vector: proportional scaling toggle.**
-  1. Select one object, then several. Turn proportional scaling on and drag a corner handle: aspect ratio is kept.
-  2. Turn it off and drag again: width/height scale independently.
-  3. Select a reference (tracing) image and resize it by its corner handle, on and off: same aspect-lock behavior.
 - **Vector: Description and Layers as right-side sidebars.**
   1. Click Description: a full-height sidebar opens right of the canvas.
   2. Click Layers: a second sidebar opens. Both are visible at once.
