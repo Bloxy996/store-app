@@ -134,11 +134,6 @@ _(none)_
 
 ## Verify
 
-- **Google sign-in no longer reloads/loops (same-origin Vercel deploy).**
-  1. Open the deployed app with an existing (cached) service worker; reload once or twice so the new worker installs.
-  2. Click Sign in: you should reach Google's account chooser (not a page reload).
-  3. Pick an account and accept consent: you should land back in the app signed in, and stay signed in after a reload.
-  Note: Fix is in `vite.config.js` (`navigateFallbackDenylist`). If it still loops, check `GOOGLE_REDIRECT_URI` and `FRONTEND_URL`.
 - **Vector: hiding a layer hides its editor elements.**
   1. Open a `.vec` file with 2+ layers, each with vertices/edges, and select a vertex.
   2. Open Layers and hide one layer: its artwork, points, edge handles, and snap axes vanish; the other layer's stay.
