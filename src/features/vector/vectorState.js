@@ -826,26 +826,28 @@ function reorderLayer(state, layerId, direction) {
 // selection model never mixes vertex selection with edge/circle selection —
 // see VectorEditorView — so there's no ambiguity about what "move this
 // selection" refers to).
-// Shifts edges/circles/texts one layer up (dir=1) or down (dir=-1) from
-// each item's OWN layer, clamped to the stack ends — so a mixed-layer
-// selection moves together and repeated clicks keep stepping.
-function shiftLayers(state, { edgeIds, circleIds, textIds }, dir) {
+// Shifts edges/circles/texts/fills one layer up (dir=1) or down (dir=-1)
+// from each item's OWN layer, clamped to the stack ends — so a mixed-layer
+// selection moves together and repeated clicks keep stepping. Fills carry
+// their own layerId (they render/export per layer), so they must move too.
+const LAYERED = [['edges', 'edgeIds'], ['circles', 'circleIds'], ['texts', 'textIds'], ['fills', 'fillIds']];
+function shiftLayers(state, ids, dir) {
   const idx = new Map(state.layers.map((l, i) => [l.id, i]));
   const last = state.layers.length - 1;
   const to = (o) => state.layers[Math.min(last, Math.max(0, (idx.get(o.layerId) ?? 0) + dir))].id;
-  const sh = (list, ids) => list.map((o) => (ids?.has(o.id) ? { ...o, layerId: to(o) } : o));
-  return { ...state, edges: sh(state.edges, edgeIds), circles: sh(state.circles, circleIds), texts: sh(state.texts, textIds) };
+  const next = { ...state };
+  for (const [k, ik] of LAYERED) next[k] = state[k].map((o) => (ids[ik]?.has(o.id) ? { ...o, layerId: to(o) } : o));
+  return next;
 }
 
 // True if any targeted item can still move in `dir` (drives button disabling).
-function canShiftLayers(state, { edgeIds, circleIds, textIds }, dir) {
+function canShiftLayers(state, ids, dir) {
   const idx = new Map(state.layers.map((l, i) => [l.id, i]));
   const last = state.layers.length - 1;
-  const ok = (list, ids) => list.some((o) => {
+  return LAYERED.some(([k, ik]) => state[k].some((o) => {
     const i = idx.get(o.layerId) ?? 0;
-    return ids?.has(o.id) && (dir > 0 ? i < last : i > 0);
-  });
-  return ok(state.edges, edgeIds) || ok(state.circles, circleIds) || ok(state.texts, textIds);
+    return ids[ik]?.has(o.id) && (dir > 0 ? i < last : i > 0);
+  }));
 }
 
 // ---------------------------------------------------------------------------

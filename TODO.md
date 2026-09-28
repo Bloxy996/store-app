@@ -139,6 +139,7 @@ _(none)_
   2. It moves to the adjacent layer, keeps its position, and stays selected. Undo/redo reverts it.
   3. Repeat with a box/marquee selection of several objects, including ones on different layers: ↑/↓ still appear and each object steps one layer from its own layer.
   4. ↑ greys out only when every selected object is on the top layer, ↓ only when all are on the bottom.
+  5. Fills move with it: click a filled area, or marquee a filled shape, and press ↑/↓. The fill changes layer and stacks correctly against other layers' content, on the canvas and in the SVG export.
 - **Vector: custom snap axes, full snapping.**
   1. Create a custom snap axis, then draw/move points, edges, circles near it: they snap to it.
   2. Drag one of the axis's points: the other point and the axis stay visible the whole drag.

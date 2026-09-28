@@ -77,7 +77,7 @@ import {
   ungroupVertices,
   loopsToPathData
 } from './vectorState.js';
-import { SpatialGrid, buildVertexAdjacency, closestPointOnSegment, computeMiterJoints, computeQuadWarpMatrix3d, dist, findFillBoundary, perpendicularParallelLines, resolveBoundaryPolygon, snapCandidate } from './vectorTopology.js';
+import { boundaryReferencesOnly, SpatialGrid, buildVertexAdjacency, closestPointOnSegment, computeMiterJoints, computeQuadWarpMatrix3d, dist, findFillBoundary, perpendicularParallelLines, resolveBoundaryPolygon, snapCandidate } from './vectorTopology.js';
 import { clamp } from '../../lib/mathUtils.js';
 import {
   MOVE_THRESHOLD,
@@ -1721,10 +1721,13 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   // selected vertices — the natural reading of "style the edges of this
   // selection" when the selection itself is a set of points, not edges.
   const edgesWithinVertexSelection = selectedVertexIds.size > 1 ? doc.edges.filter((e) => selectedVertexIds.has(e.v1) && selectedVertexIds.has(e.v2)) : [];
-  // Everything the layer-move buttons act on: explicit edge/circle picks plus
-  // edges/texts implied by a vertex/marquee selection.
-  const layerTargets = { edgeIds: new Set([...selectedEdgeIds, ...edgesWithinVertexSelection.map((e) => e.id)]), circleIds: selectedCircleIds, textIds: selectedTextIds };
-  const hasLayerTargets = layerTargets.edgeIds.size + selectedCircleIds.size + selectedTextIds.size > 0;
+  // Everything the layer-move buttons act on: explicit picks plus items
+  // implied by a vertex/marquee selection (edges between selected vertices,
+  // fills whose whole boundary is selected, fully-selected texts).
+  const layerEdgeIds = new Set([...selectedEdgeIds, ...edgesWithinVertexSelection.map((e) => e.id)]);
+  const layerFillIds = new Set([...selectedFillIds, ...doc.fills.filter((f) => boundaryReferencesOnly(f.boundary, transformVertexIds, layerEdgeIds)).map((f) => f.id)]);
+  const layerTargets = { edgeIds: layerEdgeIds, circleIds: selectedCircleIds, textIds: selectedTextIds, fillIds: layerFillIds };
+  const hasLayerTargets = layerEdgeIds.size + selectedCircleIds.size + selectedTextIds.size + layerFillIds.size > 0;
   // A text's 4 corners must stay independently draggable (that's what
   // produces the skew/trapezoid effect) — grouping them would make moving
   // one drag the whole group instead, silently breaking that. So Group
@@ -2529,7 +2532,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
                 Split
               </button>
             )}
-            {/* Layer reassignment applies to edges/circles/texts, including
+            {/* Layer reassignment applies to edges/circles/texts/fills, including
                 those implied by a vertex/marquee selection (edges between
                 selected vertices, fully-selected texts). A pure vertex
                 selection with none of those gets no controls. Each item
