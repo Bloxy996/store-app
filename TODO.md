@@ -134,13 +134,11 @@ _(none)_
 
 ## Verify
 
-- **Vector: Description and Layers as right-side sidebars.**
-  1. Click Description: a full-height sidebar opens right of the canvas.
-  2. Click Layers: a second sidebar opens. Both are visible at once.
-  3. Toggle each button off independently; the canvas resizes to fit.
 - **Vector: move selection up/down layers.**
   1. Select an object and use the move up/down layer control.
   2. It moves to the adjacent layer, keeps its position, and stays selected. Undo/redo reverts it.
+  3. Repeat with a box/marquee selection of several objects, including ones on different layers: ↑/↓ still appear and each object steps one layer from its own layer.
+  4. ↑ greys out only when every selected object is on the top layer, ↓ only when all are on the bottom.
 - **Vector: custom snap axes, full snapping.**
   1. Create a custom snap axis, then draw/move points, edges, circles near it: they snap to it.
   2. Drag one of the axis's points: the other point and the axis stay visible the whole drag.

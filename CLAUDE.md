@@ -140,7 +140,7 @@ backed by a real Drive file can follow the same pseudo-file pattern.
 
 ### 3.7 File length
 
-Large files (`App.jsx` ~1500 lines, `VectorEditorView.jsx` ~2200,
+Large files (`App.jsx` ~1650 lines, `VectorEditorView.jsx` ~2680,
 `markdownRender.jsx` ~770) exist because splitting them means extracting
 stateful hooks by hand with no test suite yet — real work, not a "must
 never grow" line. Split when it's convenient or when a section is
@@ -303,9 +303,9 @@ work when a shortcut, markdown syntax, or feature behavior changes.
 - Token-budget passes (trimming file size for `compile/`'s LLM export,
   not just humans): `components/icons.jsx` is done. Largest remaining,
   if it's ever worth doing: `features/vector/VectorEditorView.jsx`
-  (~2375), `App.jsx` (~1538), `features/vector/vectorState.js` (~1013),
+  (~2680), `App.jsx` (~1650), `features/vector/vectorState.js` (~1130),
   `lib/markdownRender.jsx` (~768), `features/vector/vectorTopology.js`
-  (~689).
+  (~730).
 
 ## 8. Standing audits
 

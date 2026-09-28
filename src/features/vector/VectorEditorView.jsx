@@ -50,7 +50,8 @@ import {
   moveReferenceImage,
   moveSnapAxis,
   moveVertices,
-  moveToLayer,
+  shiftLayers,
+  canShiftLayers,
   parseVectorContent,
   pasteClipboard,
   removeLayer,
@@ -1720,6 +1721,10 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   // selected vertices — the natural reading of "style the edges of this
   // selection" when the selection itself is a set of points, not edges.
   const edgesWithinVertexSelection = selectedVertexIds.size > 1 ? doc.edges.filter((e) => selectedVertexIds.has(e.v1) && selectedVertexIds.has(e.v2)) : [];
+  // Everything the layer-move buttons act on: explicit edge/circle picks plus
+  // edges/texts implied by a vertex/marquee selection.
+  const layerTargets = { edgeIds: new Set([...selectedEdgeIds, ...edgesWithinVertexSelection.map((e) => e.id)]), circleIds: selectedCircleIds, textIds: selectedTextIds };
+  const hasLayerTargets = layerTargets.edgeIds.size + selectedCircleIds.size + selectedTextIds.size > 0;
   // A text's 4 corners must stay independently draggable (that's what
   // produces the skew/trapezoid effect) — grouping them would make moving
   // one drag the whole group instead, silently breaking that. So Group
@@ -2524,31 +2529,26 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
                 Split
               </button>
             )}
-            {/* Layer reassignment applies to edges/circles/texts — a pure
-                (non-text) vertex selection is layerless shared
-                infrastructure (see vectorState.js) and gets no layer-move
-                controls; a fully-selected text counts via selectedTextIds. */}
-            {(selectedEdgeIds.size > 0 || selectedCircleIds.size > 0 || selectedTextIds.size > 0) && (
+            {/* Layer reassignment applies to edges/circles/texts, including
+                those implied by a vertex/marquee selection (edges between
+                selected vertices, fully-selected texts). A pure vertex
+                selection with none of those gets no controls. Each item
+                steps from its own layer, not the active one. */}
+            {hasLayerTargets && (
               <>
                 <button
                   className="icon-btn"
                   title="Move selection to the layer above"
-                  disabled={doc.layers.findIndex((l) => l.id === safeActiveLayerId) >= doc.layers.length - 1}
-                  onClick={() => {
-                    const i = doc.layers.findIndex((l) => l.id === safeActiveLayerId);
-                    if (i < doc.layers.length - 1) commitState(moveToLayer(doc, { edgeIds: selectedEdgeIds, circleIds: selectedCircleIds, textIds: selectedTextIds }, doc.layers[i + 1].id));
-                  }}
+                  disabled={!canShiftLayers(doc, layerTargets, 1)}
+                  onClick={() => commitState(shiftLayers(doc, layerTargets, 1))}
                 >
                   ↑
                 </button>
                 <button
                   className="icon-btn"
                   title="Move selection to the layer below"
-                  disabled={doc.layers.findIndex((l) => l.id === safeActiveLayerId) <= 0}
-                  onClick={() => {
-                    const i = doc.layers.findIndex((l) => l.id === safeActiveLayerId);
-                    if (i > 0) commitState(moveToLayer(doc, { edgeIds: selectedEdgeIds, circleIds: selectedCircleIds, textIds: selectedTextIds }, doc.layers[i - 1].id));
-                  }}
+                  disabled={!canShiftLayers(doc, layerTargets, -1)}
+                  onClick={() => commitState(shiftLayers(doc, layerTargets, -1))}
                 >
                   ↓
                 </button>

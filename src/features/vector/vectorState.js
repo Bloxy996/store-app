@@ -826,13 +826,26 @@ function reorderLayer(state, layerId, direction) {
 // selection model never mixes vertex selection with edge/circle selection —
 // see VectorEditorView — so there's no ambiguity about what "move this
 // selection" refers to).
-function moveToLayer(state, { edgeIds, circleIds, textIds }, layerId) {
-  return {
-    ...state,
-    edges: state.edges.map((e) => (edgeIds?.has(e.id) ? { ...e, layerId } : e)),
-    circles: state.circles.map((c) => (circleIds?.has(c.id) ? { ...c, layerId } : c)),
-    texts: state.texts.map((t) => (textIds?.has(t.id) ? { ...t, layerId } : t))
-  };
+// Shifts edges/circles/texts one layer up (dir=1) or down (dir=-1) from
+// each item's OWN layer, clamped to the stack ends — so a mixed-layer
+// selection moves together and repeated clicks keep stepping.
+function shiftLayers(state, { edgeIds, circleIds, textIds }, dir) {
+  const idx = new Map(state.layers.map((l, i) => [l.id, i]));
+  const last = state.layers.length - 1;
+  const to = (o) => state.layers[Math.min(last, Math.max(0, (idx.get(o.layerId) ?? 0) + dir))].id;
+  const sh = (list, ids) => list.map((o) => (ids?.has(o.id) ? { ...o, layerId: to(o) } : o));
+  return { ...state, edges: sh(state.edges, edgeIds), circles: sh(state.circles, circleIds), texts: sh(state.texts, textIds) };
+}
+
+// True if any targeted item can still move in `dir` (drives button disabling).
+function canShiftLayers(state, { edgeIds, circleIds, textIds }, dir) {
+  const idx = new Map(state.layers.map((l, i) => [l.id, i]));
+  const last = state.layers.length - 1;
+  const ok = (list, ids) => list.some((o) => {
+    const i = idx.get(o.layerId) ?? 0;
+    return ids?.has(o.id) && (dir > 0 ? i < last : i > 0);
+  });
+  return ok(state.edges, edgeIds) || ok(state.circles, circleIds) || ok(state.texts, textIds);
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,7 +1126,8 @@ export {
   renameLayer,
   setLayerVisible,
   reorderLayer,
-  moveToLayer,
+  shiftLayers,
+  canShiftLayers,
   copySelection,
   pasteClipboard,
   addReferenceImage,
