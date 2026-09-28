@@ -142,6 +142,7 @@ _(none)_
 - **Vector: proportional scaling toggle.**
   1. Select one object, then several. Turn proportional scaling on and drag a corner handle: aspect ratio is kept.
   2. Turn it off and drag again: width/height scale independently.
+  3. Select a reference (tracing) image and resize it by its corner handle, on and off: same aspect-lock behavior.
 - **Vector: Description and Layers as right-side sidebars.**
   1. Click Description: a full-height sidebar opens right of the canvas.
   2. Click Layers: a second sidebar opens. Both are visible at once.

@@ -97,6 +97,25 @@ import {
 // loop below, purely so useDriveImageUrl (a hook) can be called once per
 // image rather than inside a .map — the same reason ImageEmbed in
 // LinkEmbeds.jsx exists as its own component.
+// Shared by the live-drag preview and the on-drop commit for reference-image
+// resize, so both apply the proportionalScaling toggle (already used for
+// ordinary object scaling) identically and never disagree on release.
+// Locks to the image's starting aspect ratio, driven by whichever axis the
+// pointer moved further along.
+function resizeImageDims(pointerWorld, drag, proportionalScaling) {
+  let width = Math.max(8, pointerWorld.x - drag.x);
+  let height = Math.max(8, pointerWorld.y - drag.y);
+  if (proportionalScaling && drag.startWidth && drag.startHeight) {
+    const ratio = drag.startWidth / drag.startHeight;
+    if (Math.abs(width - drag.startWidth) >= Math.abs(height - drag.startHeight)) {
+      height = Math.max(8, width / ratio);
+    } else {
+      width = Math.max(8, height * ratio);
+    }
+  }
+  return { width, height };
+}
+
 function ReferenceImageNode({ image, token, selected, onPointerDownImage, onPointerDownResize }) {
   // useDriveImageUrl returns { url, error } — no `loading` field. This used
   // to destructure a `loading` that was never there, so imgLoading was
@@ -951,7 +970,7 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     if (viewMode) return;
     containerRef.current.setPointerCapture(e.pointerId);
     setSelectedImageId(image.id);
-    dragRef.current = { mode: 'resize-image', imageId: image.id, x: image.x, y: image.y };
+    dragRef.current = { mode: 'resize-image', imageId: image.id, x: image.x, y: image.y, startWidth: image.width, startHeight: image.height };
   };
 
   // Clicking a text's rendered body (not one of its 4 corner dots)
@@ -1243,7 +1262,10 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
 
     if (drag.mode === 'resize-image') {
       const image = doc.referenceImages.find((r) => r.id === drag.imageId);
-      if (image) setImageDraft({ id: drag.imageId, width: Math.max(8, world.x - drag.x), height: Math.max(8, world.y - drag.y) });
+      if (image) {
+        const { width, height } = resizeImageDims(world, drag, proportionalScaling);
+        setImageDraft({ id: drag.imageId, width, height });
+      }
       return;
     }
 
@@ -1423,7 +1445,8 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
     if (drag.mode === 'resize-image') {
       setImageDraft(null);
       if (pointerWorld) {
-        commitState(resizeReferenceImage(doc, drag.imageId, Math.max(8, pointerWorld.x - drag.x), Math.max(8, pointerWorld.y - drag.y)));
+        const { width, height } = resizeImageDims(pointerWorld, drag, proportionalScaling);
+        commitState(resizeReferenceImage(doc, drag.imageId, width, height));
       }
       return;
     }
