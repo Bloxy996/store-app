@@ -109,6 +109,20 @@ A task lives in exactly one section; verified tasks are deleted.
 - **Full CLAUDE.md audit.** Read every `lib/`, `hooks/`, `features/*` file
   (not just ones touched by a task) to bring CLAUDE.md fully up to date
   and file anything else found here.
+- **Vector editor: free-draw tool + edge tool that creates its own
+  vertices.** (1) Add a freehand draw tool to the vector editor. Decision:
+  build it as a new tool inside `features/vector/`, not a separate app,
+  since it needs the same layers, colors/weight, snapping, undo/redo, and
+  `.vec` save/export. Design points to settle: how the freehand stroke is
+  stored (sampled points simplified into vertices + edges, e.g. curve
+  fitting/smoothing, vs. a new stroke primitive that would change the
+  `.vec` schema), a smoothing/simplification-strength setting, and whether
+  it snaps its start/end to existing vertices/axes. (2) Let the Edge tool
+  draw an edge between two empty spots without pre-existing vertices, the
+  way `polyline` already creates vertices as you click: drag or click from
+  empty canvas to empty canvas and both endpoint vertices plus the edge
+  are created in one undoable step, still snapping to vertices/edges/axes
+  when near them.
 
 ## Pending
 
