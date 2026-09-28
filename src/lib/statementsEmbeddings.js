@@ -2,7 +2,7 @@
 // In-browser replacement for the removed server/python/statements_engine.py
 // embed() (formerly sentence-transformers/all-MiniLM-L6-v2 running under
 // PyTorch, in a long-running Python process kept warm specifically so the
-// model didn't need reloading per request — see TODO.md). Runs the exact
+// model didn't need reloading per request). Runs the exact
 // same model, converted to ONNX (Xenova/all-MiniLM-L6-v2), via
 // @xenova/transformers' in-browser WASM/WebGPU runtime — no server
 // round-trip, no separate host to keep warm.

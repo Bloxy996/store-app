@@ -12,7 +12,7 @@ import { driveRouter } from './routes/drive.js';
 //
 // There used to be a third router here (statementsRouter) proxying to a
 // separate Python process for phrase-similarity/spellcheck. That's gone —
-// see TODO.md — the Statements spark category now runs entirely
+// the Statements spark category now runs entirely
 // client-side (src/lib/statementsEngine.js and friends), so this backend
 // no longer has any compute-heavy route, just auth + Drive proxying.
 function createApp() {

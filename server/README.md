@@ -89,4 +89,4 @@ loaded in memory across requests. That's gone: the Statements spark
 category now runs entirely client-side (`src/lib/statementsEngine.js`
 and friends, on the frontend) instead of calling out to a Python
 service, so there's nothing left that needs a long-running host outside
-the two paths above. See `TODO.md` for the removal.
+the two paths above.

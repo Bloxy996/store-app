@@ -2,7 +2,7 @@
 
 Read automatically by Claude Code at the start of every session here.
 Holds durable architecture facts so they don't need re-explaining.
-Historical changelog entries live in `TODO.md`, not here.
+Task tracking lives in `TODO.md` (workflow: section 9), not here.
 
 ## 1. What this project is
 
@@ -33,8 +33,14 @@ caching, or anything else that's a better fit there than in the browser.
   (`lib/statementsEngine.js`, `lib/statementsEmbeddings.js`,
   `lib/spellcheck.js` — `@xenova/transformers` running the same
   all-MiniLM-L6-v2 model as an ONNX build in-browser, plus
-  `string-similarity-js` and `nspell`/`dictionary-en`). See TODO.md for
-  the removal and what changed scoring-wise. This backend has no
+  `string-similarity-js` and `nspell`/`dictionary-en`). Scoring differs
+  from the old Python version (Dice vs Ratcliff/Obershelp, Hunspell vs
+  frequency-list suggestions; see `statementsEngine.js`'s header). The
+  MiniLM weights (Hugging Face CDN) and dictionary word list load at
+  runtime on first use, not precached, so first use needs network once.
+  `@xenova/transformers` sits in the single main bundle because
+  `vite.config.js` disables code splitting (Rolldown init-order bug, see
+  its comment); revisit once fixed upstream. This backend has no
   compute-heavy route anymore, and no reason to reach for Python again
   unless something genuinely needs a library with no JS/browser
   equivalent.
@@ -189,8 +195,7 @@ Drive vault: a local-folder counterpart to Compile/Apply
 compileVault.js`'s XML format rather than having its own), images→PDF
 (`lib/imagesToPdf.js`, client-side via jsPDF), and extracting embedded
 base64 images out of the open note (`lib/embeddedImages.js`). (A fourth,
-a YouTube-audio-to-vault downloader via yt-dlp/ffmpeg, was removed —
-see `TODO.md`.)
+a YouTube-audio-to-vault downloader via yt-dlp/ffmpeg, was removed.)
 
 ## 4. Mobile performance
 
@@ -294,11 +299,7 @@ work when a shortcut, markdown syntax, or feature behavior changes.
 
 - Prefer extending an existing `lib/` module over duplicating part of it
   (3.4).
-- See `TODO.md` for open/requested work and status. Once an item there is
-  actually done, remove it (or its now-resolved "open"/"not done" part)
-  rather than leaving it marked complete — a "Shipped: ..." summary line
-  is fine to keep as a brief changelog note, but stale caveats/open
-  questions that no longer apply should go, not accumulate.
+- `TODO.md` holds all open work; follow section 9 for how tasks move.
 - Token-budget passes (trimming file size for `compile/`'s LLM export,
   not just humans): `components/icons.jsx` is done. Largest remaining,
   if it's ever worth doing: `features/vector/VectorEditorView.jsx`
@@ -319,3 +320,28 @@ needed:
   in-script comments.
 
 **Important:** favor reducing token usage in everything above.
+
+## 9. Task workflow (`TODO.md`)
+
+`TODO.md` has exactly four sections, in this order: **Backlog**, **Pending**,
+**Active**, **Verify**. It is a live queue, not a changelog: no completed-work
+logs, no "moved to ___" stubs, no leftover markers. A task exists in exactly
+one section at a time.
+
+- **Backlog:** when the user requests work, add it here. Flesh out the
+  wording as needed, but never cut functionality the user specified.
+- **Pending:** only when the user asks, move the named/suggested backlog
+  tasks here. Order matters: top tasks are done first.
+- **Active:** when the user says to start, move the first few Pending tasks
+  here and work on them.
+- **Verify:** once a task is fully complete and self-checked (build, logic
+  review), move it here with numbered steps the user can follow in the app
+  to confirm it. Note anything not machine-checked (e.g. uncompiled Android).
+- **Done:** when asked, walk the user through the Verify steps. Only when
+  the user says a task is verified, delete it from `TODO.md` entirely.
+
+Moves cut the whole entry from one section and paste it into the next,
+leaving nothing behind. Durable facts learned along the way (architecture,
+constraints, tradeoffs) go into the relevant `CLAUDE.md` section, not
+`TODO.md`.
+

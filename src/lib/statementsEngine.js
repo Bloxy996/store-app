@@ -7,7 +7,7 @@
 // chain (first letter -> length -> formatting style -> syllable count).
 //
 // Deliberate differences from the removed Python version (an exact
-// algorithmic match wasn't required — see TODO.md):
+// algorithmic match wasn't required):
 //   - Whole-phrase and word-level similarity ratios now come from the
 //     `string-similarity-js` package (Dice coefficient over character
 //     bigrams) instead of Python's difflib.SequenceMatcher
