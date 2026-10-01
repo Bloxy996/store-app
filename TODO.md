@@ -134,12 +134,6 @@ _(none)_
 
 ## Verify
 
-- **Vector: custom snap axes, full snapping.**
-  1. Create a custom snap axis, then draw/move points, edges, circles near it: they snap to it.
-     With the Vertex tool, click directly on the axis line (and its endpoints while selected): a vertex is placed there.
-  2. Drag one of the axis's points: the other point and the axis stay visible the whole drag.
-  3. Place a point near where two axes cross: it snaps to the crossing and both guide lines show.
-  4. Draw a polyline near vertices/axes: the hover preview line and its label follow the snapped point, and clicks land on it.
 - **Vector: clicking points inside a selection.**
   1. Select several objects, then click/drag a point inside the selection box: that point is picked/moved, not the whole selection.
   2. Drag the move handle at the bottom of the selection: the whole selection moves.

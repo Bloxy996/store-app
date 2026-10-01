@@ -188,21 +188,23 @@ function combinedBboxOf(vertices, vertexIds, circles, circleIds) {
 }
 
 // Corner and edge-midpoint transform handles for a selection bounding box.
+// `pad` pushes the handle positions outward only — anchors stay on the real box.
 // Edge-midpoint handles are axis-locked (top/bottom scale height only,
 // left/right scale width only) — `anchor` is always the OPPOSITE side/
 // corner, since that's what stays fixed while dragging.
-function handleConfigsFor(box) {
+function handleConfigsFor(box, pad = 0) {
   const midX = (box.minX + box.maxX) / 2;
   const midY = (box.minY + box.maxY) / 2;
+  const x0 = box.minX - pad, x1 = box.maxX + pad, y0 = box.minY - pad, y1 = box.maxY + pad; // handle positions; anchors stay on the real box
   return [
-    { key: 'nw', x: box.minX, y: box.minY, anchor: { x: box.maxX, y: box.maxY }, axisLock: null, cursor: 'nwse-resize' },
-    { key: 'ne', x: box.maxX, y: box.minY, anchor: { x: box.minX, y: box.maxY }, axisLock: null, cursor: 'nesw-resize' },
-    { key: 'sw', x: box.minX, y: box.maxY, anchor: { x: box.maxX, y: box.minY }, axisLock: null, cursor: 'nesw-resize' },
-    { key: 'se', x: box.maxX, y: box.maxY, anchor: { x: box.minX, y: box.minY }, axisLock: null, cursor: 'nwse-resize' },
-    { key: 'n', x: midX, y: box.minY, anchor: { x: box.minX, y: box.maxY }, axisLock: 'y', cursor: 'ns-resize' },
-    { key: 's', x: midX, y: box.maxY, anchor: { x: box.minX, y: box.minY }, axisLock: 'y', cursor: 'ns-resize' },
-    { key: 'w', x: box.minX, y: midY, anchor: { x: box.maxX, y: box.minY }, axisLock: 'x', cursor: 'ew-resize' },
-    { key: 'e', x: box.maxX, y: midY, anchor: { x: box.minX, y: box.minY }, axisLock: 'x', cursor: 'ew-resize' }
+    { key: 'nw', x: x0, y: y0, anchor: { x: box.maxX, y: box.maxY }, axisLock: null, cursor: 'nwse-resize' },
+    { key: 'ne', x: x1, y: y0, anchor: { x: box.minX, y: box.maxY }, axisLock: null, cursor: 'nesw-resize' },
+    { key: 'sw', x: x0, y: y1, anchor: { x: box.maxX, y: box.minY }, axisLock: null, cursor: 'nesw-resize' },
+    { key: 'se', x: x1, y: y1, anchor: { x: box.minX, y: box.minY }, axisLock: null, cursor: 'nwse-resize' },
+    { key: 'n', x: midX, y: y0, anchor: { x: box.minX, y: box.maxY }, axisLock: 'y', cursor: 'ns-resize' },
+    { key: 's', x: midX, y: y1, anchor: { x: box.minX, y: box.minY }, axisLock: 'y', cursor: 'ns-resize' },
+    { key: 'w', x: x0, y: midY, anchor: { x: box.maxX, y: box.minY }, axisLock: 'x', cursor: 'ew-resize' },
+    { key: 'e', x: x1, y: midY, anchor: { x: box.minX, y: box.minY }, axisLock: 'x', cursor: 'ew-resize' }
   ];
 }
 

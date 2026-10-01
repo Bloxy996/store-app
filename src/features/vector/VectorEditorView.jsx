@@ -1708,6 +1708,10 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
   }, [selectedVertexIds, selectedEdgeIds, doc.edges]);
   const transformItemCount = transformVertexIds.size + selectedCircleIds.size;
   const selectionBox = !viewMode && tool === 'select' && transformItemCount > 1 ? combinedBboxOf(verticesForRender, transformVertexIds, circlesForRender, selectedCircleIds) : null;
+  // The drawn box/handles sit slightly outside the real bbox (screen-constant) so points on its edge/corners stay clickable.
+  // Scale anchors and the rotate centre still use the real box (selectionBox).
+  const boxPad = 10 / viewport.zoom;
+  const selectionBoxView = selectionBox && { minX: selectionBox.minX - boxPad, maxX: selectionBox.maxX + boxPad, minY: selectionBox.minY - boxPad, maxY: selectionBox.maxY + boxPad };
   // A text counts as "selected" once ALL 4 of its corners are — see
   // onTextPointerDown and the Text section of vectorState.js. Used for the
   // toolbar's text style controls and the layer-move buttons below; a
@@ -2417,8 +2421,8 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
 
             {selectionBox && (
               <g className="vector-transform-handles">
-                <rect x={selectionBox.minX} y={selectionBox.minY} width={selectionBox.maxX - selectionBox.minX} height={selectionBox.maxY - selectionBox.minY} className="vector-selection-box" />
-                {handleConfigsFor(selectionBox).map((h) => (
+                <rect x={selectionBoxView.minX} y={selectionBoxView.minY} width={selectionBoxView.maxX - selectionBoxView.minX} height={selectionBoxView.maxY - selectionBoxView.minY} className="vector-selection-box" />
+                {handleConfigsFor(selectionBox, boxPad).map((h) => (
                   <rect
                     key={h.key}
                     className="vector-scale-handle"
@@ -2430,11 +2434,11 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
                     onPointerDown={(e) => beginScale(e, h)}
                   />
                 ))}
-                <line className="vector-rotate-stem" x1={(selectionBox.minX + selectionBox.maxX) / 2} y1={selectionBox.minY} x2={(selectionBox.minX + selectionBox.maxX) / 2} y2={selectionBox.minY - 24 / viewport.zoom} />
+                <line className="vector-rotate-stem" x1={(selectionBox.minX + selectionBox.maxX) / 2} y1={selectionBoxView.minY} x2={(selectionBox.minX + selectionBox.maxX) / 2} y2={selectionBoxView.minY - 24 / viewport.zoom} />
                 <circle
                   className="vector-rotate-handle"
                   cx={(selectionBox.minX + selectionBox.maxX) / 2}
-                  cy={selectionBox.minY - 24 / viewport.zoom}
+                  cy={selectionBoxView.minY - 24 / viewport.zoom}
                   r={6 / viewport.zoom}
                   onPointerDown={(e) => beginRotate(e, selectionBox)}
                 />
@@ -2445,15 +2449,15 @@ function VectorEditorView({ file, content, onChange, loading, handlers, linkInde
                 <line
                   className="vector-move-stem"
                   x1={(selectionBox.minX + selectionBox.maxX) / 2}
-                  y1={selectionBox.maxY}
+                  y1={selectionBoxView.maxY}
                   x2={(selectionBox.minX + selectionBox.maxX) / 2}
-                  y2={selectionBox.maxY + 24 / viewport.zoom}
+                  y2={selectionBoxView.maxY + 24 / viewport.zoom}
                 />
                 <circle
                   className="vector-move-handle"
                   style={{ cursor: 'move' }}
                   cx={(selectionBox.minX + selectionBox.maxX) / 2}
-                  cy={selectionBox.maxY + 24 / viewport.zoom}
+                  cy={selectionBoxView.maxY + 24 / viewport.zoom}
                   r={6 / viewport.zoom}
                   onPointerDown={onMoveHandlePointerDown}
                 />
