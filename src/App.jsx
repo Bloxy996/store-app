@@ -17,6 +17,7 @@ import { applyFileChanges, flattenVaultTree, folderIdForPath, parseApplyXml, spl
 import { OnboardingFlow, loadingStepProps } from './features/onboarding/OnboardingFlow.jsx';
 import { ProxyFolderBrowser } from './features/onboarding/ProxyFolderBrowser.jsx';
 import { PaneNode, collapseEmptyLeaves, findSplitNode, purgeFileFromTree } from './features/panes/PaneNode.jsx';
+import { checkSaveConflict } from './lib/conflict.js';
 import { PopoutNotePane } from './features/panes/PopoutNotePane.jsx';
 import { PopoutWindow } from './features/panes/PopoutWindow.jsx';
 import { SearchPanel } from './features/search/SearchPanel.jsx';
@@ -102,6 +103,8 @@ export default function App() {
   // content was loaded from — see the stale-buffer effect below, which is
   // what it exists for.
   const [buffers, setBuffers] = useState({});
+  const buffersRef = useRef({}); // latest buffers for async callbacks (saveNow's conflict check)
+  buffersRef.current = buffers;
   const loadingFileIds = useRef(new Set());
   const saveTimers = useRef({});
 
@@ -333,12 +336,12 @@ export default function App() {
           // Databases aren't part of the note search/tag index — only
           // notes' bodies get indexed for full-text search.
           if (meta.kind === 'note') vaultIndex.updateBody(fileId, text);
-          setBuffers((prev) => ({ ...prev, [fileId]: { content: text, dirty: false, saving: false, loading: false, modifiedTime: meta.modifiedTime } }));
+          setBuffers((prev) => ({ ...prev, [fileId]: { content: text, baseContent: text, dirty: false, saving: false, loading: false, modifiedTime: meta.modifiedTime } }));
         })
         .catch(async (err) => {
           if (!err.status && offline.offlineFileIds.has(fileId)) {
             const text = await offline.getOfflineContent(fileId);
-            if (text !== null) { if (meta.kind === 'note') vaultIndex.updateBody(fileId, text); setBuffers((prev) => ({ ...prev, [fileId]: { content: text, dirty: false, saving: false, loading: false, modifiedTime: meta.modifiedTime } })); return; }
+            if (text !== null) { if (meta.kind === 'note') vaultIndex.updateBody(fileId, text); setBuffers((prev) => ({ ...prev, [fileId]: { content: text, baseContent: text, dirty: false, saving: false, loading: false, modifiedTime: meta.modifiedTime } })); return; }
           }
           setBuffers((prev) => ({
             ...prev,
@@ -384,10 +387,34 @@ export default function App() {
       }
       setBuffers((prev) => (prev[fileId] ? { ...prev, [fileId]: { ...prev[fileId], saving: true } } : prev));
       try {
-        const updated = await driveUpdateFileContent(token, fileId, value);
-        sync.applyLocalEdit(fileId, value, updated.modifiedTime || new Date().toISOString());
-        vaultIndex.updateBody(fileId, value);
-        if (offline.offlineFileIds.has(fileId)) await offline.refreshCacheAfterSave(fileId, value, updated.modifiedTime);
+        // Same file edited somewhere else since this buffer loaded? Merge
+        // non-overlapping edits, or park the save behind a conflict banner
+        // (see lib/conflict.js). Skipped for buffers with no known base
+        // (brand-new files) and while a conflict is already waiting.
+        let toSave = value;
+        const buf = buffersRef.current[fileId];
+        if (buf?.conflict) {
+          setBuffers((prev) => (prev[fileId] ? { ...prev, [fileId]: { ...prev[fileId], saving: false } } : prev));
+          return;
+        }
+        if (buf && buf.modifiedTime !== undefined) {
+          const isNote = sync.filesMeta.find((f) => f.id === fileId)?.kind === 'note';
+          const r = await checkSaveConflict({ token, fileId, buf, value, isNote });
+          // Typed more during the check — a newer save is already queued; this one is stale.
+          if (buffersRef.current[fileId]?.content !== value) {
+            setBuffers((prev) => (prev[fileId] ? { ...prev, [fileId]: { ...prev[fileId], saving: false } } : prev));
+            return;
+          }
+          if (r.status === 'conflict') {
+            setBuffers((prev) => (prev[fileId] ? { ...prev, [fileId]: { ...prev[fileId], saving: false, conflict: r.conflict } } : prev));
+            return;
+          }
+          if (r.status === 'merged') toSave = r.value;
+        }
+        const updated = await driveUpdateFileContent(token, fileId, toSave);
+        sync.applyLocalEdit(fileId, toSave, updated.modifiedTime || new Date().toISOString());
+        vaultIndex.updateBody(fileId, toSave);
+        if (offline.offlineFileIds.has(fileId)) await offline.refreshCacheAfterSave(fileId, toSave, updated.modifiedTime);
         // Recording modifiedTime here (not just dirty/saving) matters:
         // sync.applyLocalEdit above updates sync.filesMeta with the fresh
         // modifiedTime right away, and the stale-buffer effect further up
@@ -395,14 +422,37 @@ export default function App() {
         // every filesMeta change to decide whether to force-refetch a file.
         // Without updating it here too, every autosave would look exactly
         // like an external edit and trigger a pointless refetch of the
-        // content that was just saved.
-        setBuffers((prev) => (prev[fileId] ? { ...prev, [fileId]: { ...prev[fileId], dirty: false, saving: false, modifiedTime: updated.modifiedTime } } : prev));
+        // content that was just saved. baseContent is what Drive now holds
+        // (the merge result if one happened) — the next conflict check's base.
+        setBuffers((prev) => (prev[fileId] ? { ...prev, [fileId]: { ...prev[fileId], ...(toSave !== value ? { content: toSave } : null), baseContent: toSave, dirty: false, saving: false, modifiedTime: updated.modifiedTime } } : prev));
       } catch (err) {
         if (!err.status && offline.offlineFileIds.has(fileId)) { await offline.setOfflineContent(fileId, value, { dirty: true }); } else console.error(err);
         setBuffers((prev) => (prev[fileId] ? { ...prev, [fileId]: { ...prev[fileId], saving: false } } : prev));
       }
     },
     [token, sync, vaultIndex, offline]
+  );
+
+  // Conflict banner actions. All three first re-base the buffer onto what's
+  // in Drive now (so the next save's conflict check passes), then differ in
+  // which content wins: mine (keep local), theirs (take Drive's), both
+  // (the merge with <<<<<<< markers — notes only).
+  const resolveConflict = useCallback(
+    (fileId, choice) => {
+      const buf = buffersRef.current[fileId];
+      const c = buf?.conflict;
+      if (!c) return;
+      if (saveTimers.current[fileId]) clearTimeout(saveTimers.current[fileId]);
+      const content = choice === 'theirs' ? c.remoteContent : choice === 'both' && c.merged != null ? c.merged : buf.content;
+      const needsSave = content !== c.remoteContent;
+      setBuffers((prev) => ({
+        ...prev,
+        [fileId]: { ...prev[fileId], content, baseContent: c.remoteContent, modifiedTime: c.remoteModifiedTime ?? prev[fileId].modifiedTime, conflict: undefined, dirty: needsSave }
+      }));
+      if (choice === 'theirs' && sync.filesMeta.find((f) => f.id === fileId)?.kind === 'note') vaultIndex.updateBody(fileId, content);
+      if (needsSave) saveTimers.current[fileId] = setTimeout(() => saveNow(fileId, content), 0);
+    },
+    [saveNow, sync, vaultIndex]
   );
 
   const handleContentChange = useCallback(
@@ -1227,10 +1277,12 @@ export default function App() {
         setSparkFocusFileId(fileId);
         setActiveSideView('sparks');
         setMobileDockOpen(true);
-      }
+      },
+      onResolveConflict: resolveConflict
     }),
     [
       token,
+      resolveConflict,
       openFileInPane,
       activePaneId,
       openNoteByName,
@@ -1585,6 +1637,8 @@ export default function App() {
               file={file}
               buffer={buffers[fileId]}
               onChange={(value) => handleContentChange(fileId, value)}
+              onSync={() => sync.syncNow()}
+              syncing={sync.syncing}
               linkIndex={sync.linkIndex}
               phantomRecords={phantomRecords}
               handlers={handlers}

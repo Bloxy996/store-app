@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { bumpSearchIndexVersion, noteBodyCache, releaseSearchIndex } from './useVaultIndex.js';
 import { mapWithConcurrency, withRetry } from '../lib/concurrency.js';
@@ -7,7 +7,7 @@ import { idbDeleteMany, idbGetAll, idbPut, idbPutMany } from '../lib/indexedDb.j
 import { buildBacklinkIndex, buildLinkIndex, fuzzyScore } from '../lib/linkGraph.js';
 import { parseWikilinks } from '../lib/markdownParse.js';
 import { splitInternalVaultData } from '../lib/sparkStore.js';
-import { FETCH_CONCURRENCY, STORE_FILES, STORE_FOLDERS, STORE_LINKS } from '../lib/vaultConfig.js';
+import { AUTO_SYNC_FOCUS_GAP_MS, AUTO_SYNC_INTERVAL_MS, FETCH_CONCURRENCY, STORE_FILES, STORE_FOLDERS, STORE_LINKS } from '../lib/vaultConfig.js';
 
 
 // ---------------------------------------------------------------------------
@@ -335,6 +335,30 @@ function useVaultSync(token, folder) {
     setCacheLoaded(false);
     releaseSearchIndex();
   }, []);
+
+  // Periodic background refresh, so edits made on another device/tab (or
+  // directly in Drive) show up without pressing Sync. Open, clean buffers
+  // follow via App.jsx's stale-buffer effect; dirty ones are left alone and
+  // go through the conflict check on their next save.
+  const syncingRef = useRef(false);
+  syncingRef.current = syncing;
+  const lastSyncedRef = useRef(0);
+  lastSyncedRef.current = lastSyncedAt || 0;
+  useEffect(() => {
+    if (!token || !folder) return undefined;
+    const tick = () => {
+      if (navigator.onLine && !syncingRef.current) syncNow();
+    };
+    const onVisible = () => {
+      if (!document.hidden && Date.now() - lastSyncedRef.current > AUTO_SYNC_FOCUS_GAP_MS) tick();
+    };
+    const id = setInterval(tick, AUTO_SYNC_INTERVAL_MS);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [token, folder, syncNow]);
 
   return {
     filesMeta,

@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
 
-import { IconEdit, IconEye } from '../../components/icons.jsx';
+import { IconEdit, IconEye, IconLoader, IconRefresh } from '../../components/icons.jsx';
 import { EditorContent } from '../editor/EditorContent.jsx';
+import { ConflictBanner } from './ConflictBanner.jsx';
 
 // ---------------------------------------------------------------------------
 // The single-tab, single-pane shell used inside a popped-out note's own
@@ -23,7 +24,7 @@ import { EditorContent } from '../editor/EditorContent.jsx';
 // back in the main window's active pane, not in this one — this window
 // owns no pane tree of its own, only ever this one note.
 // ---------------------------------------------------------------------------
-function PopoutNotePane({ file, buffer, onChange, linkIndex, phantomRecords, handlers, backlinkIndex, allFiles, getBody, pendingRowOpen, onConsumeRowOpen }) {
+function PopoutNotePane({ file, buffer, onChange, onSync, syncing, linkIndex, phantomRecords, handlers, backlinkIndex, allFiles, getBody, pendingRowOpen, onConsumeRowOpen }) {
   const [mode, setMode] = useState('edit');
   const popoutHandlers = useMemo(
     () => ({ ...handlers, onEditorSelectionChange: undefined, registerActiveEditorNav: undefined }),
@@ -33,6 +34,9 @@ function PopoutNotePane({ file, buffer, onChange, linkIndex, phantomRecords, han
   return (
     <div className="popout-note-pane">
       <div className="popout-note-toolbar">
+        <button className="icon-btn" onClick={onSync} disabled={syncing} title="Refresh — pull the latest from Drive">
+          {syncing ? <IconLoader size={15} /> : <IconRefresh size={15} />}
+        </button>
         {file.kind === 'note' && (
           <button
             className="icon-btn"
@@ -43,6 +47,7 @@ function PopoutNotePane({ file, buffer, onChange, linkIndex, phantomRecords, han
           </button>
         )}
       </div>
+      {buffer?.conflict && <ConflictBanner conflict={buffer.conflict} isNote={file.kind === 'note'} onResolve={(choice) => handlers.onResolveConflict(file.id, choice)} />}
       <EditorContent
         file={file}
         content={buffer?.content || ''}

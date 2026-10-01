@@ -81,6 +81,11 @@ const STORE_OFFLINE_ASSETS = 'offlineAssets';
 // while staying comfortably under Drive's per-user rate limits.
 const FETCH_CONCURRENCY = 8;
 
+// Background refresh (useVaultSync): re-sync on this interval, and also when
+// the tab becomes visible again if the last sync is older than the gap.
+const AUTO_SYNC_INTERVAL_MS = 60_000;
+const AUTO_SYNC_FOCUS_GAP_MS = 20_000;
+
 
 // Image files participate in the vault (sidebar, viewing, [[links]]) the
 // same way notes do, but their bytes are only ever fetched on demand
@@ -195,6 +200,6 @@ function extensionForKind(kind) {
   return 'md';
 }
 
-export { BACKEND_URL, API_KEY, APP_ID, DB_NAME, DB_VERSION, STORE_FILES, STORE_FOLDERS, STORE_LINKS, STORE_META, STORE_OFFLINE_NOTES, STORE_OFFLINE_ASSETS, FETCH_CONCURRENCY, IMAGE_EXTENSIONS, IMAGE_MIME_TYPES, VIDEO_EXTENSIONS, VIDEO_MIME_TYPES, AUDIO_EXTENSIONS, AUDIO_MIME_TYPES, NOTE_EXTENSIONS, DATABASE_EXTENSIONS, CANVAS_EXTENSIONS, VECTOR_EXTENSIONS, fileExtension, isImageName, isVideoName, isAudioName, isAssetName, classifyKind, opensInEditorPane, extensionForKind };
+export { BACKEND_URL, API_KEY, APP_ID, DB_NAME, DB_VERSION, STORE_FILES, STORE_FOLDERS, STORE_LINKS, STORE_META, STORE_OFFLINE_NOTES, STORE_OFFLINE_ASSETS, FETCH_CONCURRENCY, AUTO_SYNC_INTERVAL_MS, AUTO_SYNC_FOCUS_GAP_MS, IMAGE_EXTENSIONS, IMAGE_MIME_TYPES, VIDEO_EXTENSIONS, VIDEO_MIME_TYPES, AUDIO_EXTENSIONS, AUDIO_MIME_TYPES, NOTE_EXTENSIONS, DATABASE_EXTENSIONS, CANVAS_EXTENSIONS, VECTOR_EXTENSIONS, fileExtension, isImageName, isVideoName, isAudioName, isAssetName, classifyKind, opensInEditorPane, extensionForKind };
 
 

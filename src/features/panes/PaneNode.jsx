@@ -2,6 +2,7 @@ import React, { useRef } from 'react';
 
 import { ResizeHandle } from '../../components/ResizeHandle.jsx';
 import { EditorContent } from '../editor/EditorContent.jsx';
+import { ConflictBanner } from './ConflictBanner.jsx';
 import { PaneHeader, TabBar } from './TabBar.jsx';
 import { equalSizes } from '../../lib/paneTree.js';
 
@@ -130,6 +131,7 @@ function LeafPane({
         onToggleDock={onToggleDock}
       />
       <div className="pane-content">
+        {buf?.conflict && activeTab && <ConflictBanner conflict={buf.conflict} isNote={file?.kind === 'note'} onResolve={(choice) => handlers.onResolveConflict(activeTab.fileId, choice)} />}
         <EditorContent
           key={file ? file.id : 'empty'}
           file={file}
