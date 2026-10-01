@@ -101,10 +101,6 @@
   align-items: center;
   gap: 4px;
 }
-.vector-alpha-slider {
-  width: 40px;
-  accent-color: var(--accent);
-}
 /* display:contents keeps the fieldset itself out of the toolbar's flex
    layout — its children lay out exactly as if the fieldset weren't there —
    while still getting the free "disable everything inside" behavior when
@@ -250,21 +246,81 @@
   position: relative;
   width: 16px;
   height: 16px;
+  padding: 0;
   border-radius: 50%;
   border: 1px solid var(--border);
   cursor: pointer;
   overflow: hidden;
   display: inline-block;
+  background: repeating-conic-gradient(#888 0 25%, #ccc 0 50%) 0 0 / 8px 8px; /* checkerboard shows transparency */
 }
-.vector-color-custom input {
+.vector-color-custom-fill {
   position: absolute;
-  inset: -4px;
-  width: calc(100% + 8px);
-  height: calc(100% + 8px);
-  border: none;
-  padding: 0;
+  inset: 0;
+}
+.vector-color-popup {
+  position: fixed;
+  z-index: 1000;
+  width: 192px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-2, var(--bg-1));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+.vcp-sv {
+  position: relative;
+  height: 120px;
+  border-radius: 4px;
+  cursor: crosshair;
+  touch-action: none;
+}
+.vcp-track {
+  position: relative;
+  height: 12px;
+  border-radius: 6px;
   cursor: pointer;
-  opacity: 0;
+  touch-action: none;
+}
+.vcp-hue {
+  background: linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00);
+}
+.vcp-alpha {
+  background: repeating-conic-gradient(#888 0 25%, #ccc 0 50%) 0 0 / 8px 8px;
+}
+.vcp-alpha-fill {
+  position: absolute;
+  inset: 0;
+  border-radius: 6px;
+}
+.vcp-thumb {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+.vcp-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.vcp-hex {
+  flex: 1;
+  min-width: 0;
+}
+.vcp-pct {
+  width: 48px;
+}
+.vcp-unit {
+  font-size: 12px;
+  color: var(--text-muted);
 }
 .vector-canvas-bg-label {
   font-size: 12px;

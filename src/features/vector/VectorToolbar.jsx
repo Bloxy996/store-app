@@ -19,7 +19,9 @@ import {
   IconZoomIn,
   IconZoomOut
 } from '../../components/icons.jsx';
-import { colorAlphaParts, withAlpha } from './vectorGeometry.jsx';
+import { useRef, useState } from 'react';
+
+import { ColorAlphaPopup } from './ColorAlphaPopup.jsx';
 
 // A small local icon — kept here rather than added to the shared icons.jsx
 // module, since that file's giant single-line export statement is fragile
@@ -77,31 +79,26 @@ function SliderNumber({ value, onChange, min, max, step = 1, title, numberWidth 
 }
 
 // The toolbar's one custom-color control for a given role (edge/outline,
-// circle fill, text) — a hue/RGB picker plus an alpha slider so any color,
+// circle fill, text) — a swatch opening a popup with hue/saturation and
+// opacity together, so any color,
 // including a fully transparent one, is reachable without a fixed swatch
 // row. `noneValue`, when given, also renders a dedicated "no fill" swatch
 // (circle fill's existing 'none' sentinel — distinct from a transparent
 // *color*, since 'none' skips painting entirely rather than painting at
 // 0% opacity of some hue).
 function ColorAlphaField({ color, onChange, title, noneValue }) {
-  const { hex6, alphaPct } = colorAlphaParts(color);
+  const [open, setOpen] = useState(false);
+  const swatchRef = useRef(null);
+  const isNone = color === noneValue;
   return (
     <span className="vector-color-alpha-field">
       {noneValue !== undefined && (
-        <button type="button" className={`vector-color-swatch vector-fill-none ${color === noneValue ? 'active' : ''}`} title="No fill" onClick={() => onChange(noneValue)} />
+        <button type="button" className={`vector-color-swatch vector-fill-none ${isNone ? 'active' : ''}`} title="No fill" onClick={() => onChange(noneValue)} />
       )}
-      <label className="vector-color-custom" title={title} style={{ background: color === noneValue ? 'transparent' : color }}>
-        <input type="color" value={hex6} onChange={(e) => onChange(withAlpha(e.target.value, color === noneValue ? 100 : alphaPct))} />
-      </label>
-      <input
-        type="range"
-        className="vector-alpha-slider"
-        min={0}
-        max={100}
-        value={color === noneValue ? 100 : alphaPct}
-        title="Opacity — drag to 0 for a fully transparent color"
-        onChange={(e) => onChange(withAlpha(hex6, Number(e.target.value)))}
-      />
+      <button ref={swatchRef} type="button" className="vector-color-custom" title={title} onClick={() => setOpen((o) => !o)}>
+        <span className="vector-color-custom-fill" style={{ background: isNone ? 'transparent' : color }} />
+      </button>
+      {open && <ColorAlphaPopup color={isNone ? '#000000' : color} onChange={onChange} onClose={() => setOpen(false)} anchorRef={swatchRef} />}
     </span>
   );
 }

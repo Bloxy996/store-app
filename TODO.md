@@ -134,19 +134,9 @@ _(none)_
 
 ## Verify
 
-- **Vector: clicking points inside a selection.**
-  1. Select several objects, then click/drag a point inside the selection box: that point is picked/moved, not the whole selection.
-  2. Drag the move handle at the bottom of the selection: the whole selection moves.
-- **Vector: measurement labels (offsets, ratios, lengths, angles).**
-  1. Labels use a transparent background and the snap-axis colors.
-  2. They show while creating axes, vertices, edges, circles, and polylines, and while selecting, not only during selection.
-  3. They show for every relevant axis/vertex/edge, not just the one in focus.
-  4. Circles show position stats.
-- **Vector: selecting thin things.**
-  1. Try clicking a thin custom snap axis, a zero-weight edge, and a hairline edge at different zoom levels: each is easy to hit without pixel-perfect aim.
 - **Vector: RGBA color picker.**
   1. Open the edge color, circle fill, text color, and canvas background controls.
-  2. Each has hue plus an opacity slider; dragging opacity to 0 gives transparent.
+  2. Each opens a popup with a hue/saturation area, hue slider, and opacity slider (plus hex and % boxes); dragging opacity to 0 gives transparent.
   3. The canvas shows the alpha live, and the SVG export's colors/background match.
 - **Reload button and new-window freshness.**
   1. Open a note in the app, then edit the same file elsewhere (another tab/device or Drive).
