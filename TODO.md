@@ -134,12 +134,6 @@ _(none)_
 
 ## Verify
 
-- **Sync: refresh button in popout, periodic refresh, conflict handling.**
-  1. Open a note in "Open in new window": the toolbar has a refresh button; edit the file elsewhere, click it, and the content updates.
-  2. Edit a note elsewhere and wait about a minute without pressing Sync: an open, unedited tab updates by itself. Switching back to the tab after a while also refreshes.
-  3. Edit different lines of the same note in two places (one saved elsewhere, one typed here before it refreshes): your save merges both with no banner.
-  4. Edit the same line in two places: a banner appears and nothing is overwritten. Try Keep mine, Use theirs, and Keep both (markers) on separate attempts.
-  5. Do the same with a non-note file (e.g. a .vec or database): the banner offers only Keep mine / Use theirs.
 - **Sparks: create, browse, link, delete.**
   1. Open the Sparks panel and click New spark. Type text on several lines: each line becomes its own spark in the same category.
   2. Category autocomplete suggests existing nested categories (e.g. `vehicles/boat/small`). Also try a screenshot plus caption.
