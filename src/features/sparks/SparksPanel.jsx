@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useMemo, useState } from 'react';
 
 import { IconDownload, IconLink2, IconLoader, IconPlus, IconSliders, IconTrash, IconX, IconZap } from '../../components/icons.jsx';
 import { useDriveImageUrl } from '../../hooks/useDriveImageUrl.js';
@@ -9,19 +9,13 @@ import { SparkCaptureForm } from './SparkCaptureForm.jsx';
 const CategorySorterPanel = lazy(() => import('./CategorySorterPanel.jsx').then((m) => ({ default: m.CategorySorterPanel })));
 
 // The Android companion APK (built by CI, see deploy.yml) sits next to the
-// site. HEAD-check it so the link only shows when it was actually published
-// (a dev server answers unknown paths with index.html, hence the type check).
+// site on GitHub Pages. The build sets VITE_HAS_APK=true only when the APK was
+// actually produced, so hosts that never ship it (e.g. Vercel) show no link
+// and make no probe request (a probe would log a 404 in the console).
+const HAS_APK = import.meta.env.VITE_HAS_APK === 'true';
 const APK_URL = `${import.meta.env.BASE_URL}store-sparks.apk`;
 function AndroidApkLink() {
-  const [ok, setOk] = useState(false);
-  useEffect(() => {
-    let live = true;
-    fetch(APK_URL, { method: 'HEAD' })
-      .then((r) => { if (live && r.ok && !(r.headers.get('content-type') || '').includes('text/html')) setOk(true); })
-      .catch(() => {});
-    return () => { live = false; };
-  }, []);
-  if (!ok) return null;
+  if (!HAS_APK) return null;
   return (
     <a className="spark-apk-link muted small" href={APK_URL} download="store-sparks.apk" title="Android widget, quick-settings tile and accessibility button for quick capture">
       <IconDownload size={12} /> Get the Android app (.apk)
