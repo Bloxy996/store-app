@@ -50,7 +50,7 @@ function useSparks(token, folder, sync) {
       if (sync.internalFiles) setLoaded(true);
       return;
     }
-    const sparkFile = sync.internalFiles.find((f) => f.name === SPARK_FILE_NAME);
+    const sparkFile = sync.internalFiles.find((f) => f.name === SPARK_FILE_NAME && f.parents?.[0] === sync.internalFolder.id) || sync.internalFiles.find((f) => f.name === SPARK_FILE_NAME);
     idsRef.current.folderId = sync.internalFolder.id;
     if (!sparkFile) {
       setLoaded(true);

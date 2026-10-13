@@ -168,13 +168,17 @@ function buildSparksByFileId(sparks) {
 // consume `foldersMeta`/`filesMeta` as returned by useVaultSync — so
 // stripping it there, once, is the single point that keeps it invisible
 // everywhere (3.4). Only strips a folder actually named SPARK_FOLDER_NAME
-// sitting directly at the vault root, and whatever's nested under it.
+// sitting directly at the vault root (all of them, if duplicated), and
+// whatever's nested under it.
 // ---------------------------------------------------------------------------
 function splitInternalVaultData(folders, files, rootId) {
-  const internalFolder = folders.find((f) => f.name === SPARK_FOLDER_NAME && (f.parents?.[0] || rootId) === rootId);
+  // Every root-level `.store` counts, not just the first: a duplicate (e.g. a
+  // capture that raced the first sync) would otherwise show in the file tree.
+  const roots = folders.filter((f) => f.name === SPARK_FOLDER_NAME && (f.parents?.[0] || rootId) === rootId);
+  const internalFolder = roots[0];
   if (!internalFolder) return { folders, files, internalFolder: null, internalFiles: [] };
 
-  const internalFolderIds = new Set([internalFolder.id]);
+  const internalFolderIds = new Set(roots.map((f) => f.id));
   // One extra pass is enough — this only ever nests one level deep
   // (spark-attachments/), but walk to a fixed point anyway so a manually
   // reorganized Drive folder can't accidentally leak a nested folder in.

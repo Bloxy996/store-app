@@ -241,9 +241,12 @@ export default function App() {
 
   const filesById = useMemo(() => {
     const map = new Map(sync.filesMeta.map((f) => [f.id, f]));
+    // Spark screenshots live in the hidden `.store/` (not in filesMeta) but
+    // still open as ordinary image tabs, so register just the images here.
+    sync.internalFiles.forEach((f) => { if (f.kind === 'image') map.set(f.id, f); });
     map.set(GRAPH_PANE_FILE_ID, GRAPH_PANE_FILE);
     return map;
-  }, [sync.filesMeta]);
+  }, [sync.filesMeta, sync.internalFiles]);
 
   // Keeps lastNoteFileIdRef (declared above, with its own comment) pointed
   // at whatever real file was active last, skipping the Graph pane itself
