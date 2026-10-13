@@ -130,3 +130,13 @@ test one thing — `AccessibilityButtonController` is a real, standard API
 (added in API 26, matching this project's `minSdk`), but accessibility
 services are also the part of Android most prone to per-OEM quirks, per
 the variability notes above.
+
+## Download from the PWA
+
+`.github/workflows/deploy.yml` builds a **debug** APK on every deploy
+(best-effort: a failed Android build doesn't block the site) and publishes
+it as `store-sparks.apk` beside the site. The Sparks panel shows a "Get the
+Android app" link when that file exists. Debug builds are signed with a
+per-build key, so installing a newer one over an older one requires
+uninstalling first; add a fixed signing keystore (repo secret) if that
+becomes annoying. The wrapper is pinned to Gradle 8.9 to match AGP 8.5.2.

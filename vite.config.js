@@ -123,7 +123,7 @@ export default defineConfig({
         // top-level navigations to /auth/login and /auth/callback (OAuth
         // redirects) were being served index.html by the SW, so sign-in
         // just reloaded the app and the session cookie was never set.
-        navigateFallbackDenylist: [/^\/(api|auth|healthz)(\/|$)/],
+        navigateFallbackDenylist: [/^\/(api|auth|healthz)(\/|$)/, /\.apk$/],
         cleanupOutdatedCaches: true,
         runtimeCaching: [
           {

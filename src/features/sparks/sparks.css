@@ -252,3 +252,16 @@ button.spark-thumb-btn {
   background: var(--accent-hover);
   color: var(--bg-0);
 }
+
+.spark-apk-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  text-decoration: none;
+  flex-shrink: 0;
+}
+.spark-apk-link:hover {
+  color: var(--text-normal);
+}

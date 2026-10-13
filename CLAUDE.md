@@ -63,7 +63,9 @@ caching, or anything else that's a better fit there than in the browser.
 - **Android companion:** `android/` — standalone Gradle project, three
   deep-link entry points (home-screen widget, Quick Settings tile,
   accessibility-button floating button) into the same PWA. Not a native
-  rewrite.
+  rewrite. `deploy.yml` builds a debug APK best-effort
+  (never blocks the site deploy) and publishes it as `store-sparks.apk`;
+  `SparksPanel.jsx` links to it when present.
 
 ## 3. Architecture notes
 
