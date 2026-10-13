@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write   # publish the APK as a release asset
   pages: write
   id-token: write
 
@@ -30,11 +30,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Best-effort: the Android app (android/) is published next to the site
-      # as store-sparks.apk so the PWA can offer it. A failing Android build
-      # must never block the website deploy, hence continue-on-error. It runs
-      # before the web build so the site only advertises the APK (via
-      # VITE_HAS_APK) when it was actually built.
+      - name: Build
+        run: npm run build
+        env:
+          VITE_GOOGLE_CLIENT_ID: ${{ secrets.VITE_GOOGLE_CLIENT_ID }}
+          VITE_GOOGLE_API_KEY: ${{ secrets.VITE_GOOGLE_API_KEY }}
+          VITE_GOOGLE_APP_ID: ${{ secrets.VITE_GOOGLE_APP_ID }}
+          VITE_BACKEND_URL: ${{ secrets.VITE_BACKEND_URL }}
+
+      # Best-effort: the Android app (android/) is published as a GitHub Release
+      # asset (tag android-latest) so every host of the PWA can link to one
+      # stable URL. A failing Android build must never block the website
+      # deploy, hence continue-on-error.
       - name: Setup Java (Android build)
         uses: actions/setup-java@v4
         with:
@@ -50,18 +57,16 @@ jobs:
           ./gradlew --no-daemon assembleDebug
           cp app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/store-sparks.apk"
 
-      - name: Build
-        run: npm run build
-        env:
-          VITE_GOOGLE_CLIENT_ID: ${{ secrets.VITE_GOOGLE_CLIENT_ID }}
-          VITE_GOOGLE_API_KEY: ${{ secrets.VITE_GOOGLE_API_KEY }}
-          VITE_GOOGLE_APP_ID: ${{ secrets.VITE_GOOGLE_APP_ID }}
-          VITE_BACKEND_URL: ${{ secrets.VITE_BACKEND_URL }}
-          VITE_HAS_APK: ${{ steps.apk.outcome == 'success' }}
-
-      - name: Add APK to site
+      - name: Publish APK release
         if: steps.apk.outcome == 'success'
-        run: cp "$RUNNER_TEMP/store-sparks.apk" dist/store-sparks.apk
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view android-latest >/dev/null 2>&1 || \
+            gh release create android-latest --title "Android app (latest)" \
+              --notes "Latest Sparks Android build, updated on every deploy." --latest=false
+          gh release upload android-latest "$RUNNER_TEMP/store-sparks.apk" --clobber
 
       - name: Upload build artifact
         uses: actions/upload-pages-artifact@v3

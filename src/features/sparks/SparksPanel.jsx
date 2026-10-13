@@ -8,16 +8,16 @@ import { SparkCaptureForm } from './SparkCaptureForm.jsx';
 
 const CategorySorterPanel = lazy(() => import('./CategorySorterPanel.jsx').then((m) => ({ default: m.CategorySorterPanel })));
 
-// The Android companion APK (built by CI, see deploy.yml) sits next to the
-// site on GitHub Pages. The build sets VITE_HAS_APK=true only when the APK was
-// actually produced, so hosts that never ship it (e.g. Vercel) show no link
-// and make no probe request (a probe would log a 404 in the console).
-const HAS_APK = import.meta.env.VITE_HAS_APK === 'true';
-const APK_URL = `${import.meta.env.BASE_URL}store-sparks.apk`;
+// The Android companion APK is built by CI (see deploy.yml) and published as a
+// GitHub Release asset, which gives it a stable URL that works from any host
+// (Vercel can't build it, GitHub Pages doesn't need to serve it). Override with
+// VITE_APK_URL if it ever lives elsewhere. No probe request: a HEAD check would
+// log a console error whenever the file is missing.
+const APK_URL = import.meta.env.VITE_APK_URL
+  || 'https://github.com/Bloxy996/store-app/releases/download/android-latest/store-sparks.apk';
 function AndroidApkLink() {
-  if (!HAS_APK) return null;
   return (
-    <a className="spark-apk-link muted small" href={APK_URL} download="store-sparks.apk" title="Android widget, quick-settings tile and accessibility button for quick capture">
+    <a className="spark-apk-link muted small" href={APK_URL} rel="noopener" title="Android widget, quick-settings tile and accessibility button for quick capture">
       <IconDownload size={12} /> Get the Android app (.apk)
     </a>
   );
