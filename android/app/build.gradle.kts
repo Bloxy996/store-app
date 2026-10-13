@@ -15,7 +15,25 @@ android {
         versionName = "1.0"
     }
 
+    // CI signs every build with one fixed key (repo secrets, see deploy.yml) so a
+    // new APK installs over the old one. Without the env vars (local builds)
+    // Gradle's default debug key is used.
+    signingConfigs {
+        val keystore = System.getenv("ANDROID_KEYSTORE_FILE")?.let { file(it) }
+        if (keystore != null && keystore.exists()) {
+            create("fixed") {
+                storeFile = keystore
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = "sparks"
+                keyPassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfigs.findByName("fixed")?.let { signingConfig = it }
+        }
         release {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

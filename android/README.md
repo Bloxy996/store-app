@@ -134,7 +134,9 @@ the variability notes above.
 `.github/workflows/deploy.yml` builds a **debug** APK on every deploy
 (best-effort: a failed Android build doesn't block the site) and publishes
 it as `store-sparks.apk` beside the site. The Sparks panel shows a "Get the
-Android app" link when that file exists. Debug builds are signed with a
-per-build key, so installing a newer one over an older one requires
-uninstalling first; add a fixed signing keystore (repo secret) if that
-becomes annoying. The wrapper is pinned to Gradle 8.9 to match AGP 8.5.2.
+Android app" link when that file exists. CI signs it with a fixed key
+(repo secrets `ANDROID_KEYSTORE_B64` + `ANDROID_KEYSTORE_PASSWORD`, alias
+`sparks`), so each new APK installs over the old one with no uninstall. Lose
+those secrets and the next install needs one uninstall again. Local builds
+fall back to Gradle's debug key. The wrapper is pinned to Gradle 8.9 to
+match AGP 8.5.2.

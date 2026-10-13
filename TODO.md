@@ -135,7 +135,7 @@ _(none)_
 ## Verify
 
 - **Android quick-add sheet: widget, Quick Settings tile, accessibility button.**
-  1. Install the latest APK from the Releases page (uninstall the old one first; debug builds are signed per build). Open the Store Sparks icon once.
+  1. Install the latest APK from the Releases page (uninstall the old one this one time: it's the first build with the fixed signing key; later builds update in place). Open the Store Sparks icon once.
   2. Long-press home screen → Widgets → Store Sparks and add the "Add a spark…" bar; add the "Add spark" Quick Settings tile; turn on Settings → Accessibility → Store Sparks and its button.
   3. From inside another app, tap each of the three. Each should slide a sheet up over that app with the add-spark form (signed in, your categories autocomplete).
   4. Add a text spark and a screenshot spark, tap Done (sheet closes back to the app you were in), and confirm both appear on the laptop.
