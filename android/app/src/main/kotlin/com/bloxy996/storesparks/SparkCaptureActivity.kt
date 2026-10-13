@@ -14,7 +14,7 @@ import androidx.browser.customtabs.CustomTabsIntent
 // Chrome's cookies and storage, so it's already signed in with your vault
 // chosen, and it's the real form (a WebView couldn't sign in: Google blocks
 // OAuth in embedded WebViews). Browsers without partial-tab support show
-// the same page full-screen instead.
+// the same page full-screen instead (min. height is 50%; Chrome 107+).
 //
 // The page talks back through storesparks:// links (declared in the
 // manifest, this activity is singleTask so they land in onNewIntent):
@@ -68,7 +68,7 @@ class SparkCaptureActivity : Activity() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         val tab = CustomTabsIntent.Builder()
-            .setInitialActivityHeightPx((resources.displayMetrics.heightPixels * 0.75).toInt(), CustomTabsIntent.ACTIVITY_HEIGHT_ADJUSTABLE)
+            .setInitialActivityHeightPx((resources.displayMetrics.heightPixels * 0.65).toInt(), CustomTabsIntent.ACTIVITY_HEIGHT_ADJUSTABLE)
             .setToolbarCornerRadiusDp(16)
             .setShareState(CustomTabsIntent.SHARE_STATE_OFF)
             .setUrlBarHidingEnabled(true)
@@ -76,6 +76,10 @@ class SparkCaptureActivity : Activity() {
             .build()
         tabPaused = false
         tabLaunched = true
-        tab.launchUrl(this, Uri.parse(SPARK_CAPTURE_URL))
+        // Chrome only honours the partial height when the tab is started with
+        // startActivityForResult (or a bound session); launchUrl() would open
+        // it full-screen. Results are unused — closing is handled in onResume.
+        @Suppress("DEPRECATION")
+        startActivityForResult(tab.intent.setData(Uri.parse(SPARK_CAPTURE_URL)), 0)
     }
 }
