@@ -134,13 +134,6 @@ _(none)_
 
 ## Verify
 
-- **Sparks: create, browse, link, delete.**
-  1. Open the Sparks panel and click New spark. Type text on several lines: each line becomes its own spark in the same category.
-  2. Category autocomplete suggests existing nested categories (e.g. `vehicles/boat/small`). Also try a screenshot plus caption.
-  3. Link a spark to 1+ notes/files using the search (matches title, frontmatter, and content), then add.
-  4. Browse sparks by category. Open a linked note: it shows an indicator that sparks link to it, and the spark shows its linked files.
-  5. Delete a spark from the panel: it disappears and the note's indicator updates.
-  Note: Sparks are stored in `.store/spark.txt`, which should not appear in the file tree.
 - **Android quick-capture widget and accessibility button.**
   1. Build `android/` in Android Studio and install it; add the home-screen widget and Quick Settings tile, enable the accessibility service, and turn on its button.
   2. Each entry point opens the PWA's spark capture form (`#/spark-quick-add`); capture a text spark and a screenshot spark from it.
