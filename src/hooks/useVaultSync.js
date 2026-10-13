@@ -67,7 +67,7 @@ function useVaultSync(token, folder) {
       ]);
       if (cancelled) return;
       const linksMap = new Map(cachedLinks.map((l) => [l.fileId, l.links]));
-      const split = splitInternalVaultData(cachedFolders, cachedFiles, folder.id);
+      const split = splitInternalVaultData(cachedFolders, cachedFiles);
       const index = buildLinkIndex(split.files, split.folders, folder.id);
       setFilesMeta(split.files);
       setFoldersMeta(split.folders);
@@ -101,7 +101,7 @@ function useVaultSync(token, folder) {
       // pipeline or the IndexedDB cache below. useSparks.js reads
       // `internalFolder`/`internalFiles` directly off this hook's return
       // value instead of doing its own separate Drive listing.
-      const split = splitInternalVaultData(rawRemoteFolders, rawRemoteFiles, folder.id);
+      const split = splitInternalVaultData(rawRemoteFolders, rawRemoteFiles);
       const remoteFolders = split.folders;
       const remoteFiles = split.files;
       setInternalFolder(split.internalFolder);

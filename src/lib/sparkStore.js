@@ -167,18 +167,24 @@ function buildSparksByFileId(sparks) {
 // file tree, full-text search, the tag index, and the wikilink graph all
 // consume `foldersMeta`/`filesMeta` as returned by useVaultSync — so
 // stripping it there, once, is the single point that keeps it invisible
-// everywhere (3.4). Only strips a folder actually named SPARK_FOLDER_NAME
-// sitting directly at the vault root (all of them, if duplicated), and
+// everywhere (3.4). Strips every folder named SPARK_FOLDER_NAME, and
 // whatever's nested under it.
 // ---------------------------------------------------------------------------
-function splitInternalVaultData(folders, files, rootId) {
-  // Every root-level `.store` counts, not just the first: a duplicate (e.g. a
-  // capture that raced the first sync) would otherwise show in the file tree.
-  const roots = folders.filter((f) => f.name === SPARK_FOLDER_NAME && (f.parents?.[0] || rootId) === rootId);
-  const internalFolder = roots[0];
-  if (!internalFolder) return { folders, files, internalFolder: null, internalFiles: [] };
+function splitInternalVaultData(folders, files) {
+  // Every `.store` folder counts, wherever it sits and however many there
+  // are (a duplicate from a capture that raced the first sync, or one nested
+  // in a subfolder) — any left visible would show in the file tree. The
+  // "primary" one, where sparks load from and save to, is whichever holds
+  // the most recently modified spark.txt (else the first).
+  const roots = folders.filter((f) => f.name === SPARK_FOLDER_NAME);
+  if (!roots.length) return { folders, files, internalFolder: null, internalFiles: [] };
+  const rootIds = new Set(roots.map((f) => f.id));
+  const newest = files
+    .filter((f) => f.name === SPARK_FILE_NAME && rootIds.has(f.parents?.[0]))
+    .sort((x, y) => (y.modifiedTime || '').localeCompare(x.modifiedTime || ''))[0];
+  const internalFolder = (newest && roots.find((f) => f.id === newest.parents[0])) || roots[0];
 
-  const internalFolderIds = new Set(roots.map((f) => f.id));
+  const internalFolderIds = new Set(rootIds);
   // One extra pass is enough — this only ever nests one level deep
   // (spark-attachments/), but walk to a fixed point anyway so a manually
   // reorganized Drive folder can't accidentally leak a nested folder in.

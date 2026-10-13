@@ -45,9 +45,10 @@ function useSparks(token, folder, sync) {
   useEffect(() => {
     if (!token || !folder?.id || loaded) return;
     if (!sync.internalFolder) {
-      // Sync has run at least once (internalFiles is always an array) and
-      // found no `.store/` folder — nothing to load, but still "loaded".
-      if (sync.internalFiles) setLoaded(true);
+      // Only once a real sync has finished (lastSyncedAt) do we know there's
+      // no `.store/` — before that it's just not loaded yet, and marking
+      // "loaded" here would block loading it when the sync result arrives.
+      if (sync.lastSyncedAt) setLoaded(true);
       return;
     }
     const sparkFile = sync.internalFiles.find((f) => f.name === SPARK_FILE_NAME && f.parents?.[0] === sync.internalFolder.id) || sync.internalFiles.find((f) => f.name === SPARK_FILE_NAME);
@@ -72,7 +73,7 @@ function useSparks(token, folder, sync) {
     return () => {
       cancelled = true;
     };
-  }, [token, folder?.id, loaded, sync.internalFolder, sync.internalFiles]);
+  }, [token, folder?.id, loaded, sync.internalFolder, sync.internalFiles, sync.lastSyncedAt]);
 
   // Ensures .store/ and .store/spark.txt exist, creating whichever is
   // missing, and returns their ids. Safe to call on every capture — it's a
