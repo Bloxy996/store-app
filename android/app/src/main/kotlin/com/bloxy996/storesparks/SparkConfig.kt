@@ -1,9 +1,16 @@
 package com.bloxy996.storesparks
 
-// EDIT ME if you move hosts (custom domain, org page, etc). Matches
-// vite.config.js's GitHub Pages base-path derivation
-// (`https://<user>.github.io/<repo>/`) plus the `#/spark-quick-add` route
-// App.jsx already listens for (see its "Deep link for the Android
-// home-screen widget" effect — the same route serves all three entry
-// points below, not just the widget).
-const val SPARK_CAPTURE_URL = "https://store-app-blxy.vercel.app/#/spark-quick-add"
+import android.content.Context
+import android.content.Intent
+
+// EDIT ME if you move hosts. Must match where the PWA is deployed.
+const val SPARK_APP_URL = "https://store-app-blxy.vercel.app/"
+
+// `?embed=spark` renders only the capture form (src/features/sparks/
+// SparkQuickCapture.jsx) — that's what the floating sheet shows.
+const val SPARK_CAPTURE_URL = "${SPARK_APP_URL}?embed=spark"
+
+// The one way every entry point (widget, tile, accessibility button,
+// launcher screen) opens the capture sheet.
+fun Context.captureIntent(): Intent =
+    Intent(this, SparkCaptureActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

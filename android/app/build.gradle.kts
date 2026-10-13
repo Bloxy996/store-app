@@ -31,7 +31,8 @@ android {
     }
 }
 
-// No dependencies{} block on purpose — see the file header. Total runtime
-// footprint of this app is: one Kotlin class, two tiny XML resources, and
-// whatever the AGP/Kotlin stdlib baseline costs (a few hundred KB), not
-// several MB of AndroidX/Material/WebView-wrapper libraries.
+dependencies {
+    // Custom Tabs: the floating capture sheet (SparkCaptureActivity). Small,
+    // and the only dependency — no AppCompat/Material/WebView wrapper.
+    implementation("androidx.browser:browser:1.8.0")
+}

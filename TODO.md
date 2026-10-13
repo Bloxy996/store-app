@@ -134,11 +134,13 @@ _(none)_
 
 ## Verify
 
-- **Android quick-capture widget and accessibility button.**
-  1. Build `android/` in Android Studio and install it; add the home-screen widget and Quick Settings tile, enable the accessibility service, and turn on its button.
-  2. Each entry point opens the PWA's spark capture form (`#/spark-quick-add`); capture a text spark and a screenshot spark from it.
-  3. Confirm the same sparks are visible and creatable from the laptop web app.
-  Note: The Android module has never been compiled against the real SDK, so expect to fix build errors first (`android/README.md`).
+- **Android quick-add sheet: widget, Quick Settings tile, accessibility button.**
+  1. Install the latest APK from the Releases page (uninstall the old one first; debug builds are signed per build). Open the Store Sparks icon once.
+  2. Long-press home screen → Widgets → Store Sparks and add the "Add a spark…" bar; add the "Add spark" Quick Settings tile; turn on Settings → Accessibility → Store Sparks and its button.
+  3. From inside another app, tap each of the three. Each should slide a sheet up over that app with the add-spark form (signed in, your categories autocomplete).
+  4. Add a text spark and a screenshot spark, tap Done (sheet closes back to the app you were in), and confirm both appear on the laptop.
+  5. Open the sheet again and tap Open app: the full PWA opens.
+  Note: Android build is only compiled by CI (no SDK where it was written); sheet behavior (partial Custom Tab, closing via `storesparks://`) is untested on a device. Opening the sheet runs the app's normal vault sync, so the form's Add button waits for sparks to load.
 - **Statements: sorted insert, dedupe, lookup, spellcheck (client-side).**
   1. Toggle a category into sorted mode in the Sparks category tree and open its sorter panel.
   2. Paste multiple phrases (one per line) into the multi-line input and insert: each lands before/after its closest phrase, and exact/near duplicates are reported instead of added.

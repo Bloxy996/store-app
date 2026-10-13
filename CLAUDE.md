@@ -166,9 +166,11 @@ full vault note. Stored tab-separated in `.store/spark.txt`
 normal Drive image uploads. `hooks/useSparks.js` handles its own
 load/save outside the main sync loop. UI:
 `features/sparks/SparksPanel.jsx` (browse) + `SparkCaptureForm.jsx`
-(capture — also behind the `#/spark-quick-add` deep link every Android
-entry point opens). See `android/README.md` for the three Android entry
-points.
+(capture — also behind the `#/spark-quick-add` deep link, and
+`SparkQuickCapture.jsx`, the compact `?embed=spark` view the Android
+entry points show in a floating Custom Tab sheet; `server/src/routes/
+auth.js` appends `?auth=` via the URL API so sign-in survives that query).
+See `android/README.md` for the three Android entry points.
 
 Any category can be made order-sensitive — the user toggles it on per
 category (an icon next to it in `SparksPanel.jsx`'s category tree), and
@@ -241,7 +243,7 @@ src/
 
   features/
     onboarding/, sidebar/, search/, tags/, bookmarks/, toc/
-    sparks/         sparkStore-backed SparksPanel.jsx, SparkCaptureForm.jsx,
+    sparks/         sparkStore-backed SparksPanel.jsx, SparkCaptureForm.jsx, SparkQuickCapture.jsx,
                      CategorySorterPanel.jsx — sorter-enabled categories (3.9)
     tools/          ToolsPanel.jsx — local-folder/PDF/image utilities (3.10)
     panes/          PaneNode.jsx (recursive split-pane), TabBar.jsx

@@ -22,6 +22,7 @@ import { PopoutNotePane } from './features/panes/PopoutNotePane.jsx';
 import { PopoutWindow } from './features/panes/PopoutWindow.jsx';
 import { SearchPanel } from './features/search/SearchPanel.jsx';
 import { ExplorerPanel } from './features/sidebar/ExplorerPanel.jsx';
+import { SparkQuickCapture, EMBED_SPARK } from './features/sparks/SparkQuickCapture.jsx';
 import { SparksPanel } from './features/sparks/SparksPanel.jsx';
 import { useSparks } from './hooks/useSparks.js';
 import { TagsPanel } from './features/tags/TagsPanel.jsx';
@@ -1399,6 +1400,9 @@ export default function App() {
   if (!sync.cacheLoaded) {
     const { label, pct } = loadingStepProps({ phase: 'opening', loaded: 0, total: 0 });
     return <OnboardingFlow step="loading" loadingLabel={label} loadingPct={pct} />;
+  }
+  if (EMBED_SPARK) {
+    return <SparkQuickCapture token={token} sparks={sparks.sparks} loaded={sparks.loaded} busy={sparks.busy} error={sparks.error} filesMeta={sync.filesMeta} getBody={vaultIndex.getBody} onSubmit={sparks.addSparkCapture} />;
   }
   if (sync.filesMeta.length === 0 && sync.syncing) {
     const { label, pct } = loadingStepProps(sync.syncProgress);

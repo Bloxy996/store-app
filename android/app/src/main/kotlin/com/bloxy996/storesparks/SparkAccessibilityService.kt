@@ -3,7 +3,6 @@ package com.bloxy996.storesparks
 import android.accessibilityservice.AccessibilityButtonController
 import android.accessibilityservice.AccessibilityService
 import android.content.Intent
-import android.net.Uri
 import android.view.accessibility.AccessibilityEvent
 
 // ---------------------------------------------------------------------------
@@ -16,7 +15,8 @@ import android.view.accessibility.AccessibilityEvent
 // This is genuinely lighter than a self-managed overlay would be: no
 // SYSTEM_ALERT_WINDOW permission, no foreground service, no persistent
 // notification, no touch/drag handling to get right — the system owns
-// all of that. The trade-off is less control over exactly how the button
+// all of that. Tapping it opens the floating capture sheet
+// (SparkCaptureActivity). The trade-off is less control over exactly how the button
 // looks/behaves, which varies a bit by Android version and OEM (see
 // android/README.md).
 //
@@ -34,7 +34,7 @@ class SparkAccessibilityService : AccessibilityService() {
         val controller = accessibilityButtonController
         val callback = object : AccessibilityButtonController.AccessibilityButtonCallback() {
             override fun onClicked(controller: AccessibilityButtonController) {
-                openCaptureForm()
+                startActivity(captureIntent())
             }
         }
         controller.registerAccessibilityButtonCallback(callback)
@@ -53,11 +53,5 @@ class SparkAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {
         // No-op — nothing to tear down beyond what onUnbind already handles.
-    }
-
-    private fun openCaptureForm() {
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(SPARK_CAPTURE_URL))
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        startActivity(intent)
     }
 }

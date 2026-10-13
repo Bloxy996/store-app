@@ -1,7 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Store Sparks</string>
-    <string name="widget_label">+ Spark</string>
+    <string name="widget_label">Add a spark…</string>
+    <string name="widget_description">Tap to add a spark in a floating sheet over any app.</string>
     <string name="tile_label">Add spark</string>
-    <string name="accessibility_service_description">Adds a floating accessibility button that opens the Store app\'s quick spark-capture form. Reads no screen content — it only listens for the button being tapped.</string>
+    <string name="open_full_app">Open full app</string>
+    <string name="main_intro">Store Sparks adds a quick-add sheet to your phone. Add the widget from the home-screen widget picker, add the \"Add spark\" tile in Quick Settings, and turn on the accessibility button below.</string>
+    <string name="main_add_now">Add a spark now</string>
+    <string name="main_accessibility">Turn on the accessibility button</string>
+    <string name="main_open_app">Open the full app</string>
+    <string name="accessibility_service_description">Adds a floating accessibility button that opens the Store app\'s quick spark-capture sheet. Reads no screen content — it only listens for the button being tapped.</string>
 </resources>

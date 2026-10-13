@@ -1,10 +1,13 @@
 # Store Sparks companion (Android)
 
-Three ways to jump straight into the Sparks quick-capture form
-(`#/spark-quick-add`, App.jsx's own deep-link handler) without opening the
-app normally. None of them have their own capture logic, auth, or Drive
-access — every one of them just opens the same web app, in the same
-signed-in session, to the same form as using the app normally.
+Three ways to add a spark without opening the app: each opens the same
+**floating sheet** over whatever app you're in. The sheet is the PWA's real
+capture form (`?embed=spark`, `SparkQuickCapture.jsx`) in a *partial Chrome
+Custom Tab*: same Chrome session and vault, so no separate sign-in, and no
+capture/auth/Drive logic in this app. `SparkCaptureActivity.kt` opens it;
+inside, **Open app** (or the tab's ⋮ menu → Open full app) jumps to the full
+PWA, **Done** closes it. Browsers without partial-tab support show the
+same page full-screen instead.
 
 | | Where | Toggled from |
 |---|---|---|
@@ -12,15 +15,14 @@ signed-in session, to the same form as using the app normally.
 | **Quick Settings tile** | Two swipes down, from inside any app | The Quick Settings editor |
 | **Floating accessibility button** | Drawn on top of whatever app you're in | Settings → Accessibility |
 
-There's no Activity anywhere in this app and no app-drawer icon — you add
-each piece from wherever Android surfaces that kind of component, not by
-"opening" an app.
+The app also has a launcher icon (`MainActivity.kt`) with buttons for the
+one-time setup (accessibility settings, open sheet, open app).
 
 ## 1. The widget
 
 Long-press your home screen → Widgets → Store Sparks. Tap it, it opens the
-capture form. `SparkWidgetProvider.kt` — the whole thing is one
-`AppWidgetProvider` firing a plain `ACTION_VIEW` intent.
+sheet. `SparkWidgetProvider.kt`. It looks like an "Add a spark…" bar, but
+Android widgets can't hold a text field, so typing happens in the sheet.
 
 ## 2. The Quick Settings tile
 
@@ -33,7 +35,7 @@ from inside any app instead of the home screen. `SparkTileService.kt`.
 This is Android's own **Accessibility Button** system, not a hand-drawn
 overlay — turn it on in **Settings → Accessibility → Store Sparks**, and
 the OS itself draws a floating (or nav-bar, depending on your navigation
-mode) button system-wide; tap it and it opens the capture form.
+mode) button system-wide; tap it and it opens the sheet.
 `SparkAccessibilityService.kt`.
 
 Using the real accessibility-button API instead of a self-managed
@@ -70,12 +72,8 @@ your screen, it only listens for the button being tapped.
 
 ## Before building
 
-Open `app/src/main/kotlin/com/bloxy996/storesparks/SparkConfig.kt` and
-check `SPARK_CAPTURE_URL` matches where the PWA is actually deployed —
-it's currently set to `https://bloxy996.github.io/store-app/#/spark-quick-add`,
-matching `vite.config.js`'s GitHub Pages base-path derivation (all three
-pieces above read this one constant). Change it if you're on a custom
-domain.
+Check `SPARK_APP_URL` in `SparkConfig.kt` matches where the PWA is
+deployed (currently the Vercel site). All entry points read it.
 
 ## Building
 

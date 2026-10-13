@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Invisible host for SparkCaptureActivity: the visible UI is the Custom Tab it opens. -->
+    <style name="Theme.SparkTransparent" parent="android:Theme.Translucent.NoTitleBar">
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+</resources>

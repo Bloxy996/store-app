@@ -23,6 +23,14 @@ function cleanupExpiredStates() {
   }
 }
 
+// returnTo may already carry a query/hash (e.g. ?embed=spark), so set the
+// param properly instead of blindly appending `?auth=...`.
+function withAuth(returnTo, status) {
+  const url = new URL(returnTo);
+  url.searchParams.set('auth', status);
+  return url.toString();
+}
+
 function isAllowedReturnTo(returnTo) {
   try {
     const url = new URL(returnTo);
@@ -48,7 +56,7 @@ router.get('/auth/callback', async (req, res) => {
   const returnTo = pending?.returnTo || config.frontendUrls[0];
 
   if (error || !code || !pending) {
-    res.redirect(`${returnTo}?auth=error`);
+    res.redirect(withAuth(returnTo, 'error'));
     return;
   }
 
@@ -59,7 +67,7 @@ router.get('/auth/callback', async (req, res) => {
       // Google ever omits it there's nothing useful this session can do
       // later than re-auth immediately, so fail loudly here rather than
       // storing a session that will 401 on first token refresh.
-      res.redirect(`${returnTo}?auth=error`);
+      res.redirect(withAuth(returnTo, 'error'));
       return;
     }
     const session = await getSession(req, res);
@@ -67,10 +75,10 @@ router.get('/auth/callback', async (req, res) => {
     session.accessToken = tokens.access_token;
     session.accessTokenExpiresAt = Date.now() + Math.max(0, (tokens.expires_in || 3600) - 60) * 1000;
     await session.save();
-    res.redirect(`${returnTo}?auth=success`);
+    res.redirect(withAuth(returnTo, 'success'));
   } catch (err) {
     console.error('OAuth callback failed:', err);
-    res.redirect(`${returnTo}?auth=error`);
+    res.redirect(withAuth(returnTo, 'error'));
   }
 });
 

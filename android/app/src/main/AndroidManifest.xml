@@ -2,20 +2,53 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
-      That's the whole permission list. Neither the widget nor the tile
-      nor the accessibility-button service need anything of their own —
-      the OS resolves ACTION_VIEW, and the accessibility button is drawn
-      and positioned by the system, not by this app (SYSTEM_ALERT_WINDOW
-      and a foreground service were needed by an earlier, self-drawn
-      overlay design; both are gone now that the accessibility button
-      does that job instead — see android/README.md).
+      No permissions: the capture sheet is a Chrome Custom Tab (the browser
+      does the networking) and the accessibility button is drawn by the
+      system. <queries> only lets SparkCaptureActivity see which installed
+      browsers support Custom Tabs.
     -->
+    <queries>
+        <intent>
+            <action android:name="android.support.customtabs.action.CustomTabsService" />
+        </intent>
+    </queries>
 
     <application
         android:allowBackup="false"
         android:icon="@drawable/ic_spark"
         android:label="@string/app_name"
         android:supportsRtl="true">
+
+        <!-- Launcher screen: app icon + one-time setup buttons. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          The floating capture sheet (see SparkCaptureActivity.kt). Exported
+          only for its storesparks:// scheme, which the page uses to say
+          "done"/"open app"; singleTask so those land in onNewIntent and pop
+          the Custom Tab above it.
+        -->
+        <activity
+            android:name=".SparkCaptureActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
+            android:theme="@style/Theme.SparkTransparent">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="storesparks" />
+            </intent-filter>
+        </activity>
 
         <!--
           android:exported="true" is required here (and enforced since
@@ -37,7 +70,7 @@
         </receiver>
 
         <!--
-          Quick Settings tile — a plain "open the capture form" shortcut.
+          Quick Settings tile — opens the capture sheet.
           Must be exported + BIND_QUICK_SETTINGS_TILE-protected (system
           enforced, not a user-facing permission) for the shade to bind
           to it at all.
