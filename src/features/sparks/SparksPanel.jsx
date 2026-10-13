@@ -8,10 +8,17 @@ import { SparkCaptureForm } from './SparkCaptureForm.jsx';
 
 const CategorySorterPanel = lazy(() => import('./CategorySorterPanel.jsx').then((m) => ({ default: m.CategorySorterPanel })));
 
-function SparkScreenshotThumb({ token, fileId }) {
+function SparkScreenshotThumb({ token, fileId, onOpen }) {
   const { url } = useDriveImageUrl(token, fileId);
   if (!url) return <div className="spark-thumb spark-thumb-loading" />;
-  return <img className="spark-thumb" src={url} alt="" />;
+  const img = <img className="spark-thumb" src={url} alt="" />;
+  return onOpen ? (
+    <button className="spark-thumb-btn" title="Open full image" onClick={onOpen}>
+      {img}
+    </button>
+  ) : (
+    img
+  );
 }
 
 // `focusFileId`, when set (via a note's "N sparks" indicator — see
@@ -110,7 +117,7 @@ const SparksPanel = React.memo(function SparksPanel({ token, sparks, categoryTre
             {visible.length === 0 && <p className="muted small empty-hint">No sparks here.</p>}
             {visible.map((s) => (
               <div className="spark-row" key={s.id}>
-                {s.screenshotFileId && <SparkScreenshotThumb token={token} fileId={s.screenshotFileId} />}
+                {s.screenshotFileId && <SparkScreenshotThumb token={token} fileId={s.screenshotFileId} onOpen={filesMeta.some((ff) => ff.id === s.screenshotFileId) ? () => onOpenNote(s.screenshotFileId) : undefined} />}
                 <div className="spark-row-body">
                   {s.text && <div className="spark-row-text">{s.text}</div>}
                   <div className="spark-row-meta">

@@ -212,15 +212,27 @@
 }
 
 .spark-thumb {
-  width: 44px;
-  height: 44px;
-  object-fit: cover;
+  width: 96px;
+  height: auto;
+  max-height: 160px;
+  object-fit: contain; /* show the whole screenshot — cover cropped it to a square */
   border-radius: 4px;
   flex-shrink: 0;
+  align-self: flex-start;
   background: var(--bg-3);
 }
 
+button.spark-thumb-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: zoom-in;
+  flex-shrink: 0;
+  align-self: flex-start;
+}
+
 .spark-thumb-loading {
+  min-height: 44px;
   opacity: 0.5;
 }
 
