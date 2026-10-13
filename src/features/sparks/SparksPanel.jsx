@@ -1,4 +1,5 @@
-import React, { Suspense, lazy, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 import { IconLink2, IconLoader, IconPlus, IconSliders, IconTrash, IconX, IconZap } from '../../components/icons.jsx';
 import { useDriveImageUrl } from '../../hooks/useDriveImageUrl.js';
@@ -8,16 +9,44 @@ import { SparkCaptureForm } from './SparkCaptureForm.jsx';
 
 const CategorySorterPanel = lazy(() => import('./CategorySorterPanel.jsx').then((m) => ({ default: m.CategorySorterPanel })));
 
-function SparkScreenshotThumb({ token, fileId, onOpen }) {
+// Spark screenshots live in `.store/` (not in filesMeta), so they can't open
+// through the normal file/asset viewer — clicking the thumbnail shows the
+// full image in a lightbox that reuses ImageViewer.css.
+function SparkScreenshotThumb({ token, fileId }) {
   const { url } = useDriveImageUrl(token, fileId);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [open]);
   if (!url) return <div className="spark-thumb spark-thumb-loading" />;
-  const img = <img className="spark-thumb" src={url} alt="" />;
-  return onOpen ? (
-    <button className="spark-thumb-btn" title="Open full image" onClick={onOpen}>
-      {img}
-    </button>
-  ) : (
-    img
+  return (
+    <>
+      <button className="spark-thumb-btn" title="View full image" onClick={() => setOpen(true)}>
+        <img className="spark-thumb" src={url} alt="" />
+      </button>
+      {open &&
+        createPortal(
+          <div className="image-viewer-scrim" onClick={() => setOpen(false)}>
+            <div className="image-viewer" onClick={(e) => e.stopPropagation()}>
+              <div className="image-viewer-header">
+                <span className="image-viewer-name">Screenshot</span>
+                <div className="image-viewer-header-actions">
+                  <button className="icon-btn" title="Close" onClick={() => setOpen(false)}>
+                    <IconX size={15} />
+                  </button>
+                </div>
+              </div>
+              <div className="image-viewer-body">
+                <img src={url} alt="" />
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
+    </>
   );
 }
 
@@ -117,7 +146,7 @@ const SparksPanel = React.memo(function SparksPanel({ token, sparks, categoryTre
             {visible.length === 0 && <p className="muted small empty-hint">No sparks here.</p>}
             {visible.map((s) => (
               <div className="spark-row" key={s.id}>
-                {s.screenshotFileId && <SparkScreenshotThumb token={token} fileId={s.screenshotFileId} onOpen={filesMeta.some((ff) => ff.id === s.screenshotFileId) ? () => onOpenNote(s.screenshotFileId) : undefined} />}
+                {s.screenshotFileId && <SparkScreenshotThumb token={token} fileId={s.screenshotFileId} />}
                 <div className="spark-row-body">
                   {s.text && <div className="spark-row-text">{s.text}</div>}
                   <div className="spark-row-meta">
